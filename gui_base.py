@@ -1,0 +1,307 @@
+"""
+gui_base.py -- LipSyncGUI 기본 클래스
+테마, 설정 저장/불러오기, 스케일, 트레이 아이콘
+"""
+import os
+import json
+import threading
+import winreg
+import tkinter as tk
+import tkinter.messagebox as mb
+
+from win32_utils import find_potplayer_hwnd
+
+
+class LipSyncGUIBase:
+    # 다크 테마
+    DARK = dict(
+        BG="#0e0e0e", BG2="#161616", BG3="#1e1e1e",
+        BORDER="#2a2a2a", TEXT="#e8e8e8",
+        TEXT_DIM="#555555", TEXT_MID="#888888",
+    )
+    # 라이트 테마
+    LIGHT = dict(
+        BG="#f5f5f5", BG2="#e8e8e8", BG3="#d8d8d8",
+        BORDER="#bbbbbb", TEXT="#111111",
+        TEXT_DIM="#666666", TEXT_MID="#333333",
+    )
+    ACCENT  = "#00c8e0"
+    ACCENT2 = "#e03c3c"
+    ACCENT3 = "#5ec44a"
+
+    W, H = 340, 410
+
+    SCALES = {
+        "소": dict(w=340, h=410, scale=1.0),
+        "중": dict(w=408, h=492, scale=1.2),
+        "대": dict(w=476, h=574, scale=1.4),
+    }
+
+    APP_DIR  = os.path.join(os.environ.get("APPDATA", ""), "LipSyncMonitor")
+    CFG_FILE = os.path.join(APP_DIR, "settings.json")
+
+    STARTUP_REG  = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    STARTUP_NAME = "LipSyncMonitor"
+
+    def __init__(self, root: tk.Tk, state_queue, cmd_queue, stop_flag,
+                 lip_queue=None, audio_queue=None):
+        self.root         = root
+        self.state_queue  = state_queue
+        self.cmd_queue    = cmd_queue
+        self.stop_flag    = stop_flag
+        self._lip_queue   = lip_queue
+        self._audio_queue = audio_queue
+        self._running          = False
+        self._closing          = False
+        self._popup_open       = False
+        self._gear_menu_open   = False
+        self._gear_menu_frame  = None
+        self._popup_after_id   = None
+        self._processes        = []
+        self._tray             = None
+        self._tray_thread      = None
+        self._startup_var   = tk.BooleanVar(value=self._is_startup_registered())
+        self._autostart_var = tk.BooleanVar(value=self._load_setting("autostart", False))
+        self._darkmode_var  = tk.BooleanVar(value=self._load_setting("darkmode", True))
+        self._scale_var     = tk.StringVar(value=self._load_setting("scale", "중"))
+        self._apply_scale()
+        self._apply_theme()
+        self._register_app_id()
+        self._build_window()
+        self._build_ui()
+        self._setup_tray()
+        self._refresh()
+        self.root.after(100, self._check_auth_on_start)
+
+    def _apply_scale(self):
+        s = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])
+        r = s["scale"]
+        self.W        = s["w"]
+        self.H        = s["h"]
+        self.F_TITLE  = max(8, round(13 * r))
+        self.F_MONO   = max(7, round(9  * r))
+        self.F_MONO_S = max(7, round(8  * r))
+        self.F_OFFSET = max(16, round(32 * r))
+        self.F_GEAR   = max(8, round(10 * r))
+
+    def _toggle_scale(self, size):
+        self._scale_var.set(size)
+        self._apply_scale()
+        self._save_settings()
+        if self._tray:
+            try: self._tray.stop()
+            except Exception: pass
+            self._tray = None
+        for w in self.root.winfo_children():
+            w.destroy()
+        self._theme_widgets = []
+        self.root.geometry(f"{self.W}x{self.H}")
+        self.root.configure(bg=self.BG)
+        self._build_ui()
+        self._setup_tray()
+
+    def _apply_theme(self):
+        t = self.DARK if self._darkmode_var.get() else self.LIGHT
+        self.BG       = t["BG"]
+        self.BG2      = t["BG2"]
+        self.BG3      = t["BG3"]
+        self.BORDER   = t["BORDER"]
+        self.TEXT     = t["TEXT"]
+        self.TEXT_DIM = t["TEXT_DIM"]
+        self.TEXT_MID = t["TEXT_MID"]
+
+    def _toggle_darkmode(self):
+        self._apply_theme()
+        self._save_settings()
+        self.root.configure(bg=self.BG)
+
+        COLOR = {
+            "BG": self.BG, "BG2": self.BG2, "BG3": self.BG3,
+            "BORDER": self.BORDER, "TEXT": self.TEXT,
+            "TEXT_DIM": self.TEXT_DIM, "TEXT_MID": self.TEXT_MID,
+            "ACCENT": self.ACCENT, "ACCENT2": self.ACCENT2,
+            "GEAR_FG": self.ACCENT if self._darkmode_var.get() else self.TEXT,
+        }
+
+        try:
+            gear_fg = self.ACCENT if self._darkmode_var.get() else self.TEXT
+            self._gear_btn.config(fg=gear_fg, activeforeground=gear_fg)
+        except Exception:
+            pass
+
+        for item in self._theme_widgets:
+            w, bg, fg, abg, afg, obg = item
+            try:
+                kw = {}
+                if bg:  kw["bg"]                = COLOR.get(bg, bg)
+                if fg:  kw["fg"]                = COLOR.get(fg, fg)
+                if abg: kw["activebackground"]  = COLOR.get(abg, abg)
+                if afg: kw["activeforeground"]  = COLOR.get(afg, afg)
+                if obg: kw["highlightbackground"] = COLOR.get(obg, obg)
+                if kw:  w.config(**kw)
+            except Exception:
+                pass
+
+        def update_widget_colors(widget):
+            try:
+                wtype = widget.winfo_class()
+                if wtype == "Toplevel":
+                    widget.config(bg=self.BG)
+                elif wtype == "Frame":
+                    widget.config(bg=self.BG2)
+                elif wtype == "Label":
+                    widget.config(bg=self.BG, fg=self.TEXT)
+                elif wtype == "Checkbutton":
+                    widget.config(bg=self.BG2, fg=self.TEXT,
+                                  selectcolor=self.BG3,
+                                  activebackground=self.BG2,
+                                  activeforeground=self.TEXT)
+                elif wtype == "Button":
+                    widget.config(bg=self.BG3, fg=self.TEXT,
+                                  activebackground=self.BORDER)
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                update_widget_colors(child)
+
+        for toplevel in self.root.winfo_children():
+            if isinstance(toplevel, tk.Toplevel):
+                try:
+                    toplevel.configure(bg=self.BG)
+                    update_widget_colors(toplevel)
+                except Exception:
+                    pass
+
+        try:
+            ic_size = round(32 * self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"])
+            self._icon_canvas.config(bg=self.BG)
+            self._icon_canvas.delete("all")
+            self._icon_canvas.create_oval(1, 1, ic_size-1, ic_size-1,
+                fill=self.BG3, outline=self.ACCENT, width=2)
+            r2 = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+            self._icon_canvas.create_polygon(
+                round(12*r2), round(8*r2),
+                round(12*r2), round(24*r2),
+                round(26*r2), round(16*r2),
+                fill=self.ACCENT, outline="")
+        except Exception:
+            pass
+
+    def _load_setting(self, key, default):
+        try:
+            with open(self.CFG_FILE, "r") as f:
+                return json.load(f).get(key, default)
+        except Exception:
+            return default
+
+    def _load_pos(self):
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        try:
+            with open(self.CFG_FILE, "r") as f:
+                data = json.load(f)
+            x = max(0, min(int(data["x"]), sw - self.W))
+            y = max(0, min(int(data["y"]), sh - self.H))
+            return x, y
+        except Exception:
+            return (sw - self.W) // 2, (sh - self.H) // 2
+
+    def _save_settings(self):
+        try:
+            os.makedirs(self.APP_DIR, exist_ok=True)
+            existing = {}
+            try:
+                with open(self.CFG_FILE, "r") as f:
+                    existing = json.load(f)
+            except Exception:
+                pass
+            existing.update({
+                "x":         self.root.winfo_x(),
+                "y":         self.root.winfo_y(),
+                "autostart": self._autostart_var.get(),
+                "darkmode":  self._darkmode_var.get(),
+                "scale":     self._scale_var.get(),
+            })
+            with open(self.CFG_FILE, "w") as f:
+                json.dump(existing, f)
+        except Exception:
+            pass
+
+    def _save_pos(self): self._save_settings()
+
+    def _place_popup(self, popup, pw, ph):
+        popup.withdraw()
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()  - pw) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - ph) // 2
+        popup.geometry(f"{pw}x{ph}+{x}+{y}")
+        popup.deiconify()
+
+    def _is_startup_registered(self):
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.STARTUP_REG)
+            winreg.QueryValueEx(key, self.STARTUP_NAME)
+            winreg.CloseKey(key)
+            return True
+        except Exception:
+            return False
+
+    def _toggle_startup(self):
+        try:
+            import sys
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 self.STARTUP_REG, 0, winreg.KEY_SET_VALUE)
+            if self._startup_var.get():
+                exe_path = (sys.executable
+                            if getattr(sys, "frozen", False)
+                            else os.path.abspath(__file__))
+                winreg.SetValueEx(key, self.STARTUP_NAME, 0,
+                                  winreg.REG_SZ, f'"{exe_path}"')
+            else:
+                try: winreg.DeleteValue(key, self.STARTUP_NAME)
+                except Exception: pass
+            winreg.CloseKey(key)
+        except Exception as e:
+            mb.showerror("오류", f"시작프로그램 설정 실패:\n{e}")
+            self._startup_var.set(not self._startup_var.get())
+
+    def _setup_tray(self):
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+
+            if self._tray:
+                try: self._tray.stop()
+                except Exception: pass
+                self._tray = None
+
+            img  = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.ellipse([2, 2, 62, 62], fill="#1e1e1e", outline="#00c8e0", width=4)
+            draw.polygon([(20, 14), (20, 50), (52, 32)], fill="#00c8e0")
+
+            def tray_toggle_sync(icon, item):
+                self.root.after(0, self._toggle)
+
+            def tray_sync_label(item):
+                return "⏹  싱크 중지" if self._running else "▶  싱크 시작"
+
+            menu = pystray.Menu(
+                pystray.MenuItem("Auto Sync 열기", self._tray_show, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(tray_sync_label, tray_toggle_sync),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("종료", self._tray_quit),
+            )
+            self._tray = pystray.Icon("AutoSync", img, "Auto Sync", menu)
+            self._tray_thread = threading.Thread(target=self._tray.run, daemon=True)
+            self._tray_thread.start()
+            self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+
+        except ImportError:
+            self._tray = None
+            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _hide_to_tray(self):
+        self._save_pos()
+        self.root.withdraw()

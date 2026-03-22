@@ -1,0 +1,88 @@
+name: Build EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      AUTH_SERVER_URL: ${{ secrets.AUTH_SERVER_URL }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install opencv-python numpy sounddevice scipy mss pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify pyinstaller pyarmor
+
+      - name: 아이콘 생성
+        run: python scripts/make_icon.py
+
+      - name: 버전 정보 생성
+        run: python scripts/make_version.py
+
+      - name: 코드 난독화 (PyArmor)
+        run: |
+          pyarmor gen --output dist_obf win32_utils.py processes.py gui_base.py gui_ui.py gui_run.py auth.py potplayer_lipsync_mp.py
+        env:
+          AUTH_SERVER_URL: ${{ secrets.AUTH_SERVER_URL }}
+
+      - name: PyInstaller EXE 빌드
+        run: >
+          pyinstaller
+          --onefile
+          --noconsole
+          --name "Auto Sync"
+          --icon "app.ico"
+          --version-file "version_info.txt"
+          --hidden-import="win32_utils"
+          --hidden-import="processes"
+          --hidden-import="gui_base"
+          --hidden-import="gui_ui"
+          --hidden-import="gui_run"
+          --hidden-import="auth"
+          --hidden-import="cv2"
+          --hidden-import="sounddevice"
+          --hidden-import="scipy.signal"
+          --hidden-import="mss"
+          --hidden-import="win32api"
+          --hidden-import="win32con"
+          --hidden-import="tkinter"
+          --hidden-import="multiprocessing"
+          --hidden-import="comtypes"
+          --hidden-import="comtypes.client"
+          --hidden-import="winreg"
+          --hidden-import="psutil"
+          --hidden-import="pyaudiowpatch"
+          --hidden-import="pystray"
+          --hidden-import="PIL"
+          --hidden-import="pyarmor_runtime_000000"
+          --collect-data cv2
+          --add-data "lbpcascade_animeface.xml;."
+          --add-data "dist_obf/pyarmor_runtime_000000;pyarmor_runtime_000000"
+          dist_obf/potplayer_lipsync_mp.py
+        env:
+          AUTH_SERVER_URL: ${{ secrets.AUTH_SERVER_URL }}
+
+      - name: 빌드 결과 확인
+        run: dir dist\
+
+      - name: EXE 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoSync-EXE
+          path: dist\Auto Sync.exe
+          retention-days: 3
+

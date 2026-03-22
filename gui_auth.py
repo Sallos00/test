@@ -35,13 +35,39 @@ class LipSyncGUIAuth:
 
     def _after_auth_ok(self):
         """인증 완료 후 정상 실행 흐름 시작."""
-        self._auth_ok = True  # 인증 완료 플래그
+        self._auth_ok = True
         if self._autostart_var.get():
             self.root.after(500, self._toggle)
         threading.Thread(
             target=self._monitor_for_popup,
             kwargs={"wait_for_exit": self._autostart_var.get()},
             daemon=True).start()
+        # 5분마다 차단 여부 백그라운드 확인
+        threading.Thread(target=self._monitor_auth, daemon=True).start()
+
+    def _monitor_auth(self):
+        """5분마다 서버에서 차단 여부 확인. 차단 시 싱크 중지 + 차단 팝업."""
+        import time as _time
+        while not self._closing:
+            _time.sleep(300)  # 5분
+            if self._closing: return
+            try:
+                local = _auth_module.get_local_auth()
+                if not local: return
+                resp = _auth_module.check_auth(local["pc_id"], local["token"])
+                s = resp.get("status", "")
+                if s == _auth_module.AuthStatus.REVOKED:
+                    _auth_module.save_local_status(_auth_module.AuthStatus.REVOKED)
+                    def _on_revoked():
+                        # 싱크 중지
+                        if self._running:
+                            self._toggle()
+                        # 차단 팝업
+                        self._show_auth_blocked_popup()
+                    self.root.after(0, _on_revoked)
+                    return
+            except Exception:
+                pass
 
     def _show_auth_request_popup(self):
         """첫 실행 인증 요청 팝업."""

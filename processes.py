@@ -81,7 +81,7 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
             faces = cascade.detectMultiScale(
                 cv2.equalizeHist(gray),
                 scaleFactor=1.1,
-                minNeighbors=5,
+                minNeighbors=7,
                 minSize=(60, 60),
             )
             if len(faces) > 0:

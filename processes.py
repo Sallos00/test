@@ -48,7 +48,15 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
                 w = rect.right - rect.left
                 h = rect.bottom - rect.top
                 if w > 100 and h > 100:
-                    return {"left": pt.x, "top": pt.y, "width": w, "height": h}
+                    # 상하좌우 10% 제외 (자막/레터박스/UI 제거)
+                    margin_x = int(w * 0.10)
+                    margin_y = int(h * 0.10)
+                    return {
+                        "left":   pt.x + margin_x,
+                        "top":    pt.y + margin_y,
+                        "width":  w - margin_x * 2,
+                        "height": h - margin_y * 2,
+                    }
         except Exception:
             pass
         return sct.monitors[1]
@@ -232,11 +240,26 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
                 frames_per_buffer=int(native_sr * 0.05),
             )
 
+            # 음성 주파수 필터 미리 생성 (300~3400Hz 대역통과)
+            try:
+                from scipy.signal import butter
+                _sos = butter(4, [300, 3400], btype='bandpass',
+                              fs=native_sr, output='sos')
+            except Exception:
+                _sos = None
+
             while not stop_flag.value:
                 data = stream.read(int(native_sr * 0.05), exception_on_overflow=False)
                 arr  = np.frombuffer(data, dtype=np.float32)
                 if ch > 1:
                     arr = arr.reshape(-1, ch).mean(axis=1)
+                # 음성 주파수 필터링 적용
+                if _sos is not None:
+                    try:
+                        from scipy.signal import sosfilt
+                        arr = sosfilt(_sos, arr)
+                    except Exception:
+                        pass
                 rms = float(np.sqrt(np.mean(arr ** 2)))
                 queue_put(audio_queue, (time.time(), rms))
 

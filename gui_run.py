@@ -325,19 +325,41 @@ class LipSyncGUIRun:
 
         if getattr(self, "_auto_skip_running", False):
             auto_latest = None
+            auto_toasts = []
             while True:
                 try:
-                    auto_latest = self._auto_state_queue.get_nowait()
+                    item = self._auto_state_queue.get_nowait()
+                    auto_latest = item
+                    n = item.get("notify")
+                    if n:
+                        auto_toasts.append(n)
                 except Exception:
                     break
+            for title, msg in auto_toasts:
+                threading.Thread(
+                    target=self._toast,
+                    args=(title, msg),
+                    daemon=True).start()
             if auto_latest:
                 logs = auto_latest.get("log_lines", [])
                 self._log_lines = collections.deque(logs, maxlen=100)
 
         latest = None
+        main_toasts = []
         while True:
-            try: latest = self.state_queue.get_nowait()
-            except Exception: break
+            try:
+                item = self.state_queue.get_nowait()
+                latest = item
+                n = item.get("notify")
+                if n:
+                    main_toasts.append(n)
+            except Exception:
+                break
+        for title, msg in main_toasts:
+            threading.Thread(
+                target=self._toast,
+                args=(title, msg),
+                daemon=True).start()
 
         if latest:
             pot_ok  = latest.get("potplayer_ok", False)
@@ -347,14 +369,6 @@ class LipSyncGUIRun:
             status  = latest.get("status", "대기 중")
             corr    = latest.get("correction_ms", 0)
             logs    = latest.get("log_lines", [])
-            notify  = latest.get("notify", None)
-
-            # 알림 팝업 (P3에서 요청 시)
-            if notify:
-                threading.Thread(
-                    target=self._toast,
-                    args=(notify[0], notify[1]),
-                    daemon=True).start()
 
             c = self.ACCENT3 if pot_ok else self.ACCENT2
             t = "연결됨" if pot_ok else "미감지"

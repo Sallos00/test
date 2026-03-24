@@ -982,49 +982,9 @@ class LipSyncGUIUI:
 
         tk.Frame(card, bg=self.BORDER, height=1).pack(fill="x", pady=(round(8*r), round(4*r)))
 
-        size_row = tk.Frame(card, bg=self.BG2)
+         tk.Checkbutton(oped_card,
 
-        size_row.pack(anchor="w")
-
-        tk.Label(size_row, text="UI 크기", font=("Consolas", F_MONO),
-
-                 bg=self.BG2, fg=self.TEXT_MID).pack(side="left", padx=(0, round(10*r)))
-
-        for size in ["소", "중", "대"]:
-
-            tk.Radiobutton(size_row, text=size,
-
-                           variable=tmp_scale, value=size,
-
-                           font=("Consolas", F_MONO),
-
-                           bg=self.BG2, fg=self.TEXT,
-
-                           selectcolor=self.BG3,
-
-                           activebackground=self.BG2,
-
-                           activeforeground=self.TEXT,
-
-                           relief="flat", cursor="hand2").pack(side="left", padx=round(4*r))
-
-        # ── OP/ED 자동 스킵 카드 ───────────────────────────────────────────────
-
-        tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", padx=PAD, pady=(round(10*r), 0))
-
-        oped_card = tk.Frame(popup, bg=self.BG2, padx=PAD2, pady=PAD)
-
-        oped_card.pack(fill="x", padx=PAD, pady=(round(6*r), 0))
-
-        tk.Label(oped_card, text="OP/ED 자동 스킵",
-
-                 font=("Segoe UI", max(8, round(9*r)), "bold"),
-
-                 bg=self.BG2, fg=self.TEXT).pack(anchor="w", pady=(0, round(4*r)))
-
-        tk.Checkbutton(oped_card,
-
-                       text="앞뒤 3분 구간 노래 감지 시 자동 스킵",
+                       text="OP/ED 자동 스킵",
 
                        variable=tmp_oped_auto,
 
@@ -1069,6 +1029,35 @@ class LipSyncGUIUI:
                  font=("Consolas", max(7, F_MONO - 1)),
 
                  bg=self.BG2, fg=self.TEXT_DIM).pack(side="left", padx=(round(6*r), 0))
+
+        
+
+        size_row = tk.Frame(card, bg=self.BG2)
+
+        size_row.pack(anchor="w")
+
+        tk.Label(size_row, text="UI 크기", font=("Consolas", F_MONO),
+
+                 bg=self.BG2, fg=self.TEXT_MID).pack(side="left", padx=(0, round(10*r)))
+
+        for size in ["소", "중", "대"]:
+
+            tk.Radiobutton(size_row, text=size,
+
+                           variable=tmp_scale, value=size,
+
+                           font=("Consolas", F_MONO),
+
+                           bg=self.BG2, fg=self.TEXT,
+
+                           selectcolor=self.BG3,
+
+                           activebackground=self.BG2,
+
+                           activeforeground=self.TEXT,
+
+                           relief="flat", cursor="hand2").pack(side="left", padx=round(4*r))
+
 
         # ── 저장 버튼 ──────────────────────────────────────────────────────────
 

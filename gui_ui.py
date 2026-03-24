@@ -900,7 +900,7 @@ class LipSyncGUIUI:
 
         pw = round(300 * r)
 
-        ph = round(380 * r)   # OP/ED 섹션 추가로 기존 300 → 380
+        ph = round(360 * r)   # OP/ED 섹션 추가로 기존 300 → 380
 
         self._place_popup(popup, pw, ph)
 

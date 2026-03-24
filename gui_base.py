@@ -52,15 +52,15 @@ class LipSyncGUIBase:
 
     ACCENT3 = "#5ec44a"
 
-    W, H = 340, 410
+    W, H = 340, 440
 
     SCALES = {
 
-        "소": dict(w=340, h=410, scale=1.0),
+        "소": dict(w=340, h=440, scale=1.0),
 
-        "중": dict(w=408, h=492, scale=1.2),
+        "중": dict(w=408, h=528, scale=1.2),
 
-        "대": dict(w=476, h=574, scale=1.4),
+        "대": dict(w=476, h=616, scale=1.4),
 
     }
 

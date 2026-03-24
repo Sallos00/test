@@ -231,7 +231,7 @@ class LipSyncGUIRun:
                                activebackground=self.BORDER,
                                state="normal")
         self._proc_lbl.config(
-            text=f"P1·P2·P3 실행 중  (PID {', '.join(str(p.pid) for p in self._processes)})",
+            text="P1·P2·P3 실행 중",
             fg=self.ACCENT3)
         self._toast("🎬 Auto Sync", "싱크 보정이 시작되었습니다.")
 

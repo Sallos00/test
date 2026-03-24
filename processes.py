@@ -544,7 +544,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     SKIP_COOLDOWN  = 120    # 스킵 후 재스킵 방지 대기(초)
 
-    MUSIC_WINDOW   = 15.0   # 음악 감지 버퍼 길이(초)
+    MUSIC_WINDOW   = 5.0   # 음악 감지 버퍼 길이(초)
 
     MUSIC_MIN_RMS  = 0.03   # 최소 평균 RMS (무음 제외)
 

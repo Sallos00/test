@@ -264,11 +264,15 @@ class LipSyncGUIUI:
 
         self._dur_lbl.pack(side="left", padx=4, anchor="center")
 
-        # ── OP/ED 스킵 버튼 (재생 위치 바로 아래) ────────────────────────────
+        reg(tk.Frame(self.root, bg=self.BORDER, height=1),
+
+            bg="BORDER").pack(fill="x", padx=PAD2, pady=(round(12*r), 0))
+
+        # ── OP/ED 스킵 버튼 (오프셋 섹션 바로 위) ────────────────────────────
         # 자동 스킵 OFF → 버튼 활성 (수동 스킵 가능)
         # 자동 스킵 ON  → 버튼 비활성 + "자동 스킵 ON" 표시
-        oped_row = reg(tk.Frame(card, bg=self.BG2), bg="BG2")
-        oped_row.pack(fill="x", pady=(6, 0))
+        oped_row = reg(tk.Frame(self.root, bg=self.BG, padx=PAD), bg="BG")
+        oped_row.pack(fill="x", pady=(round(8*r), 0))
 
         self._oped_btn = reg(tk.Button(oped_row, font=("Consolas", max(8, round(9*r)), "bold"),
                                        relief="flat", cursor="hand2",
@@ -279,10 +283,6 @@ class LipSyncGUIUI:
 
         # 초기 상태 반영
         self._update_oped_btn()
-
-        reg(tk.Frame(self.root, bg=self.BORDER, height=1),
-
-            bg="BORDER").pack(fill="x", padx=PAD2, pady=(round(12*r), 0))
 
         # 오프셋 미터
 
@@ -796,6 +796,12 @@ class LipSyncGUIUI:
 
         txt.tag_config("err",  foreground=self.ACCENT2)
 
+        txt.tag_config("skip", foreground="#b58cff")
+
+        txt.tag_config("detect", foreground="#4ec9f0")
+
+        txt.tag_config("sync", foreground="#ffd166")
+
         txt.tag_config("dim",  foreground=self.TEXT_DIM)
 
         self._log_popup_txt = txt
@@ -836,15 +842,24 @@ class LipSyncGUIUI:
 
                         txt.insert("end", "\n")
 
-                    if any(k in line for k in ("▶", "↺", "🔄", "정상", "OK")):
+                    if any(k in line for k in ("⏭", "오프닝", "엔딩", "스킵")):
+                        tag = "skip"
+
+                    elif any(k in line for k in ("🎬", "👁", "🔊", "감지", "미감지", "대기")):
+                        tag = "detect"
+
+                    elif any(k in line for k in ("보정", "OFFSET", "싱크", "상한")):
+                        tag = "sync"
+
+                    elif any(k in line for k in ("▶", "↺", "🔄", "정상", "OK")):
 
                         tag = "ok"
 
-                    elif any(k in line for k in ("🎬", "👁", "🔊", "📊", "감지", "⏭")):
+                    elif any(k in line for k in ("📊", "정보", "상태")):
 
                         tag = "info"
 
-                    elif any(k in line for k in ("보정", "⚠", "상한")):
+                    elif any(k in line for k in ("⚠", "주의", "경고")):
 
                         tag = "warn"
 

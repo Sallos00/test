@@ -982,7 +982,7 @@ class LipSyncGUIUI:
 
         tk.Checkbutton(card,
 
-                       text="앞뒤 3분 구간 노래 감지 시 자동 스킵",
+                       text="OP/ED 자동 스킵",
 
                        variable=tmp_oped_auto,
 

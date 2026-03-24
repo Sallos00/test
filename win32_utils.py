@@ -38,10 +38,10 @@ _user32.GetWindowTextW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.LPWSTR,
 # ── 상수 정의 (누락 방지) ──
 WM_USER              = 0x0400
 POT_COMMAND          = 0x0400
-POT_GET_CURRENT_TIME = 0x5000
-POT_GET_TOTAL_TIME   = 0x5004
-POT_SET_CURRENT_TIME = 0x5001
-POT_SEND_VIRTUAL_KEY = 0x5010
+POT_GET_TOTAL_TIME   = 20482
+POT_GET_CURRENT_TIME = 20484
+POT_SET_CURRENT_TIME = 20485
+POT_SEND_VIRTUAL_KEY = 20496
 
 VK_SHIFT      = 0x10
 VK_OEM_PERIOD = 0xBE # '>' key
@@ -98,32 +98,15 @@ def get_playback_info(hwnd):
     if not hwnd:
         return None, None
     try:
-        # PotPlayer 버전/빌드에 따라 wParam, lParam 해석이 다른 사례가 있어
-        # 두 형태를 모두 시도하고, 유효한 값 조합을 우선 채택한다.
-        attempts = (
-            (
-                _user32.SendMessageW(hwnd, WM_USER, 0, POT_GET_CURRENT_TIME),
-                _user32.SendMessageW(hwnd, WM_USER, 0, POT_GET_TOTAL_TIME),
-            ),
-            (
-                _user32.SendMessageW(hwnd, WM_USER, POT_GET_CURRENT_TIME, 0),
-                _user32.SendMessageW(hwnd, WM_USER, POT_GET_TOTAL_TIME, 0),
-            ),
-        )
-        for raw_pos, raw_dur in attempts:
-            try:
-                pos_ms = int(raw_pos)
-                dur_ms = int(raw_dur)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if pos_ms < 0:
-                continue
-            # 전체 길이를 못 읽는 경우에도 현재 위치는 표시 가능하도록 완화
-            if dur_ms <= 0:
-                return pos_ms, None
-            if pos_ms <= dur_ms + 2000:
-                return pos_ms, dur_ms
-        return None, None
+        pos_ms = int(_user32.SendMessageW(hwnd, WM_USER, POT_GET_CURRENT_TIME, 0))
+        dur_ms = int(_user32.SendMessageW(hwnd, WM_USER, POT_GET_TOTAL_TIME, 0))
+        if pos_ms < 0:
+            return None, None
+        if dur_ms <= 0:
+            return pos_ms, None
+        if pos_ms > dur_ms + 2000:
+            return None, None
+        return pos_ms, dur_ms
     except Exception:
         return None, None
 
@@ -135,6 +118,5 @@ def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
     new_pos = pos_ms + skip_ms
     if new_pos > dur_ms - 2000:
         new_pos = max(0, dur_ms - 2000)
-    _user32.SendMessageW(hwnd, WM_USER, 0, POT_SET_CURRENT_TIME)
-    _user32.SendMessageW(hwnd, WM_USER, new_pos, POT_SET_CURRENT_TIME)
+    _user32.PostMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, new_pos)
     return new_pos, True

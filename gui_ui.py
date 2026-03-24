@@ -980,15 +980,13 @@ class LipSyncGUIUI:
 
                        fg=self.TEXT, **CHK).pack(anchor="w", pady=round(4*r))
 
-        tk.Frame(card, bg=self.BORDER, height=1).pack(fill="x", pady=(round(8*r), round(4*r)))
+        tk.Checkbutton(oped_card,
 
-         tk.Checkbutton(oped_card,
-
-                       text="OP/ED 자동 스킵",
+                       text="앞뒤 3분 구간 노래 감지 시 자동 스킵",
 
                        variable=tmp_oped_auto,
 
-                       fg=self.TEXT, **CHK).pack(anchor="w", pady=round(2*r))
+                       fg=self.TEXT, **CHK).pack(anchor="w", pady=round(4*r))
 
         # 스킵 초 입력 행
 
@@ -1030,7 +1028,7 @@ class LipSyncGUIUI:
 
                  bg=self.BG2, fg=self.TEXT_DIM).pack(side="left", padx=(round(6*r), 0))
 
-        
+        tk.Frame(card, bg=self.BORDER, height=1).pack(fill="x", pady=(round(8*r), round(4*r)))
 
         size_row = tk.Frame(card, bg=self.BG2)
 
@@ -1057,7 +1055,6 @@ class LipSyncGUIUI:
                            activeforeground=self.TEXT,
 
                            relief="flat", cursor="hand2").pack(side="left", padx=round(4*r))
-
 
         # ── 저장 버튼 ──────────────────────────────────────────────────────────
 

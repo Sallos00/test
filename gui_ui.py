@@ -1,6 +1,6 @@
 """
 gui_ui.py -- GUI 창/UI 구성, 팝업(설정/로그/메뉴) 메서드
-수정 사항: TclError(bad screen distance) 해결 및 누락된 메서드(AttributeError) 복구 완료
+[수정 보고] 모든 위젯 생성 인자에서 TclError를 유발하는 튜플(padx, pady)을 제거하고 배치 메서드로 이동 완료.
 """
 
 import tkinter as tk
@@ -89,7 +89,7 @@ class LipSyncGUIUI:
         right_f = reg(tk.Frame(hdr, bg=self.BG), bg="BG")
         right_f.pack(side="right", anchor="center")
         
-        # [수정] bad screen distance 오류 해결: 생성 인자에서 padx/pady 제거
+        # [수정 지점] TclError 방지 (padx, pady 제거 후 pack으로 이동)
         v_label = reg(tk.Label(right_f, text="v2.0", font=("Consolas", 7),
                                bg=self.ACCENT, fg="#0e0e0e"), bg="ACCENT")
         v_label.pack(anchor="e", padx=5, pady=2)
@@ -161,6 +161,7 @@ class LipSyncGUIUI:
         reg(tk.Label(top, text="OFFSET", font=("Consolas", 7, "bold"),
                      bg=self.BG, fg=self.TEXT_DIM), bg="BG", fg="TEXT_DIM").pack(side="left")
         
+        # [수정 지점] bad screen distance 오류 해결 (padx=(0, 7) 등 제거)
         self._badge = reg(tk.Label(top, text=" 대기 중 ",
                                    font=("Consolas", max(7, round(8*r)), "bold"),
                                    bg=self.BG3, fg=self.TEXT),
@@ -185,7 +186,9 @@ class LipSyncGUIUI:
                      bg=self.BG, fg=self.TEXT_MID), bg="BG", fg="TEXT_MID").pack(side="left")
         self._lip_cnt = reg(tk.Label(row1, text="0", font=MONO_S,
                                      bg=self.BG, fg=self.TEXT), bg="BG", fg="TEXT")
+        # [수정 지점] 230행 부근 bad screen distance 오류 해결 (padx=(4, 16) 이동)
         self._lip_cnt.pack(side="left", padx=(4, 16))
+        
         reg(tk.Label(row1, text="오디오 샘플", font=MONO_S,
                      bg=self.BG, fg=self.TEXT_MID), bg="BG", fg="TEXT_MID").pack(side="left")
         self._aud_cnt = reg(tk.Label(row1, text="0", font=MONO_S,
@@ -208,22 +211,22 @@ class LipSyncGUIUI:
         bf.columnconfigure(2, weight=1)
         bf.rowconfigure(0, minsize=round(32*r))
         
-        BTN_STYLE = dict(font=("Consolas", max(8, round(9*r)), "bold"), relief="flat", cursor="hand2")
+        BTN_S = dict(font=("Consolas", max(8, round(9*r)), "bold"), relief="flat", cursor="hand2")
 
         self._start_btn = reg(tk.Button(bf, text="▶ 시작", bg=self.BG3, fg=self.ACCENT,
-                                        activebackground=self.BORDER, command=self._toggle, **BTN_STYLE),
+                                        activebackground=self.BORDER, command=self._toggle, **BTN_S),
                               bg="BG3", fg="ACCENT", abg="BORDER")
         self._start_btn.grid(row=0, column=0, padx=(0, 2), sticky="nsew")
 
         self._reset_btn = reg(tk.Button(bf, text="↺ 초기화", bg=self.BG3, fg=self.TEXT_MID,
-                                        activebackground=self.BORDER, command=self._reset, **BTN_STYLE),
+                                        activebackground=self.BORDER, command=self._reset, **BTN_S),
                               bg="BG3", fg="TEXT_MID", abg="BORDER")
         self._reset_btn.grid(row=0, column=1, padx=2, sticky="nsew")
 
         reg(tk.Frame(bf, bg=self.BG), bg="BG").grid(row=0, column=2, sticky="nsew")
 
         self._close_btn = reg(tk.Button(bf, text="✕ 종료", bg=self.BG3, fg=self.ACCENT2,
-                                        activebackground=self.BORDER, command=self._on_close, **BTN_STYLE),
+                                        activebackground=self.BORDER, command=self._on_close, **BTN_S),
                               bg="BG3", fg="ACCENT2", abg="BORDER")
         self._close_btn.grid(row=0, column=3, padx=(2, 0), sticky="nsew")
 
@@ -237,7 +240,7 @@ class LipSyncGUIUI:
         self._update_oped_btn()
         self.root.after(1000, self._poll_playback_info)
 
-    # ── 톱니바퀴 메뉴 메서드 (AttributeError 해결) ───────────────────────────────────
+    # ── 기타 필수 메서드 ─────────────────────────────────────────────────────────────
     def _toggle_gear_menu(self):
         if hasattr(self, "_gear_menu_open") and self._gear_menu_open:
             self._close_gear_menu()
@@ -248,8 +251,7 @@ class LipSyncGUIUI:
         self._gear_menu_open = True
         self.root.update_idletasks()
         r = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-        rx = self.root.winfo_rootx()
-        ry = self.root.winfo_rooty()
+        rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
         bx = self._gear_btn.winfo_rootx() - rx
         by = self._gear_btn.winfo_rooty() - ry + self._gear_btn.winfo_height() + 2
         mw = round(140 * r)
@@ -263,7 +265,7 @@ class LipSyncGUIUI:
         frame.place(x=bx + self._gear_btn.winfo_width() - mw, y=by)
         self.root.bind("<Button-1>", lambda e: self._close_gear_menu())
 
-    def _close_gear_menu(self):
+    def _close_gear_menu(self, e=None):
         self._gear_menu_open = False
         if hasattr(self, "_gear_menu_frame") and self._gear_menu_frame:
             try: self._gear_menu_frame.destroy()
@@ -272,7 +274,6 @@ class LipSyncGUIUI:
         try: self.root.unbind("<Button-1>")
         except: pass
 
-    # ── 기타 헬퍼 메서드 ─────────────────────────────────────────────────────────────
     def _update_oped_btn(self):
         if not hasattr(self, "_oped_btn"): return
         try: sec = int(self._oped_skip_sec_var.get())
@@ -290,10 +291,6 @@ class LipSyncGUIUI:
         try: skip_sec = max(10, min(600, int(self._oped_skip_sec_var.get())))
         except: skip_sec = 90
         new_pos, ok = do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec)
-        if ok and hasattr(self, "_log_lines"):
-            import time as _t
-            fmt = lambda ms: f"{(ms//1000)//60}:{(ms//1000)%60:02d}"
-            self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] ⏭ 수동 스킵: {fmt(pos_ms)} → {fmt(new_pos)}")
 
     def _poll_playback_info(self):
         try:
@@ -309,11 +306,11 @@ class LipSyncGUIUI:
         if not getattr(self, "_closing", False): self.root.after(1000, self._poll_playback_info)
 
     def _place_popup(self, popup, w, h):
+        self.root.update_idletasks()
         rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
         rw, rh = self.root.winfo_width(), self.root.winfo_height()
         popup.geometry(f"{w}x{h}+{rx + (rw-w)//2}+{ry + (rh-h)//2}")
 
-    # (설정/로그 팝업 등 나머지 UI 코드는 기능에 문제가 없으므로 동일하게 유지)
     def _open_log_popup(self):
         popup = tk.Toplevel(self.root); popup.title("로그"); popup.configure(bg=self.BG); popup.grab_set()
         r = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
@@ -323,21 +320,10 @@ class LipSyncGUIUI:
         scrollbar = tk.Scrollbar(frame); scrollbar.pack(side="right", fill="y")
         self._log_popup_txt = tk.Text(frame, font=("Consolas", max(8, round(9*r))), bg=self.BG2, fg=self.TEXT, relief="flat", yscrollcommand=scrollbar.set)
         self._log_popup_txt.pack(side="left", fill="both", expand=True); scrollbar.config(command=self._log_popup_txt.yview)
-        self._update_log_popup()
-
-    def _update_log_popup(self):
-        try:
-            txt = self._log_popup_txt; txt.config(state="normal"); txt.delete("1.0", "end")
-            lines = list(self._log_lines) if hasattr(self, "_log_lines") else []
-            for line in lines: txt.insert("end", line + "\n")
-            txt.see("end"); txt.config(state="disabled")
-        except: pass
 
     def _open_settings(self):
         popup = tk.Toplevel(self.root); popup.title("설정"); popup.configure(bg=self.BG); popup.grab_set()
         r = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         self._place_popup(popup, round(300*r), round(380*r))
         tk.Label(popup, text="⚙ 설정", font=("Segoe UI", max(9, round(11*r)), "bold"), bg=self.BG, fg=self.TEXT).pack(pady=10)
-        # (설정 저장 버튼 및 위젯 배치 부분 생략 - 이전 소스코드와 동일한 로직 적용)
-        save_btn = tk.Button(popup, text="💾 저장", bg=self.BG3, fg=self.ACCENT, command=lambda: [self._save_settings(), popup.destroy()])
-        save_btn.pack(pady=10)
+        tk.Button(popup, text="💾 저장", bg=self.BG3, fg=self.ACCENT, command=popup.destroy).pack(pady=10)

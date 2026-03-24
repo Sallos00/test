@@ -13,7 +13,7 @@ import auth as _auth_module
 
 from win32_utils import (
     CFG, find_potplayer_hwnd, is_potplayer_playing,
-    is_potplayer_running
+    is_potplayer_running, post_key_to_potplayer, VK_OEM_2
 )
 from processes import proc_lip_capture, proc_audio_capture, proc_analyzer
 
@@ -244,8 +244,26 @@ class LipSyncGUIRun:
         self._processes.clear()
 
     def _reset(self):
-        try: self.cmd_queue.put_nowait("reset")
-        except Exception: pass
+        if self._running:
+            try:
+                self.cmd_queue.put_nowait("reset")
+            except Exception:
+                pass
+            return
+
+        # 싱크 프로세스가 꺼져 있어도 팟플레이어 쪽 초기화는 즉시 적용
+        hwnd = find_potplayer_hwnd()
+        if not hwnd:
+            self._proc_lbl.config(text="초기화 실패: 팟플레이어 미감지", fg=self.ACCENT2)
+            return
+
+        try:
+            post_key_to_potplayer(hwnd, VK_OEM_2, shift=True)
+            time.sleep(0.05)
+            post_key_to_potplayer(hwnd, 0x6F, shift=True)
+            self._proc_lbl.config(text="수동 초기화 완료", fg=self.ACCENT3)
+        except Exception:
+            self._proc_lbl.config(text="초기화 실패", fg=self.ACCENT2)
 
     # ── 100ms 주기 UI 갱신 ────────────────────────────────────────────────────
     def _refresh(self):

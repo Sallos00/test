@@ -215,12 +215,13 @@ class LipSyncGUIRun:
         """프로세스 시작 (팟플레이어 감지 확인 후 호출)."""
         self._running = True
         self.stop_flag.value = False
+        runtime_cfg = self._build_cfg()
         for target, args in [
-            (proc_lip_capture,   (self._lip_queue,   self.stop_flag, CFG)),
-            (proc_audio_capture, (self._audio_queue, self.stop_flag, CFG)),
+            (proc_lip_capture,   (self._lip_queue,   self.stop_flag, runtime_cfg)),
+            (proc_audio_capture, (self._audio_queue, self.stop_flag, runtime_cfg)),
             (proc_analyzer,      (self._lip_queue, self._audio_queue,
                                   self.state_queue, self.cmd_queue,
-                                  self.stop_flag, CFG)),
+                                  self.stop_flag, runtime_cfg)),
         ]:
             p = Process(target=target, args=args, daemon=True)
             p.start()

@@ -804,9 +804,18 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                         total_ms = 0
 
+                        # 초기화 버튼으로 OP/ED 자동 스킵 상태도 함께 리셋한다.
+                        last_skip_t = 0.0
+
+                        music_confirm = 0
+
                         offset_history.clear()
 
-                        add_log("↺ 싱크 초기화")
+                        lip_buf.clear()
+
+                        aud_buf.clear()
+
+                        add_log("↺ 싱크/자동스킵 상태 초기화")
 
                     else:
 

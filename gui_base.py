@@ -577,6 +577,22 @@ class LipSyncGUIBase:
 
                 return "⏹ 싱크 중지" if self._running else "▶ 싱크 시작"
 
+            def tray_toggle_auto_skip(icon, item):
+                enabled = bool(self._oped_auto_var.get())
+                self._oped_auto_var.set(not enabled)
+                self._save_settings()
+                # gui_run mixin이 있으면 즉시 상태 반영
+                if hasattr(self, "_start_auto_skip_monitor") and hasattr(self, "_stop_auto_skip_monitor"):
+                    if self._oped_auto_var.get() and not self._running:
+                        self.root.after(0, self._start_auto_skip_monitor)
+                    else:
+                        self.root.after(0, self._stop_auto_skip_monitor)
+                if hasattr(self, "_update_oped_btn"):
+                    self.root.after(0, self._update_oped_btn)
+
+            def tray_auto_skip_label(item):
+                return "⏹ 자동스킵 중지" if self._oped_auto_var.get() else "▶ 자동스킵 시작"
+
             menu = pystray.Menu(
 
                 pystray.MenuItem("Auto Sync 열기", self._tray_show, default=True),
@@ -584,6 +600,8 @@ class LipSyncGUIBase:
                 pystray.Menu.SEPARATOR,
 
                 pystray.MenuItem(tray_sync_label, tray_toggle_sync),
+
+                pystray.MenuItem(tray_auto_skip_label, tray_toggle_auto_skip),
 
                 pystray.Menu.SEPARATOR,
 
@@ -598,6 +616,7 @@ class LipSyncGUIBase:
             self._tray_thread.start()
 
             self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+            self.root.bind("<Unmap>", self._on_root_unmap)
 
         except ImportError:
 
@@ -610,3 +629,13 @@ class LipSyncGUIBase:
         self._save_pos()
 
         self.root.withdraw()
+
+    def _on_root_unmap(self, event):
+        """작업표시줄 최소화 시에도 트레이로 숨김 처리."""
+        try:
+            if event.widget is not self.root:
+                return
+            if self.root.state() == "iconic":
+                self._hide_to_tray()
+        except Exception:
+            pass

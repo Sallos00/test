@@ -547,6 +547,10 @@ class LipSyncGUIBase:
 
     def _setup_tray(self):
 
+        # X 버튼·최소화는 항상 트레이 숨김 경로로 연결 (pystray 없으면 창만 숨김, 종료 아님)
+        self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+        self.root.bind("<Unmap>", self._on_root_unmap)
+
         try:
 
             import pystray
@@ -615,14 +619,13 @@ class LipSyncGUIBase:
 
             self._tray_thread.start()
 
-            self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
-            self.root.bind("<Unmap>", self._on_root_unmap)
-
         except ImportError:
 
             self._tray = None
 
-            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        except Exception:
+
+            self._tray = None
 
     def _hide_to_tray(self):
 
@@ -630,16 +633,37 @@ class LipSyncGUIBase:
 
         self.root.withdraw()
 
+    def _unmap_maybe_minimize_to_tray(self):
+        """Unmap 직후 state가 아직 갱신 안 된 경우(Windows) 재확인 후 트레이로 숨김."""
+        try:
+            if getattr(self, "_closing", False):
+                return
+            if not self.root.winfo_exists():
+                return
+            st = str(self.root.state())
+            if st == "withdrawn":
+                return
+            if st in ("iconic", "iconified"):
+                self._hide_to_tray()
+        except Exception:
+            pass
+
     def _on_root_unmap(self, event):
-        """작업표시줄 최소화 시에도 트레이로 숨김 처리."""
+        """작업표시줄 최소화(아이콘화) 시 작업표시줄 대신 트레이로 숨김."""
         try:
             if event.widget is not self.root:
                 return
-            if not self._tray:
+            if getattr(self, "_closing", False):
                 return
-            # Windows/macOS 등에서 withdraw/iconify 상태 문자열이 플랫폼간 다름 — 상태 문자열 비교 대시 화면 뷰 표시 여부로 판다.
-            if self.root.winfo_viewable():
+            st = str(self.root.state())
+            # 이미 withdraw 한 경우 재진입 방지
+            if st == "withdrawn":
                 return
-            self._hide_to_tray()
+            # Windows: 최소화 버튼 → 대개 "iconic"; 일부 환경은 "iconified"
+            if st in ("iconic", "iconified"):
+                self.root.after_idle(self._hide_to_tray)
+                return
+            # 최소화 직후 wm state가 잠깐 "normal"로 남는 경우
+            self.root.after(40, self._unmap_maybe_minimize_to_tray)
         except Exception:
             pass

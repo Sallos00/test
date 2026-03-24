@@ -980,7 +980,7 @@ class LipSyncGUIUI:
 
                        fg=self.TEXT, **CHK).pack(anchor="w", pady=round(4*r))
 
-        tk.Checkbutton(oped_card,
+        tk.Checkbutton(card,
 
                        text="앞뒤 3분 구간 노래 감지 시 자동 스킵",
 
@@ -990,7 +990,7 @@ class LipSyncGUIUI:
 
         # 스킵 초 입력 행
 
-        sec_row = tk.Frame(oped_card, bg=self.BG2)
+        sec_row = tk.Frame(card, bg=self.BG2)
 
         sec_row.pack(anchor="w", pady=(round(6*r), 0))
 

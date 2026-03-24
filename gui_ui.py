@@ -549,7 +549,10 @@ class LipSyncGUIUI:
 
                         return f"{s // 60}:{s % 60:02d}"
 
-                    self._dur_lbl.config(text=f"{fmt(pos_ms)} / {fmt(dur_ms)}")
+                    if dur_ms is not None:
+                        self._dur_lbl.config(text=f"{fmt(pos_ms)} / {fmt(dur_ms)}")
+                    else:
+                        self._dur_lbl.config(text=f"{fmt(pos_ms)} / —")
 
                 else:
 

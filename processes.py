@@ -782,6 +782,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         t0 = time.perf_counter()
 
+        skip_toast_notify = None
+
         # ── 커맨드 처리 ──────────────────────────────────────────────────────
 
         while True:
@@ -959,6 +961,18 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                             aud_buf.clear()
 
+                            skip_toast_notify = (
+
+                                "⏭ OP/ED",
+
+                                "오프닝이 스킵 되었습니다."
+
+                                if zone_label == "오프닝"
+
+                                else "엔딩이 스킵 되었습니다.",
+
+                            )
+
                 else:
 
                     if music_confirm > 0:
@@ -969,7 +983,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             push_state("데이터 수집 중", 0, total_ms, log_lines, pot_ok,
 
-                       lip_n, aud_n, notify, cur_pos_ms, cur_dur_ms)
+                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
 
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
 
@@ -1019,7 +1033,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             push_state("미감지", 0, total_ms, log_lines, pot_ok,
 
-                       lip_n, aud_n, notify, cur_pos_ms, cur_dur_ms)
+                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
 
             time.sleep(1.0)
 
@@ -1043,7 +1057,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                 push_state("상한 도달", smoothed_offset, total_ms, log_lines, pot_ok,
 
-                           lip_n, aud_n, notify, cur_pos_ms, cur_dur_ms)
+                           lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
 
                 time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
 
@@ -1081,6 +1095,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         push_state(status, smoothed_offset, total_ms, log_lines, pot_ok,
 
-                   lip_n, aud_n, notify, cur_pos_ms, cur_dur_ms)
+                   lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
 
         time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

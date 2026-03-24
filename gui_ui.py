@@ -264,6 +264,22 @@ class LipSyncGUIUI:
 
         self._dur_lbl.pack(side="left", padx=4, anchor="center")
 
+        # ── OP/ED 스킵 버튼 (재생 위치 바로 아래) ────────────────────────────
+        # 자동 스킵 OFF → 버튼 활성 (수동 스킵 가능)
+        # 자동 스킵 ON  → 버튼 비활성 + "자동 스킵 ON" 표시
+        oped_row = reg(tk.Frame(card, bg=self.BG2), bg="BG2")
+        oped_row.pack(fill="x", pady=(6, 0))
+
+        self._oped_btn = reg(tk.Button(oped_row, font=("Consolas", max(8, round(9*r)), "bold"),
+                                       relief="flat", cursor="hand2",
+                                       padx=round(8*r), pady=0,
+                                       command=self._oped_skip),
+                             bg="BG3", fg="ACCENT3", abg="BORDER")
+        self._oped_btn.pack(fill="x")
+
+        # 초기 상태 반영
+        self._update_oped_btn()
+
         reg(tk.Frame(self.root, bg=self.BORDER, height=1),
 
             bg="BORDER").pack(fill="x", padx=PAD2, pady=(round(12*r), 0))
@@ -407,30 +423,6 @@ class LipSyncGUIUI:
                               bg="BG3", fg="ACCENT2", abg="BORDER")
 
         self._close_btn.grid(row=0, column=3, padx=(2, 0), sticky="nsew")
-
-        # ── 버튼 행 2: OP/ED 스킵 ────────────────────────────────────────────
-        # 자동 스킵 OFF → 버튼 활성 (수동 스킵 가능)
-        # 자동 스킵 ON  → 버튼 비활성 + "자동 스킵 ON" 표시
-
-        bf2 = reg(tk.Frame(self.root, bg=self.BG, padx=round(10*r)), bg="BG")
-
-        bf2.pack(fill="x", pady=(0, round(6*r)))
-
-        self._oped_btn = reg(tk.Button(bf2, font=("Consolas", max(8, round(9*r)), "bold"),
-
-                                       relief="flat", cursor="hand2",
-
-                                       padx=round(8*r), pady=0,
-
-                                       command=self._oped_skip),
-
-                             bg="BG3", fg="ACCENT3", abg="BORDER")
-
-        self._oped_btn.pack(fill="x")
-
-        # 초기 상태 반영
-
-        self._update_oped_btn()
 
         # 재생 위치 폴링 시작 (1초 간격, 독립적으로 실행)
 

@@ -782,11 +782,19 @@ class LipSyncGUIUI:
 
                       relief="flat", bd=0,
 
-                      wrap="word", state="disabled",
+                      wrap="word", state="normal",
 
                       yscrollcommand=scrollbar.set)
 
         txt.pack(side="left", fill="both", expand=True)
+
+        # 드래그 선택/복사는 허용하고, 직접 편집은 차단
+        def _block_edit(event):
+            return "break"
+
+        txt.bind("<Key>", _block_edit)
+        txt.bind("<<Paste>>", _block_edit)
+        txt.bind("<<Cut>>", _block_edit)
 
         scrollbar.config(command=txt.yview)
 
@@ -826,7 +834,9 @@ class LipSyncGUIUI:
 
             txt = self._log_popup_txt
 
-            txt.config(state="normal")
+            # 사용자가 이미 아래쪽을 보고 있을 때만 자동 하단 이동
+            y1, y2 = txt.yview()
+            at_bottom = y2 >= 0.999
 
             txt.delete("1.0", "end")
 
@@ -875,9 +885,10 @@ class LipSyncGUIUI:
 
                     txt.insert("end", line, tag)
 
-            txt.see("end")
-
-            txt.config(state="disabled")
+            if at_bottom:
+                txt.see("end")
+            else:
+                txt.yview_moveto(y1)
 
         except Exception:
 

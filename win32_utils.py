@@ -1,6 +1,6 @@
 """
 win32_utils.py -- Win32 상수, 팟플레이어 제어, 공통 유틸
-[수정 보고] 64비트 환경 대응 및 누락된 queue_put 함수 복구
+[수정 보고] 64비트 대응, queue_put 복구 및 VK_OEM_2 등 누락된 상수 전원 복구
 """
 
 import ctypes
@@ -35,17 +35,18 @@ _user32.FindWindowW.restype = ctypes.wintypes.HWND
 _user32.FindWindowW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPCWSTR]
 _user32.GetWindowTextW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.LPWSTR, ctypes.c_int]
 
-# 상수 정의
-WM_USER = 0x0400
-POT_GET_CURRENT_TIME = 0x5000
-POT_GET_TOTAL_TIME    = 0x5004
-POT_SET_CURRENT_TIME = 0x5001
+# ── 상수 정의 (누락 방지) ──
+WM_USER              = 0x0400
 POT_COMMAND          = 0x0400
+POT_GET_CURRENT_TIME = 0x5000
+POT_GET_TOTAL_TIME   = 0x5004
+POT_SET_CURRENT_TIME = 0x5001
 POT_SEND_VIRTUAL_KEY = 0x5010
 
 VK_SHIFT      = 0x10
-VK_OEM_PERIOD = 0xBE
-VK_OEM_COMMA  = 0xBC
+VK_OEM_PERIOD = 0xBE # '>' key
+VK_OEM_COMMA  = 0xBC # '<' key
+VK_OEM_2      = 0xBF # '/' key (필수 상수 복구)
 
 def queue_put(q, item):
     """멀티프로세싱 큐에 안전하게 데이터를 넣는다."""

@@ -544,7 +544,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     SKIP_COOLDOWN  = 120    # 스킵 후 재스킵 방지 대기(초)
 
-    MUSIC_WINDOW   = 15.0   # 음악 감지 버퍼 길이(초)
+    MUSIC_WINDOW   = 5.0   # 음악 감지 버퍼 길이(초)
 
     MUSIC_MIN_RMS  = 0.03   # 최소 평균 RMS (무음 제외)
 
@@ -782,6 +782,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         t0 = time.perf_counter()
 
+        skip_toast_notify = None
+
         # ── 커맨드 처리 ──────────────────────────────────────────────────────
 
         while True:
@@ -804,9 +806,18 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                         total_ms = 0
 
+                        # 초기화 버튼으로 OP/ED 자동 스킵 상태도 함께 리셋한다.
+                        last_skip_t = 0.0
+
+                        music_confirm = 0
+
                         offset_history.clear()
 
-                        add_log("↺ 싱크 초기화")
+                        lip_buf.clear()
+
+                        aud_buf.clear()
+
+                        add_log("↺ 싱크/자동스킵 상태 초기화")
 
                     else:
 
@@ -882,9 +893,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                     offset_history.clear()
 
-                    last_skip_t   = 0.0      # 스킵 쿨다운 초기화 (새 영상이므로 즉시 스킵 가능)
+                    music_confirm = 0
 
-                    music_confirm = 0        # 음악 감지 카운터 초기화
+                    last_skip_t = 0.0
 
                     add_log("🔄 영상 변경 감지 → 싱크 초기화")
 
@@ -952,6 +963,18 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                             aud_buf.clear()
 
+                            skip_toast_notify = (
+
+                                "⏭ OP/ED",
+
+                                "오프닝이 스킵 되었습니다."
+
+                                if zone_label == "오프닝"
+
+                                else "엔딩이 스킵 되었습니다.",
+
+                            )
+
                 else:
 
                     if music_confirm > 0:
@@ -962,7 +985,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             push_state("데이터 수집 중", 0, total_ms, log_lines, pot_ok,
 
-                       lip_n, aud_n, notify, cur_pos_ms, cur_dur_ms)
+                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
 
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
 
@@ -1012,7 +1035,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             push_state("미감지", 0, total_ms, log_lines, pot_ok,
 
-                       lip_n, aud_n, notify, cur_pos_ms, cur_dur_ms)
+                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
 
             time.sleep(1.0)
 
@@ -1036,7 +1059,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                 push_state("상한 도달", smoothed_offset, total_ms, log_lines, pot_ok,
 
-                           lip_n, aud_n, notify, cur_pos_ms, cur_dur_ms)
+                           lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
 
                 time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
 
@@ -1074,6 +1097,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         push_state(status, smoothed_offset, total_ms, log_lines, pot_ok,
 
-                   lip_n, aud_n, notify, cur_pos_ms, cur_dur_ms)
+                   lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
 
         time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

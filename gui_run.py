@@ -7,7 +7,7 @@ import threading
 import collections
 import tkinter as tk
 import winreg
-from multiprocessing import Process
+from multiprocessing import Process, Queue, Value
 
 import auth as _auth_module
 
@@ -19,10 +19,52 @@ from processes import proc_lip_capture, proc_audio_capture, proc_analyzer
 
 
 class LipSyncGUIRun:
+    def _start_auto_skip_monitor(self):
+        """싱크 미실행 상태에서 OP/ED 자동 스킵(P2+P3)만 백그라운드 실행."""
+        if getattr(self, "_auto_skip_running", False):
+            return
+        try:
+            runtime_cfg = self._build_cfg()
+            qsize = runtime_cfg.get("QUEUE_MAXSIZE", 200)
+            self._auto_lip_queue = Queue(maxsize=qsize)
+            self._auto_audio_queue = Queue(maxsize=qsize)
+            self._auto_state_queue = Queue(maxsize=20)
+            self._auto_cmd_queue = Queue(maxsize=10)
+            self._auto_stop_flag = Value("b", False)
+            self._auto_processes = []
+            for target, args in [
+                (proc_audio_capture, (self._auto_audio_queue, self._auto_stop_flag, runtime_cfg)),
+                (proc_analyzer, (self._auto_lip_queue, self._auto_audio_queue,
+                                 self._auto_state_queue, self._auto_cmd_queue,
+                                 self._auto_stop_flag, runtime_cfg)),
+            ]:
+                p = Process(target=target, args=args, daemon=True)
+                p.start()
+                self._auto_processes.append(p)
+            self._auto_skip_running = True
+        except Exception:
+            self._auto_skip_running = False
+
+    def _stop_auto_skip_monitor(self):
+        """자동 스킵 전용 백그라운드(P2+P3) 중지."""
+        if not getattr(self, "_auto_skip_running", False):
+            return
+        try:
+            self._auto_stop_flag.value = True
+            for p in self._auto_processes:
+                p.join(timeout=2)
+                if p.is_alive():
+                    p.terminate()
+        except Exception:
+            pass
+        self._auto_processes = []
+        self._auto_skip_running = False
+
 
     # ── 시작 / 정지 ───────────────────────────────────────────────────────────
     def _toggle(self):
         if not self._running:
+            self._stop_auto_skip_monitor()
             hwnd = find_potplayer_hwnd()
             if not hwnd:
                 # 팟플레이어 미감지 → 대기 모드로 전환
@@ -213,6 +255,7 @@ class LipSyncGUIRun:
 
     def _start_processes(self):
         """프로세스 시작 (팟플레이어 감지 확인 후 호출)."""
+        self._stop_auto_skip_monitor()
         self._running = True
         self.stop_flag.value = False
         runtime_cfg = self._build_cfg()
@@ -244,6 +287,13 @@ class LipSyncGUIRun:
         self._processes.clear()
 
     def _reset(self):
+        if getattr(self, "_auto_skip_running", False):
+            try:
+                self._auto_cmd_queue.put_nowait("reset")
+            except Exception:
+                pass
+            return
+
         if self._running:
             try:
                 self.cmd_queue.put_nowait("reset")
@@ -267,6 +317,23 @@ class LipSyncGUIRun:
 
     # ── 100ms 주기 UI 갱신 ────────────────────────────────────────────────────
     def _refresh(self):
+        want_auto_skip = (not self._running) and self._oped_auto_var.get()
+        if want_auto_skip and not getattr(self, "_auto_skip_running", False):
+            self._start_auto_skip_monitor()
+        elif (not want_auto_skip) and getattr(self, "_auto_skip_running", False):
+            self._stop_auto_skip_monitor()
+
+        if getattr(self, "_auto_skip_running", False):
+            auto_latest = None
+            while True:
+                try:
+                    auto_latest = self._auto_state_queue.get_nowait()
+                except Exception:
+                    break
+            if auto_latest:
+                logs = auto_latest.get("log_lines", [])
+                self._log_lines = collections.deque(logs, maxlen=100)
+
         latest = None
         while True:
             try: latest = self.state_queue.get_nowait()
@@ -345,6 +412,7 @@ class LipSyncGUIRun:
             except Exception: pass
         self._save_pos()
         self._stop_processes()
+        self._stop_auto_skip_monitor()
         if self._tray:
             try: self._tray.stop()
             except Exception: pass

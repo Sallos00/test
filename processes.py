@@ -28,18 +28,14 @@ from win32_utils import (
 
     queue_put, VK_OEM_PERIOD, VK_OEM_COMMA, VK_OEM_2,
 
-    get_playback_info, do_oped_skip,
-
-    _user32,
+    _user32
 
 )
 
-# ── settings.json 직접 읽기 헬퍼 ──────────────────────────────────────────────
-# gui_run.py 가 _build_cfg() 를 통해 cfg 를 넘기지 않는 경우의 폴백.
+
+# ── settings.json 직접 읽기 (폴백용) ──────────────────────────────────────────
 
 def _load_saved_setting(key, default):
-
-    """APPDATA/AutoSync/settings.json 에서 설정값을 읽는다."""
 
     try:
 
@@ -52,6 +48,7 @@ def _load_saved_setting(key, default):
     except Exception:
 
         return default
+
 
 # P1: 화면 캡처 + 애니메이션 얼굴 감지 프로세스
 
@@ -77,13 +74,13 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
 
     sct = mss.mss()
 
-    interval       = 1.0 / cfg["CAPTURE_FPS"]
+    interval = 1.0 / cfg["CAPTURE_FPS"]
 
     DETECT_EVERY_N = 5
 
-    prev      = None
+    prev = None
 
-    last_roi  = None
+    last_roi = None
 
     frame_count = 0
 
@@ -103,11 +100,13 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
 
                 ctypes.windll.user32.ClientToScreen(hwnd, ctypes.byref(pt))
 
-                w = rect.right  - rect.left
+                w = rect.right - rect.left
 
                 h = rect.bottom - rect.top
 
                 if w > 100 and h > 100:
+
+                    # 상하좌우 10% 제외 (자막/레터박스/UI 제거)
 
                     margin_x = int(w * 0.10)
 
@@ -183,13 +182,13 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
 
             x, y, fw, fh = last_roi
 
-            h_img, w_img = gray.shape
+            h_img, w_img  = gray.shape
 
             lip_y1 = min(y + int(fh * 0.6), h_img - 1)
 
-            lip_y2 = min(y + fh,            h_img)
+            lip_y2 = min(y + fh, h_img)
 
-            lip_x2 = min(x + fw,            w_img)
+            lip_x2 = min(x + fw, w_img)
 
             lip_roi = gray[lip_y1:lip_y2, x:lip_x2]
 
@@ -214,6 +213,7 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
         if sleep_t > 0:
 
             time.sleep(sleep_t)
+
 
 # P2: 팟플레이어 전용 오디오 캡처 프로세스
 
@@ -367,9 +367,9 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
 
             p = pyaudio.PyAudio()
 
-            pot_pid = find_potplayer_pid()
+            pot_pid       = find_potplayer_pid()
 
-            target_device   = None
+            target_device = None
 
             fallback_device = None
 
@@ -422,6 +422,8 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
                 frames_per_buffer=int(native_sr * 0.05),
 
             )
+
+            # 음성 주파수 필터 미리 생성 (300~3400Hz 대역통과)
 
             try:
 
@@ -505,6 +507,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
 
             time.sleep(chunk_ms / 1000)
 
+
 # P3: 싱크 분석 + 팟플레이어 보정 프로세스
 
 def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
@@ -529,31 +532,32 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     MAX_TOTAL_MS = cfg["MAX_TOTAL_SYNC_MS"]
 
-    # ── OP/ED 자동 스킵 설정 ────────────────────────────────────────────────
-    # cfg 에 없으면 settings.json 에서 직접 읽어 폴백 처리
+    # ── OP/ED 감지 설정 ──────────────────────────────────────────────────────
+    # cfg 에 없으면 settings.json 에서 직접 읽어 폴백
 
-    OPED_AUTO     = cfg.get("OPED_AUTO_SKIP") \
-                    if cfg.get("OPED_AUTO_SKIP") is not None \
-                    else _load_saved_setting("oped_auto_skip", False)
+    OPED_AUTO_SKIP = (cfg.get("OPED_AUTO_SKIP")
+                      if cfg.get("OPED_AUTO_SKIP") is not None
+                      else _load_saved_setting("oped_auto_skip", False))
 
-    OPED_SKIP_SEC = cfg.get("OPED_SKIP_SEC") \
-                    if cfg.get("OPED_SKIP_SEC") is not None \
-                    else _load_saved_setting("oped_skip_sec", 90)
+    OPED_SKIP_SEC  = (cfg.get("OPED_SKIP_SEC")
+                      if cfg.get("OPED_SKIP_SEC") is not None
+                      else _load_saved_setting("oped_skip_sec", 90))
 
-    OPED_ZONE_SEC  = 180    # 앞/뒤 몇 초를 OP/ED 구간으로 볼지 (3분)
+    WM_USER        = 0x400         # 팟플레이어 IPC 메시지 베이스
 
-    OPED_PROMPT_TIMEOUT_SEC = 10  # 팝업 닫히는 시간(초) — 스킵/무시 둘 다 쿨다운 시작
-    SKIP_COOLDOWN  = 180    # 스킵/무시 후 재스킵 방지 대기(초, 3분)
+    OPED_ZONE_SEC  = 180           # 앞/뒤 몇 초를 OP/ED 구간으로 볼지 (3분)
 
-    MUSIC_WINDOW   = 5.0   # 음악 감지 버퍼 길이(초)
+    SKIP_COOLDOWN  = 180           # 스킵/닫기 후 재감지 방지 대기 시간 (3분)
 
-    MUSIC_MIN_RMS  = 0.03   # 최소 평균 RMS (무음 제외)
+    MUSIC_WINDOW   = 15.0          # 음악 감지 버퍼 길이(초)
 
-    MUSIC_MAX_CV   = 0.8    # 변동계수 상한 (낮을수록 에너지 일정 = 음악)
+    MUSIC_MIN_RMS  = 0.03          # 최소 평균 RMS (무음 제외)
 
-    MUSIC_MIN_FILL = 0.70   # 노이즈 floor 이상 프레임 비율 하한
+    MUSIC_MAX_CV   = 0.8           # 변동계수 상한 (낮을수록 에너지 일정 = 음악)
 
-    MUSIC_CONFIRM  = 2      # 연속 N회 감지 후 스킵
+    MUSIC_MIN_FILL = 0.70          # 노이즈 floor 이상 프레임 비율 하한
+
+    MUSIC_CONFIRM  = 2             # 연속 N회 감지 후 팝업/스킵 실행
 
     lip_buf   = collections.deque()
 
@@ -571,12 +575,70 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         log_lines.append(f"[{_t.strftime('%H:%M:%S')}] {msg}")
 
+    # ── 팟플레이어 재생 위치 / 전체 길이 조회 ─────────────────────────────────
+
+    def get_playback_info(hwnd):
+
+        """현재 재생 위치(ms)와 전체 길이(ms) 반환. 실패 시 (None, None)."""
+
+        try:
+
+            pos_ms = _user32.SendMessageW(hwnd, WM_USER, 0, 0x5000)
+
+            dur_ms = _user32.SendMessageW(hwnd, WM_USER, 0, 0x5004)
+
+            if dur_ms > 0:
+
+                return int(pos_ms), int(dur_ms)
+
+        except Exception:
+
+            pass
+
+        return None, None
+
+    # ── 스킵 실행 ─────────────────────────────────────────────────────────────
+
+    def execute_skip(hwnd, label="OP/ED"):
+
+        """현재 위치에서 OPED_SKIP_SEC 초 앞으로 이동."""
+
+        pos_ms, dur_ms = get_playback_info(hwnd)
+
+        if pos_ms is None:
+
+            add_log(f"⚠ {label} 스킵 실패: 재생 정보 읽기 오류")
+
+            return False
+
+        new_pos = min(pos_ms + OPED_SKIP_SEC * 1000, dur_ms - 2000)
+
+        try:
+
+            _user32.SendMessageW(hwnd, WM_USER, new_pos, 0x5001)
+
+            def fmt(ms):
+
+                s = ms // 1000
+
+                return f"{s // 60}:{s % 60:02d}"
+
+            add_log(f"⏭ {label} 스킵 ({OPED_SKIP_SEC}초): {fmt(pos_ms)} → {fmt(new_pos)}")
+
+            return True
+
+        except Exception as e:
+
+            add_log(f"⚠ {label} 스킵 실패: {e}")
+
+            return False
+
     # ── 음악(노래) 감지 ───────────────────────────────────────────────────────
 
     def is_music_playing():
 
         """
-        최근 MUSIC_WINDOW 초의 RMS로 음악 재생 여부를 판별한다.
+        최근 MUSIC_WINDOW 초의 RMS로 음악 재생 여부 판별.
         조건 3가지 모두 만족해야 True:
           1) 평균 RMS > MUSIC_MIN_RMS     → 충분한 음량
           2) 변동계수(CV) < MUSIC_MAX_CV  → 에너지가 일정 (음악 특성)
@@ -608,46 +670,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         fill = float((arr > 0.02).mean())
 
         return cv < MUSIC_MAX_CV and fill > MUSIC_MIN_FILL
-
-    # ── 스킵 실행 공통 함수 ───────────────────────────────────────────────────
-
-    def execute_skip(hwnd, label="OP/ED"):
-
-        """현재 위치를 읽어 OPED_SKIP_SEC 초 앞으로 이동. 성공 시 True."""
-
-        pos_ms, dur_ms = get_playback_info(hwnd)
-
-        if pos_ms is None:
-
-            add_log(f"⚠ {label} 스킵 실패: 재생 정보 읽기 오류")
-
-            return False
-
-        new_pos, ok = do_oped_skip(hwnd, pos_ms, dur_ms, OPED_SKIP_SEC)
-
-        if ok:
-
-            def fmt(ms):
-
-                s = ms // 1000
-
-                return f"{s // 60}:{s % 60:02d}"
-
-            add_log(
-
-                f"⏭ {label} 스킵 ({OPED_SKIP_SEC}초):"
-
-                f" {fmt(pos_ms)} → {fmt(new_pos)}"
-
-                f"  (전체 {fmt(dur_ms)})"
-
-            )
-
-        else:
-
-            add_log(f"⚠ {label} 스킵 실패")
-
-        return ok
 
     def drain_queues():
 
@@ -745,7 +767,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
 
-                   notify=None, pos_ms=None, dur_ms=None, oped_prompt=None):
+                   notify=None, oped_prompt=None):
 
         queue_put(state_queue, dict(
 
@@ -757,8 +779,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             notify=notify,
 
-            pos_ms=pos_ms, dur_ms=dur_ms,
-            oped_prompt=oped_prompt,
+            oped_prompt=oped_prompt,   # GUI 팝업 트리거용
 
         ))
 
@@ -770,27 +791,17 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     diag_count       = 0
 
-    # ── 오프셋 스무딩: 최근 3회 중앙값으로 노이즈성 오탐 방지 ─────────────────
+    # ── OP/ED 감지 상태 ────────────────────────────────────────────────────────
 
-    offset_history = collections.deque(maxlen=3)
+    music_confirm = 0      # 연속 음악 감지 횟수
 
-    # ── OP/ED 스킵 상태 ────────────────────────────────────────────────────────
+    last_skip_t   = 0.0   # 마지막 스킵/닫기 시각 (쿨다운 계산용)
 
-    last_skip_t   = 0.0
-
-    music_confirm = 0
-
-    # OP/ED 감지 후 GUI 확인 팝업을 띄우는 동안 중복 요청을 막는다.
-    prompt_pending     = False
-    pending_prompt_id  = 0
-    pending_zone_label = None
+    prompt_sent   = False  # True = 팝업이 이미 떠 있는 상태 (중복 팝업 방지)
 
     while not stop_flag.value:
 
         t0 = time.perf_counter()
-
-        skip_toast_notify = None
-        oped_prompt = None
 
         # ── 커맨드 처리 ──────────────────────────────────────────────────────
 
@@ -814,21 +825,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                         total_ms = 0
 
-                        # 초기화 버튼으로 OP/ED 자동 스킵 상태도 함께 리셋한다.
-                        last_skip_t = 0.0
-
-                        music_confirm = 0
-
-                        prompt_pending = False
-                        pending_zone_label = None
-
-                        offset_history.clear()
-
-                        lip_buf.clear()
-
-                        aud_buf.clear()
-
-                        add_log("↺ 싱크/자동스킵 상태 초기화")
+                        add_log("↺ 싱크 초기화")
 
                     else:
 
@@ -836,49 +833,31 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                 elif cmd == "oped_skip":
 
-                    # 수동 스킵: 메인창 버튼 클릭 시 전달
-
+                    # ── 사용자가 팝업에서 "스킵" 클릭 ──
                     hwnd = find_potplayer_hwnd()
 
                     if hwnd:
 
-                        if execute_skip(hwnd, label="수동"):
+                        execute_skip(hwnd, label="수동")
 
-                            offset_history.clear()
+                    music_confirm = 0       # 감지 카운터 초기화
 
-                            lip_buf.clear()
+                    last_skip_t   = time.time()  # 3분 쿨다운 시작
 
-                            aud_buf.clear()
+                    prompt_sent   = False   # 팝업 상태 해제
 
-                    else:
+                    add_log("⏭ 스킵 완료 → 쿨다운 3분")
 
-                        add_log("⚠ 수동 스킵 실패: 팟플레이어 미감지")
+                elif cmd == "oped_no_skip":
 
-                elif isinstance(cmd, tuple) and len(cmd) >= 2 and cmd[0] in ("oped_prompt_yes", "oped_prompt_no"):
-                    # GUI에서 OP/ED 감지 팝업의 사용자 결정을 전달받아 처리한다.
-                    decision = cmd[0]
-                    prompt_id = cmd[1]
+                    # ── 사용자가 팝업을 닫거나 10초 타임아웃 ──
+                    music_confirm = 0       # 감지 카운터 초기화
 
-                    if prompt_pending and prompt_id == pending_prompt_id:
-                        hwnd = find_potplayer_hwnd()
-                        zone_label = pending_zone_label or "OP/ED"
+                    last_skip_t   = time.time()  # 3분 쿨다운 시작
 
-                        if decision == "oped_prompt_yes" and hwnd:
-                            if execute_skip(hwnd, label=zone_label):
-                                skip_toast_notify = (
-                                    "⏭ OP/ED",
-                                    f"{zone_label}이 스킵 되었습니다.",
-                                )
+                    prompt_sent   = False   # 팝업 상태 해제
 
-                        # 스킵 여부와 상관없이(무시/시간초과 포함) 쿨다운 시작
-                        last_skip_t = time.time()
-
-                        prompt_pending = False
-                        pending_zone_label = None
-                        music_confirm = 0
-                        offset_history.clear()
-                        lip_buf.clear()
-                        aud_buf.clear()
+                    add_log("⏭ 스킵 건너뜀 → 쿨다운 3분")
 
                 elif cmd == "stop":
 
@@ -900,9 +879,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         aud_n  = len(aud_buf)
 
-        # 현재 재생 위치 / 전체 길이 조회
-
-        cur_pos_ms, cur_dur_ms = get_playback_info(hwnd) if hwnd else (None, None)
+        # ── 영상 제목 변경 감지 → 쿨다운/카운터 초기화 (요구사항 5) ──────────
 
         if hwnd:
 
@@ -922,22 +899,21 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                     post_key_to_potplayer(hwnd, 0x6F, shift=True)
 
-                    total_ms = 0
+                    total_ms      = 0
 
                     lip_buf.clear()
 
                     aud_buf.clear()
 
-                    offset_history.clear()
+                    # OP/ED 상태 초기화 (요구사항 5)
 
                     music_confirm = 0
 
-                    last_skip_t = 0.0
+                    last_skip_t   = 0.0
 
-                    prompt_pending = False
-                    pending_zone_label = None
+                    prompt_sent   = False
 
-                    add_log("🔄 영상 변경 감지 → 싱크 초기화")
+                    add_log("🔄 영상 변경 감지 → 싱크 + OP/ED 상태 초기화")
 
                 prev_title = cur_title
 
@@ -951,7 +927,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             add_log("⚠ 오디오 미감지 — 팟플레이어가 소리를 재생 중인지 확인하세요")
 
-        notify = None
+        notify      = None
+
+        oped_prompt = None
 
         if not audio_detected and aud_n > 5:
 
@@ -963,70 +941,67 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             add_log("🎬 동영상 재생 감지")
 
-        # ── OP/ED 감지 → 사용자 확인 팝업 요청 ─────────────────────────────
-        # OPED_AUTO == True  : 음악 감지 기반(기존 music_confirm 로직)
-        # OPED_AUTO == False : OP/ED 구간(위치)만으로 즉시 팝업 요청
-        if hwnd and cur_pos_ms is not None and cur_dur_ms is not None:
-            in_op = cur_pos_ms < OPED_ZONE_SEC * 1000
-            in_ed = cur_pos_ms > (cur_dur_ms - OPED_ZONE_SEC * 1000)
-            since_last_skip = time.time() - last_skip_t
+        # ── OP/ED 감지 및 팝업 트리거 ────────────────────────────────────────
+        #
+        # 동작 조건:
+        #   - 자동 스킵 OFF (OPED_AUTO_SKIP=False)         ← 요구사항 1
+        #   - 현재 영상이 앞 3분(오프닝) 또는 뒤 3분(엔딩) 구간
+        #   - 쿨다운 3분이 지났을 것
+        #   - 팝업이 이미 떠 있지 않을 것 (prompt_sent=False)
+        #
+        # 음악 2회 연속 감지 시 → oped_prompt 발행 → GUI가 팝업 표시
 
-            if (in_op or in_ed) and since_last_skip > SKIP_COOLDOWN:
-                zone_label = "오프닝" if in_op else "엔딩"
+        if not OPED_AUTO_SKIP and hwnd and not prompt_sent:
 
-                if OPED_AUTO:
-                    # ON: 팝업 없이 음악 감지 연속 2회면 바로 스킵
+            pos_ms, dur_ms = get_playback_info(hwnd)
+
+            if pos_ms is not None and dur_ms is not None and dur_ms > 0:
+
+                in_op = pos_ms < OPED_ZONE_SEC * 1000
+
+                in_ed = pos_ms > (dur_ms - OPED_ZONE_SEC * 1000)
+
+                since_last = time.time() - last_skip_t
+
+                if (in_op or in_ed) and since_last > SKIP_COOLDOWN:
+
                     if is_music_playing():
-                        music_confirm += 1
-                        add_log(
-                            f"🎵 {zone_label} 음악 감지 ({music_confirm}/{MUSIC_CONFIRM}회)"
-                            f"  pos={cur_pos_ms // 1000}s / dur={cur_dur_ms // 1000}s"
-                        )
-                        if music_confirm >= MUSIC_CONFIRM:
-                            if execute_skip(hwnd, label=zone_label):
-                                last_skip_t = time.time()
-                                music_confirm = 0
-                                offset_history.clear()
-                                lip_buf.clear()
-                                aud_buf.clear()
-                                skip_toast_notify = (
-                                    "⏭ OP/ED",
-                                    "오프닝이 스킵 되었습니다."
-                                    if zone_label == "오프닝"
-                                    else "엔딩이 스킵 되었습니다.",
-                                )
-                    else:
-                        if music_confirm > 0:
-                            music_confirm -= 1
 
-                else:
-                    # OFF: 팝업은 OP/ED 음악 감지 연속 2회 확인 후 띄운다.
-                    if prompt_pending:
-                        pass
+                        music_confirm += 1
+
+                        zone_label = "오프닝" if in_op else "엔딩"
+
+                        add_log(f"🎵 {zone_label} 음악 감지 ({music_confirm}/{MUSIC_CONFIRM}회)")
+
+                        if music_confirm >= MUSIC_CONFIRM:
+
+                            # 팝업 정보를 state_queue에 실어 GUI로 전달 (요구사항 2)
+
+                            oped_prompt = {
+
+                                "zone":     zone_label,
+
+                                "skip_sec": OPED_SKIP_SEC,
+
+                            }
+
+                            prompt_sent = True   # 팝업이 뜰 때까지 재감지 방지
+
+                            add_log(f"🎵 {zone_label} 팝업 전송")
+
                     else:
-                        if is_music_playing():
-                            music_confirm += 1
-                            add_log(
-                                f"🎵 {zone_label} 음악 감지 ({music_confirm}/{MUSIC_CONFIRM}회)"
-                                f"  pos={cur_pos_ms // 1000}s / dur={cur_dur_ms // 1000}s"
-                            )
-                            if music_confirm >= MUSIC_CONFIRM:
-                                prompt_pending = True
-                                pending_prompt_id += 1
-                                pending_zone_label = zone_label
-                                oped_prompt = dict(prompt_id=pending_prompt_id, zone=zone_label)
-                                add_log(f"🗣 {zone_label} 스킵 확인 팝업 요청(자동스킵 OFF)")
-                                music_confirm = 0
-                        else:
-                            if music_confirm > 0:
-                                music_confirm -= 1
+
+                        # 음악이 멈추면 카운터 점진적 감소
+
+                        if music_confirm > 0:
+
+                            music_confirm -= 1
 
         if lip_n < 10 or aud_n < 10:
 
             push_state("데이터 수집 중", 0, total_ms, log_lines, pot_ok,
 
-                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms,
-                       oped_prompt=oped_prompt)
+                       lip_n, aud_n, notify, oped_prompt)
 
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
 
@@ -1046,48 +1021,27 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         offset_ms, _, _, lip_mean, aud_mean = compute_offset(lip_sig[-n:], aud_sig[-n:])
 
-        # ── 오프셋 스무딩 ────────────────────────────────────────────────────
-
-        offset_history.append(offset_ms)
-
-        smoothed_offset = (
-
-            float(np.median(offset_history))
-
-            if len(offset_history) >= 2
-
-            else offset_ms
-
-        )
-
         if diag_count < 3:
 
             diag_count += 1
 
-            add_log(
-
-                f"📊 raw={offset_ms:.0f}ms smooth={smoothed_offset:.0f}ms "
-
-                f"lip_mean={lip_mean:.3f} aud_mean={aud_mean:.3f}"
-
-            )
+            add_log(f"📊 offset={offset_ms:.0f}ms lip_mean={lip_mean:.3f} aud_mean={aud_mean:.3f}")
 
         if lip_mean < 1e-6:
 
             push_state("미감지", 0, total_ms, log_lines, pot_ok,
 
-                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms,
-                       oped_prompt=oped_prompt)
+                       lip_n, aud_n, notify, oped_prompt)
 
             time.sleep(1.0)
 
             continue
 
-        if abs(smoothed_offset) >= THRESH and hwnd:
+        if abs(offset_ms) >= THRESH and hwnd:
 
-            steps = min(int(abs(smoothed_offset) / STEP), MAX_STEPS)
+            steps = min(int(abs(offset_ms) / STEP), MAX_STEPS)
 
-            sign  = 1 if smoothed_offset > 0 else -1
+            sign  = 1 if offset_ms > 0 else -1
 
             if abs(total_ms + steps * STEP * sign) > MAX_TOTAL_MS:
 
@@ -1099,28 +1053,21 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                 add_log(f"⚠ 영상 싱크 상한 도달 (±{MAX_TOTAL_MS}ms)")
 
-                push_state("상한 도달", smoothed_offset, total_ms, log_lines, pot_ok,
+                push_state("상한 도달", offset_ms, total_ms, log_lines, pot_ok,
 
-                           lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms,
-                           oped_prompt=oped_prompt)
+                           lip_n, aud_n, notify, oped_prompt)
 
                 time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
 
                 continue
 
-            direction = "빠르게" if smoothed_offset > 0 else "느리게"
+            direction = "빠르게" if offset_ms > 0 else "느리게"
 
-            add_log(
-
-                f"보정: {direction} ×{steps} ({steps * STEP}ms)"
-
-                f"  [raw={offset_ms:.0f}ms → smooth={smoothed_offset:.0f}ms]"
-
-            )
+            add_log(f"보정: {direction} ×{steps} ({steps * STEP}ms)")
 
             for _ in range(steps):
 
-                vk = VK_OEM_PERIOD if smoothed_offset > 0 else VK_OEM_COMMA
+                vk = VK_OEM_PERIOD if offset_ms > 0 else VK_OEM_COMMA
 
                 post_key_to_potplayer(hwnd, vk, shift=True)
 
@@ -1138,9 +1085,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             status = "정상"
 
-        push_state(status, smoothed_offset, total_ms, log_lines, pot_ok,
+        push_state(status, offset_ms, total_ms, log_lines, pot_ok,
 
-                   lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms,
-                   oped_prompt=oped_prompt)
+                   lip_n, aud_n, notify, oped_prompt)
 
         time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

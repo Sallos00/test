@@ -45,10 +45,24 @@ def _square_cover_rgba(im, size: int):
     return resized.crop((left, top, left + size, top + size))
 
 
+def _ico_fill_solid_bg(im_rgba):
+    """탐색기·작업 표시줄은 투명 픽셀을 흰색으로 그려서 원이 '타일 중앙의 작은 동그라미'처럼 보인다.
+    EXE/app.ico용 프레임은 원과 같은 검정으로 코너를 채운다."""
+    from PIL import Image
+
+    w, h = im_rgba.size
+    base = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+    base.paste(im_rgba, (0, 0), im_rgba)
+    return base
+
+
 def ico_frame_images(sizes: Sequence[int]) -> List:
-    """EXE/Tk용 멀티 ICO — 각 해상도별 RGBA 정사각형 프레임."""
+    """EXE/Tk용 멀티 ICO — 각 해상도별 정사각형 프레임(쉘용은 불투명 배경)."""
     master = _load_master_rgba_cropped()
-    return [_square_cover_rgba(master, int(s)) for s in sizes]
+    return [
+        _ico_fill_solid_bg(_square_cover_rgba(master, int(s)))
+        for s in sizes
+    ]
 
 
 def resource_base_dir() -> str:

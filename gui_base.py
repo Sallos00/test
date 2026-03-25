@@ -18,6 +18,7 @@ import tkinter as tk
 
 import tkinter.messagebox as mb
 
+from app_icon import apply_to_toplevel, pil_image_for_tray
 from win32_utils import find_potplayer_hwnd, CFG
 
 class LipSyncGUIBase:
@@ -475,17 +476,7 @@ class LipSyncGUIBase:
 
         try:
 
-            import base64, tkinter as _tk
-
-            _ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABF0lEQVR4nOWXwQ2DMAxFQ9U5EGNwYgyGZIycOkbFIuVCICS24x8TqRL/SmI/vp1gnHu6OnjH5/sTn48DFFO/uJS4EqS8iEjczxO5dF08DCIDRMm5pJwuMALEq0XybI9QPpps3xCCrIuvggg63CCcyB1gaNfF0zVGRMRmSyA1GgoiuXcFSKyXhIIcMRMX+CZUylqWEwC9aBIICCTKlTlg7XYJhIptLkENSHMABOTdEkBTzmYOaHvpdgfQJs4cqD3X/TwVk1OxTwBwkkmTQ4pymUpguTOCriXYyUpl0Nidivsks6eAg6h5a+mF8hKMQ4fMgZCIPuMbzziSOaebC/mLKNpQczS1Q+mfj+UFEFG3/ZigIIYL7ZnaADPxiheQWUzuAAAAAElFTkSuQmCC"
-
-            _data = base64.b64decode(_ICON_B64)
-
-            _icon = _tk.PhotoImage(data=_data)
-
-            popup._icon_img = _icon
-
-            popup.iconphoto(True, _icon)
+            apply_to_toplevel(popup, self.root)
 
         except Exception:
 
@@ -555,8 +546,6 @@ class LipSyncGUIBase:
 
             import pystray
 
-            from PIL import Image, ImageDraw
-
             if self._tray:
 
                 try: self._tray.stop()
@@ -565,13 +554,7 @@ class LipSyncGUIBase:
 
             self._tray = None
 
-            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-
-            draw = ImageDraw.Draw(img)
-
-            draw.ellipse([2, 2, 62, 62], fill="#1e1e1e", outline="#00c8e0", width=4)
-
-            draw.polygon([(20, 14), (20, 50), (52, 32)], fill="#00c8e0")
+            img = pil_image_for_tray(64)
 
             def tray_toggle_sync(icon, item):
 

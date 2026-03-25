@@ -48,7 +48,7 @@ def main():
         ico.write(struct.pack("<BBBBHHII", w, h, 0, 0, 1, 32, len(png), offset))
         offset += len(png)
 
-    # PNG 데이터
+    # PNG データ
     for png in pngs:
         ico.write(png)
 

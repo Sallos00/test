@@ -23,7 +23,10 @@ _cached_ico_path: Optional[str] = None
 
 
 def make_frame(size: int) -> Image.Image:
-    """재생 버튼 스타일 — 원 + 청록 링 + 삼각형."""
+    """재생 버튼 스타일 — 원 + 청록 링 + 삼각형. 배경은 투명(RGBA 0,0,0,0).
+
+    일부 탐색기 보기에서는 투명을 흰색처럼 그릴 수 있음(Windows 셸 동작).
+    """
     s = int(size)
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)

@@ -615,7 +615,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         try:
 
-            _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, new_pos)
+            _user32.SendMessageW(hwnd, WM_USER, new_pos, 0x5001)
 
             def fmt(ms):
 
@@ -941,17 +941,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             add_log("🎬 동영상 재생 감지")
 
-        # ── OP/ED 감지 및 팝업 트리거 ────────────────────────────────────────
+        # ── OP/ED 감지 및 팝업/자동스킵 트리거 ─────────────────────────────────
         #
-        # 동작 조건:
-        #   - 자동 스킵 OFF (OPED_AUTO_SKIP=False)         ← 요구사항 1
-        #   - 현재 영상이 앞 3분(오프닝) 또는 뒤 3분(엔딩) 구간
-        #   - 쿨다운 3분이 지났을 것
-        #   - 팝업이 이미 떠 있지 않을 것 (prompt_sent=False)
-        #
-        # 음악 2회 연속 감지 시 → oped_prompt 발행 → GUI가 팝업 표시
+        # [자동스킵 OFF] 음악 2회 연속 감지 → oped_prompt 발행 → GUI 팝업 표시
+        # [자동스킵 ON ] 음악 2회 연속 감지 → 바로 execute_skip 실행
 
-        if not OPED_AUTO_SKIP and hwnd and not prompt_sent:
+        if hwnd:
 
             pos_ms, dur_ms = get_playback_info(hwnd)
 
@@ -975,19 +970,31 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                         if music_confirm >= MUSIC_CONFIRM:
 
-                            # 팝업 정보를 state_queue에 실어 GUI로 전달 (요구사항 2)
+                            if OPED_AUTO_SKIP:
 
-                            oped_prompt = {
+                                # ── 자동스킵 ON: 즉시 스킵 실행 ──────────────
+                                if execute_skip(hwnd, label=zone_label):
 
-                                "zone":     zone_label,
+                                    music_confirm = 0
 
-                                "skip_sec": OPED_SKIP_SEC,
+                                    last_skip_t   = time.time()
 
-                            }
+                                    add_log(f"⏭ {zone_label} 자동 스킵 완료 → 쿨다운 3분")
 
-                            prompt_sent = True   # 팝업이 뜰 때까지 재감지 방지
+                            elif not prompt_sent:
 
-                            add_log(f"🎵 {zone_label} 팝업 전송")
+                                # ── 자동스킵 OFF: GUI 팝업 요청 ───────────────
+                                oped_prompt = {
+
+                                    "zone":     zone_label,
+
+                                    "skip_sec": OPED_SKIP_SEC,
+
+                                }
+
+                                prompt_sent = True
+
+                                add_log(f"🎵 {zone_label} 팝업 전송")
 
                     else:
 

@@ -317,6 +317,8 @@ class LipSyncGUIRun:
 
     # ── 100ms 주기 UI 갱신 ────────────────────────────────────────────────────
     def _refresh(self):
+        if self._closing:
+            return
         want_auto_skip = (not self._running) and self._oped_auto_var.get()
         if want_auto_skip and not getattr(self, "_auto_skip_running", False):
             self._start_auto_skip_monitor()
@@ -417,19 +419,44 @@ class LipSyncGUIRun:
         self.root.after(100, self._refresh)
 
     # ── 인증 ──────────────────────────────────────────────────────────────────
+    def _destroy_app_root(self):
+        """Tk 종료 — _on_close에서 after로만 호출."""
+        try:
+            if self.root.winfo_exists():
+                self.root.destroy()
+        except Exception:
+            pass
+
     def _on_close(self):
+        if getattr(self, "_app_shutdown_started", False):
+            return
+        self._app_shutdown_started = True
         self._closing = True
         self._popup_open = False
-        # 예약된 팝업 콜백 취소
         if hasattr(self, "_popup_after_id"):
-            try: self.root.after_cancel(self._popup_after_id)
-            except Exception: pass
+            try:
+                self.root.after_cancel(self._popup_after_id)
+            except Exception:
+                pass
         self._save_pos()
         self._stop_processes()
         self._stop_auto_skip_monitor()
-        if self._tray:
-            try: self._tray.stop()
-            except Exception: pass
+        tray_ref = self._tray
         self._tray = None
-        try: self.root.destroy()
-        except Exception: pass
+
+        def _stop_tray_bg():
+            if not tray_ref:
+                return
+            try:
+                tray_ref.stop()
+            except Exception:
+                pass
+
+        # 메인 스레드에서 Icon.stop()을 기다리면 pystray 메뉴/루프와 충돌해
+        # 멈춘 것처럼 보이는 경우가 있음 → 백그라운드에서 stop만 수행.
+        threading.Thread(target=_stop_tray_bg, daemon=True).start()
+        # 트레이 메뉴 닫힘·WM_STOP 처리 여유 후 창 파괴
+        try:
+            self.root.after(320, self._destroy_app_root)
+        except Exception:
+            self._destroy_app_root()

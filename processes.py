@@ -615,7 +615,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         try:
 
-            _user32.SendMessageW(hwnd, WM_USER, new_pos, 0x5001)
+            _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, new_pos)
 
             def fmt(ms):
 

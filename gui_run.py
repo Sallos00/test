@@ -445,6 +445,135 @@ class LipSyncGUIRun:
         except Exception:
             pass
 
+    # ── OP/ED 스킵 팝업 (자동스킵 OFF일 때만 호출) ──────────────────────────
+    # processes.py proc_analyzer 가 oped_prompt 를 state_queue 에 실어 보내면
+    # _refresh() 가 이 메서드를 호출한다.
+    #
+    # 팝업 위치 : 팟플레이어 동영상 우측 하단
+    # [스킵]    → oped_skip 커맨드 전송 → 스킵 + 쿨다운 3분
+    # [닫기]    → oped_no_skip 커맨드 전송 → 쿨다운 3분
+    # 10초 경과 → 자동으로 닫기 처리
+
+    def _show_oped_skip_popup(self, prompt_info: dict, auto_mode: bool = False):
+
+        # 중복 팝업 방지
+        if getattr(self, "_oped_popup_open", False):
+            return
+
+        import ctypes
+        import ctypes.wintypes
+
+        zone     = prompt_info.get("zone", "OP/ED")
+        skip_sec = prompt_info.get("skip_sec", 90)
+
+        # 팟플레이어 창 위치 조회
+        from win32_utils import find_potplayer_hwnd
+        hwnd = find_potplayer_hwnd()
+        if not hwnd:
+            return
+
+        try:
+            rect = ctypes.wintypes.RECT()
+            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        except Exception:
+            return
+
+        # 팝업 크기 (UI 스케일 반영)
+        r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        pw = round(280 * r)
+        ph = round(88  * r)
+
+        # 팟플레이어 우측 하단 위치 (화면 밖 클램프)
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        px = max(0, min(rect.right  - pw - 12, sw - pw))
+        py = max(0, min(rect.bottom - ph - 48, sh - ph))
+
+        self._oped_popup_open = True
+
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        popup.configure(bg=self.BORDER)
+        popup.geometry(f"{pw}x{ph}+{px}+{py}")
+
+        # 커맨드 전송 헬퍼
+        def send_cmd(cmd: str):
+            try:
+                if auto_mode:
+                    self._auto_cmd_queue.put_nowait(cmd)
+                else:
+                    self.cmd_queue.put_nowait(cmd)
+            except Exception:
+                pass
+
+        countdown = [10]
+        after_id  = [None]
+
+        def close_popup(skip: bool):
+            self._oped_popup_open = False
+            if after_id[0]:
+                try:
+                    self.root.after_cancel(after_id[0])
+                except Exception:
+                    pass
+            send_cmd("oped_skip" if skip else "oped_no_skip")
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+
+        # 팝업 UI
+        F_TITLE = max(8, round(9  * r))
+        F_BTN   = max(7, round(8  * r))
+        PAD     = round(10 * r)
+        PAD_S   = round(6  * r)
+
+        outer = tk.Frame(popup, bg=self.BORDER)
+        outer.pack(fill="both", expand=True, padx=1, pady=1)
+
+        inner = tk.Frame(outer, bg=self.BG2, padx=PAD, pady=round(8 * r))
+        inner.pack(fill="both", expand=True)
+
+        lbl = tk.Label(inner,
+                       text=f"🎵 {zone}을 스킵하시겠습니까? (10초)",
+                       font=("Segoe UI", F_TITLE, "bold"),
+                       bg=self.BG2, fg=self.TEXT, anchor="w")
+        lbl.pack(fill="x")
+
+        tk.Label(inner,
+                 text=f"스킵 시 {skip_sec}초 앞으로 이동합니다.",
+                 font=("Consolas", max(7, F_TITLE - 1)),
+                 bg=self.BG2, fg=self.TEXT_MID, anchor="w").pack(fill="x", pady=(round(2 * r), 0))
+
+        btn_f = tk.Frame(inner, bg=self.BG2)
+        btn_f.pack(anchor="e", pady=(PAD_S, 0))
+
+        BTN = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
+                   padx=round(12 * r), pady=round(3 * r))
+
+        tk.Button(btn_f, text="⏭ 스킵",
+                  bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER,
+                  command=lambda: close_popup(skip=True), **BTN).pack(side="left", padx=(0, round(4 * r)))
+
+        tk.Button(btn_f, text="닫기",
+                  bg=self.BG3, fg=self.TEXT_MID, activebackground=self.BORDER,
+                  command=lambda: close_popup(skip=False), **BTN).pack(side="left")
+
+        # 10초 카운트다운
+        def tick():
+            countdown[0] -= 1
+            if countdown[0] <= 0:
+                close_popup(skip=False)
+                return
+            try:
+                lbl.config(text=f"🎵 {zone}을 스킵하시겠습니까? ({countdown[0]}초)")
+                after_id[0] = self.root.after(1000, tick)
+            except Exception:
+                close_popup(skip=False)
+
+        after_id[0] = self.root.after(1000, tick)
+
     def _on_close(self):
         if getattr(self, "_app_shutdown_started", False):
             return

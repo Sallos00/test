@@ -542,7 +542,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     OPED_ZONE_SEC  = 180    # 앞/뒤 몇 초를 OP/ED 구간으로 볼지 (3분)
 
-    SKIP_COOLDOWN  = 120    # 스킵 후 재스킵 방지 대기(초)
+    OPED_PROMPT_TIMEOUT_SEC = 10  # 팝업 닫히는 시간(초) — 스킵/무시 둘 다 쿨다운 시작
+    SKIP_COOLDOWN  = 180    # 스킵/무시 후 재스킵 방지 대기(초, 3분)
 
     MUSIC_WINDOW   = 5.0   # 음악 감지 버퍼 길이(초)
 
@@ -744,7 +745,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
 
-                   notify=None, pos_ms=None, dur_ms=None):
+                   notify=None, pos_ms=None, dur_ms=None, oped_prompt=None):
 
         queue_put(state_queue, dict(
 
@@ -757,6 +758,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             notify=notify,
 
             pos_ms=pos_ms, dur_ms=dur_ms,
+            oped_prompt=oped_prompt,
 
         ))
 
@@ -778,11 +780,17 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     music_confirm = 0
 
+    # OP/ED 감지 후 GUI 확인 팝업을 띄우는 동안 중복 요청을 막는다.
+    prompt_pending     = False
+    pending_prompt_id  = 0
+    pending_zone_label = None
+
     while not stop_flag.value:
 
         t0 = time.perf_counter()
 
         skip_toast_notify = None
+        oped_prompt = None
 
         # ── 커맨드 처리 ──────────────────────────────────────────────────────
 
@@ -810,6 +818,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         last_skip_t = 0.0
 
                         music_confirm = 0
+
+                        prompt_pending = False
+                        pending_zone_label = None
 
                         offset_history.clear()
 
@@ -842,6 +853,32 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     else:
 
                         add_log("⚠ 수동 스킵 실패: 팟플레이어 미감지")
+
+                elif isinstance(cmd, tuple) and len(cmd) >= 2 and cmd[0] in ("oped_prompt_yes", "oped_prompt_no"):
+                    # GUI에서 OP/ED 감지 팝업의 사용자 결정을 전달받아 처리한다.
+                    decision = cmd[0]
+                    prompt_id = cmd[1]
+
+                    if prompt_pending and prompt_id == pending_prompt_id:
+                        hwnd = find_potplayer_hwnd()
+                        zone_label = pending_zone_label or "OP/ED"
+
+                        if decision == "oped_prompt_yes" and hwnd:
+                            if execute_skip(hwnd, label=zone_label):
+                                skip_toast_notify = (
+                                    "⏭ OP/ED",
+                                    f"{zone_label}이 스킵 되었습니다.",
+                                )
+
+                        # 스킵 여부와 상관없이(무시/시간초과 포함) 쿨다운 시작
+                        last_skip_t = time.time()
+
+                        prompt_pending = False
+                        pending_zone_label = None
+                        music_confirm = 0
+                        offset_history.clear()
+                        lip_buf.clear()
+                        aud_buf.clear()
 
                 elif cmd == "stop":
 
@@ -897,6 +934,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                     last_skip_t = 0.0
 
+                    prompt_pending = False
+                    pending_zone_label = None
+
                     add_log("🔄 영상 변경 감지 → 싱크 초기화")
 
                 prev_title = cur_title
@@ -923,69 +963,70 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             add_log("🎬 동영상 재생 감지")
 
-        # ── OP/ED 자동 스킵 (설정에서 활성화된 경우에만 실행) ─────────────────
-
-        if OPED_AUTO and hwnd and cur_pos_ms is not None and cur_dur_ms is not None:
-
+        # ── OP/ED 감지 → 사용자 확인 팝업 요청 ─────────────────────────────
+        # OPED_AUTO == True  : 음악 감지 기반(기존 music_confirm 로직)
+        # OPED_AUTO == False : OP/ED 구간(위치)만으로 즉시 팝업 요청
+        if hwnd and cur_pos_ms is not None and cur_dur_ms is not None:
             in_op = cur_pos_ms < OPED_ZONE_SEC * 1000
-
             in_ed = cur_pos_ms > (cur_dur_ms - OPED_ZONE_SEC * 1000)
-
             since_last_skip = time.time() - last_skip_t
 
             if (in_op or in_ed) and since_last_skip > SKIP_COOLDOWN:
+                zone_label = "오프닝" if in_op else "엔딩"
 
-                if is_music_playing():
-
-                    music_confirm += 1
-
-                    zone_label = "오프닝" if in_op else "엔딩"
-
-                    add_log(
-
-                        f"🎵 {zone_label} 음악 감지 ({music_confirm}/{MUSIC_CONFIRM}회)"
-
-                        f"  pos={cur_pos_ms // 1000}s / dur={cur_dur_ms // 1000}s"
-
-                    )
-
-                    if music_confirm >= MUSIC_CONFIRM:
-
-                        if execute_skip(hwnd, label=zone_label):
-
-                            last_skip_t   = time.time()
-
-                            music_confirm = 0
-
-                            offset_history.clear()
-
-                            lip_buf.clear()
-
-                            aud_buf.clear()
-
-                            skip_toast_notify = (
-
-                                "⏭ OP/ED",
-
-                                "오프닝이 스킵 되었습니다."
-
-                                if zone_label == "오프닝"
-
-                                else "엔딩이 스킵 되었습니다.",
-
-                            )
+                if OPED_AUTO:
+                    # ON: 팝업 없이 음악 감지 연속 2회면 바로 스킵
+                    if is_music_playing():
+                        music_confirm += 1
+                        add_log(
+                            f"🎵 {zone_label} 음악 감지 ({music_confirm}/{MUSIC_CONFIRM}회)"
+                            f"  pos={cur_pos_ms // 1000}s / dur={cur_dur_ms // 1000}s"
+                        )
+                        if music_confirm >= MUSIC_CONFIRM:
+                            if execute_skip(hwnd, label=zone_label):
+                                last_skip_t = time.time()
+                                music_confirm = 0
+                                offset_history.clear()
+                                lip_buf.clear()
+                                aud_buf.clear()
+                                skip_toast_notify = (
+                                    "⏭ OP/ED",
+                                    "오프닝이 스킵 되었습니다."
+                                    if zone_label == "오프닝"
+                                    else "엔딩이 스킵 되었습니다.",
+                                )
+                    else:
+                        if music_confirm > 0:
+                            music_confirm -= 1
 
                 else:
-
-                    if music_confirm > 0:
-
-                        music_confirm -= 1
+                    # OFF: 팝업은 OP/ED 음악 감지 연속 2회 확인 후 띄운다.
+                    if prompt_pending:
+                        pass
+                    else:
+                        if is_music_playing():
+                            music_confirm += 1
+                            add_log(
+                                f"🎵 {zone_label} 음악 감지 ({music_confirm}/{MUSIC_CONFIRM}회)"
+                                f"  pos={cur_pos_ms // 1000}s / dur={cur_dur_ms // 1000}s"
+                            )
+                            if music_confirm >= MUSIC_CONFIRM:
+                                prompt_pending = True
+                                pending_prompt_id += 1
+                                pending_zone_label = zone_label
+                                oped_prompt = dict(prompt_id=pending_prompt_id, zone=zone_label)
+                                add_log(f"🗣 {zone_label} 스킵 확인 팝업 요청(자동스킵 OFF)")
+                                music_confirm = 0
+                        else:
+                            if music_confirm > 0:
+                                music_confirm -= 1
 
         if lip_n < 10 or aud_n < 10:
 
             push_state("데이터 수집 중", 0, total_ms, log_lines, pot_ok,
 
-                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
+                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms,
+                       oped_prompt=oped_prompt)
 
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
 
@@ -1035,7 +1076,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             push_state("미감지", 0, total_ms, log_lines, pot_ok,
 
-                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
+                       lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms,
+                       oped_prompt=oped_prompt)
 
             time.sleep(1.0)
 
@@ -1059,7 +1101,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
                 push_state("상한 도달", smoothed_offset, total_ms, log_lines, pot_ok,
 
-                           lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
+                           lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms,
+                           oped_prompt=oped_prompt)
 
                 time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
 
@@ -1097,6 +1140,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         push_state(status, smoothed_offset, total_ms, log_lines, pot_ok,
 
-                   lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms)
+                   lip_n, aud_n, skip_toast_notify or notify, cur_pos_ms, cur_dur_ms,
+                   oped_prompt=oped_prompt)
 
         time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

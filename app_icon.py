@@ -4,7 +4,7 @@ import base64
 import io
 import os
 import sys
-from typing import Optional
+from typing import List, Optional, Sequence
 
 # gui_ui / 기존 팝업과 동일한 32×32 PNG 데이터
 APP_ICON_PNG_B64 = (
@@ -16,6 +16,39 @@ _cached_ico_path: Optional[str] = None
 
 def png_bytes() -> bytes:
     return base64.b64decode(APP_ICON_PNG_B64)
+
+
+def _load_master_rgba_cropped():
+    """원본 32×32 PNG는 실제 문양 주변에 투명 여백이 커서, 아이콘·EXE에서 작게 보인다. 알파 기준 타이트 크롭."""
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(png_bytes())).convert("RGBA")
+    bbox = im.getbbox()
+    if bbox:
+        im = im.crop(bbox)
+    return im
+
+
+def _square_cover_rgba(im, size: int):
+    """문양을 size×size에 맞게 확대한 뒤 중앙 크롭(여백 없이 타일에 꽉 차게)."""
+    from PIL import Image
+
+    w, h = im.size
+    if w < 1 or h < 1 or size < 1:
+        return Image.new("RGBA", (max(1, size), max(1, size)), (0, 0, 0, 0))
+    scale = max(size / w, size / h)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    resized = im.resize((nw, nh), Image.Resampling.LANCZOS)
+    left = (nw - size) // 2
+    top = (nh - size) // 2
+    return resized.crop((left, top, left + size, top + size))
+
+
+def ico_frame_images(sizes: Sequence[int]) -> List:
+    """EXE/Tk용 멀티 ICO — 각 해상도별 RGBA 정사각형 프레임."""
+    master = _load_master_rgba_cropped()
+    return [_square_cover_rgba(master, int(s)) for s in sizes]
 
 
 def resource_base_dir() -> str:
@@ -33,11 +66,9 @@ def _write_temp_ico_from_png() -> str:
     global _cached_ico_path
     if _cached_ico_path and os.path.isfile(_cached_ico_path):
         return _cached_ico_path
-    from PIL import Image
 
-    im = Image.open(io.BytesIO(png_bytes())).convert("RGBA")
     sizes = (16, 24, 32, 48, 64)
-    imgs = [im.resize((s, s), Image.Resampling.LANCZOS) for s in sizes]
+    imgs = ico_frame_images(sizes)
     import tempfile
 
     fd, path = tempfile.mkstemp(prefix="autosync_icon_", suffix=".ico")
@@ -61,9 +92,7 @@ def pil_image_for_tray(size: int = 64):
     """pystray.Icon(..., image=...) 용 — 팝업 PNG와 동일 모양, 트레이에서 투명만 보이지 않게 배경 합성."""
     from PIL import Image
 
-    src = Image.open(io.BytesIO(png_bytes())).convert("RGBA")
-    if src.size != (size, size):
-        src = src.resize((size, size), Image.Resampling.LANCZOS)
+    src = _square_cover_rgba(_load_master_rgba_cropped(), size)
     # Windows 알림 영역은 투명 픽셀만 있으면 '안 보임'처럼 느껴질 수 있음
     base = Image.new("RGBA", (size, size), (30, 30, 30, 255))
     base.paste(src, (0, 0), src)

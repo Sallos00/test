@@ -533,35 +533,21 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     MAX_TOTAL_MS = cfg["MAX_TOTAL_SYNC_MS"]
 
     # ── OP/ED 감지 설정 ──────────────────────────────────────────────────────
-    # cfg 에 없으면 settings.json 에서 직접 읽어 폴백
+    OPED_AUTO_SKIP = bool(cfg.get("OPED_AUTO_SKIP", False))
+    OPED_SKIP_SEC  = int(cfg.get("OPED_SKIP_SEC", 90))
 
-    OPED_AUTO_SKIP = (cfg.get("OPED_AUTO_SKIP")
-                      if cfg.get("OPED_AUTO_SKIP") is not None
-                      else _load_saved_setting("oped_auto_skip", False))
+    WM_USER        = 0x400   # 팟플레이어 IPC 메시지 베이스
 
-    OPED_SKIP_SEC  = (cfg.get("OPED_SKIP_SEC")
-                      if cfg.get("OPED_SKIP_SEC") is not None
-                      else _load_saved_setting("oped_skip_sec", 90))
-
-    WM_USER        = 0x400         # 팟플레이어 IPC 메시지 베이스
-
-    OPED_ZONE_SEC  = 180           # 앞/뒤 몇 초를 OP/ED 구간으로 볼지 (3분)
-
-    SKIP_COOLDOWN  = 180           # 스킵/닫기 후 재감지 방지 대기 시간 (3분)
-
-    MUSIC_WINDOW   = 15.0          # 음악 감지 버퍼 길이(초)
-
-    MUSIC_MIN_RMS  = 0.03          # 최소 평균 RMS (무음 제외)
-
-    MUSIC_MAX_CV   = 0.8           # 변동계수 상한 (낮을수록 에너지 일정 = 음악)
-
-    MUSIC_MIN_FILL = 0.70          # 노이즈 floor 이상 프레임 비율 하한
-
-    MUSIC_CONFIRM  = 2             # 연속 N회 감지 후 팝업/스킵 실행
+    OPED_ZONE_SEC  = 180     # 앞/뒤 3분을 OP/ED 구간으로 판단
+    SKIP_COOLDOWN  = 180     # 스킵/닫기 후 재감지 방지 대기 시간 (3분)
+    MUSIC_WINDOW   = 15.0    # 음악 감지에 사용할 오디오 버퍼 길이 (초)
+    MUSIC_MIN_RMS  = 0.03    # 최소 평균 RMS
+    MUSIC_MAX_CV   = 0.8     # 변동계수 상한
+    MUSIC_MIN_FILL = 0.70    # 유효 프레임 비율 하한
+    MUSIC_CONFIRM  = 2       # 연속 N회 감지 시 동작
 
     lip_buf   = collections.deque()
-
-    aud_buf   = collections.deque()
+    aud_buf   = collections.deque()   # MUSIC_WINDOW 초치 보관
 
     total_ms  = 0
 
@@ -712,13 +698,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         now = time.time()
 
         while lip_buf and now - lip_buf[0][0] > BUF_SEC:
-
             lip_buf.popleft()
 
-        # aud_buf는 is_music_playing()이 MUSIC_WINDOW(15초)치를 필요로 하므로
-        # BUF_SEC(3초)가 아닌 MUSIC_WINDOW 기준으로 만료 처리
+        # aud_buf는 MUSIC_WINDOW(15초)치가 필요하므로 그 기준으로 만료
         while aud_buf and now - aud_buf[0][0] > MUSIC_WINDOW:
-
             aud_buf.popleft()
 
     def resample(tvs, fps=15):
@@ -944,119 +927,74 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             add_log("🎬 동영상 재생 감지")
 
         # ── OP/ED 감지 및 팝업/자동스킵 트리거 ─────────────────────────────────
-        #
-        # [자동스킵 OFF] 음악 2회 연속 감지 → oped_prompt 발행 → GUI 팝업 표시
-        # [자동스킵 ON ] 음악 2회 연속 감지 → 바로 execute_skip 실행
+        # [자동스킵 ON ]  음악 MUSIC_CONFIRM회 연속 감지 → 즉시 스킵 + 쿨다운
+        # [자동스킵 OFF]  음악 MUSIC_CONFIRM회 연속 감지 → 팝업 표시
+        #                  팝업 [스킵]  → 스킵 + 쿨다운
+        #                  팝업 [닫기] or 10초 타임아웃 → 스킵 없이 쿨다운
 
         if hwnd:
-
             pos_ms, dur_ms = get_playback_info(hwnd)
 
             if pos_ms is None or dur_ms is None or dur_ms == 0:
-
-                # ── 재생 정보 취득 실패 로그 (30초마다 1회) ──────────────────
-                _now = time.time()
-                if _now - getattr(proc_analyzer, '_ipc_warn_t', 0) > 30:
-                    proc_analyzer._ipc_warn_t = _now
-                    add_log(f"⚠ IPC 재생 정보 없음 (pos={pos_ms}, dur={dur_ms}) — 팟플레이어 IPC 미지원 가능")
-
+                add_log("⚠ IPC 재생 정보 없음 — 팟플레이어 IPC 미지원 가능")
             else:
+                def _fmt(ms):
+                    s = ms // 1000
+                    return f"{s // 60}:{s % 60:02d}"
 
-                in_op = pos_ms < OPED_ZONE_SEC * 1000
-
-                in_ed = pos_ms > (dur_ms - OPED_ZONE_SEC * 1000)
-
+                in_op      = pos_ms < OPED_ZONE_SEC * 1000
+                in_ed      = pos_ms > (dur_ms - OPED_ZONE_SEC * 1000)
+                in_zone    = in_op or in_ed
+                zone_label = "오프닝" if in_op else "엔딩"
                 since_last = time.time() - last_skip_t
+                cooled     = since_last > SKIP_COOLDOWN
 
-                # ── 위치/구간 주기적 진단 로그 (60초마다) ────────────────────
-                _now = time.time()
-                if _now - getattr(proc_analyzer, '_pos_log_t', 0) > 60:
-                    proc_analyzer._pos_log_t = _now
-                    def _fmt(ms): s = ms // 1000; return f"{s // 60}:{s % 60:02d}"
-                    zone_str = ("오프닝" if in_op else "엔딩" if in_ed else "일반")
-                    add_log(f"📍 재생 {_fmt(pos_ms)}/{_fmt(dur_ms)} 구간={zone_str} aud_buf={aud_n}")
+                add_log(
+                    f"📍 재생 {_fmt(pos_ms)}/{_fmt(dur_ms)} "
+                    f"구간={'오프닝' if in_op else '엔딩' if in_ed else '일반'} "
+                    f"aud={aud_n} confirm={music_confirm} "
+                    f"{'쿨다운중' if not cooled else 'OK'}"
+                )
 
-                if (in_op or in_ed) and since_last > SKIP_COOLDOWN:
-
-                    if is_music_playing():
-
+                if in_zone and cooled:
+                    music = is_music_playing()
+                    if music:
                         music_confirm += 1
-
-                        zone_label = "오프닝" if in_op else "엔딩"
-
                         add_log(f"🎵 {zone_label} 음악 감지 ({music_confirm}/{MUSIC_CONFIRM}회)")
 
                         if music_confirm >= MUSIC_CONFIRM:
-
                             if OPED_AUTO_SKIP:
-
-                                # ── 자동스킵 ON: 즉시 스킵 실행 ──────────────
+                                # 자동스킵 ON → 즉시 스킵
                                 if execute_skip(hwnd, label=zone_label):
-
                                     music_confirm = 0
-
                                     last_skip_t   = time.time()
-
-                                    add_log(f"⏭ {zone_label} 자동 스킵 완료 → 쿨다운 3분")
-
+                                    add_log(f"⏭ {zone_label} 자동스킵 완료 → 쿨다운 3분")
                             elif not prompt_sent:
-
-                                # ── 자동스킵 OFF: GUI 팝업 요청 ───────────────
-                                oped_prompt = {
-
-                                    "zone":     zone_label,
-
-                                    "skip_sec": OPED_SKIP_SEC,
-
-                                }
-
+                                # 자동스킵 OFF → 팝업 요청
+                                oped_prompt = {"zone": zone_label, "skip_sec": OPED_SKIP_SEC}
                                 prompt_sent = True
-
                                 add_log(f"🎵 {zone_label} 팝업 전송")
-
                     else:
-
-                        # ── 음악 미감지 상세 진단 (30초마다) ─────────────────
-                        _now = time.time()
-                        if _now - getattr(proc_analyzer, '_music_fail_t', 0) > 30:
-                            proc_analyzer._music_fail_t = _now
-                            zone_label = "오프닝" if in_op else "엔딩"
-                            if aud_n >= 10:
-                                recent = [v for t2, v in aud_buf
-                                          if time.time() - t2 <= MUSIC_WINDOW]
-                                if recent:
-                                    import numpy as _np
-                                    arr = _np.array(recent, dtype=_np.float32)
-                                    mean_rms = float(arr.mean())
-                                    cv = (float(arr.std() / mean_rms)
-                                          if mean_rms > 1e-9 else 999.0)
-                                    fill = float((arr > 0.02).mean())
-                                    add_log(
-                                        f"🎵 {zone_label} 음악 미감지 — "
-                                        f"rms={mean_rms:.4f}(≥{MUSIC_MIN_RMS}) "
-                                        f"cv={cv:.2f}(≤{MUSIC_MAX_CV}) "
-                                        f"fill={fill:.2f}(≥{MUSIC_MIN_FILL})"
-                                    )
-                                else:
-                                    add_log(f"🎵 {zone_label} 구간이나 오디오 버퍼 비어있음")
-                            else:
-                                add_log(f"🎵 {zone_label} 구간이나 오디오 샘플 부족 ({aud_n}개)")
-
-                        # 음악이 멈추면 카운터 점진적 감소
-
+                        # 음악 미감지: 수치 로그 + 카운터 감소
+                        if aud_n >= 10:
+                            recent = [v for ts2, v in aud_buf if time.time() - ts2 <= MUSIC_WINDOW]
+                            if recent:
+                                arr      = np.array(recent, dtype=np.float32)
+                                mean_rms = float(arr.mean())
+                                cv       = float(arr.std() / mean_rms) if mean_rms > 1e-9 else 999.0
+                                fill     = float((arr > 0.02).mean())
+                                add_log(
+                                    f"🎵 {zone_label} 음악 미감지 — "
+                                    f"rms={mean_rms:.4f}(≥{MUSIC_MIN_RMS}) "
+                                    f"cv={cv:.2f}(≤{MUSIC_MAX_CV}) "
+                                    f"fill={fill:.2f}(≥{MUSIC_MIN_FILL})"
+                                )
                         if music_confirm > 0:
-
                             music_confirm -= 1
 
-                elif (in_op or in_ed) and since_last <= SKIP_COOLDOWN:
-
-                    # 쿨다운 중 로그 (30초마다)
-                    _now = time.time()
-                    if _now - getattr(proc_analyzer, '_cooldown_log_t', 0) > 30:
-                        proc_analyzer._cooldown_log_t = _now
-                        zone_label = "오프닝" if in_op else "엔딩"
-                        remain = int(SKIP_COOLDOWN - since_last)
-                        add_log(f"⏳ {zone_label} 구간 — 쿨다운 {remain}초 남음")
+                elif in_zone and not cooled:
+                    remain = int(SKIP_COOLDOWN - since_last)
+                    add_log(f"⏳ {zone_label} 쿨다운 {remain}초 남음")
 
         if lip_n < 10 or aud_n < 10:
 

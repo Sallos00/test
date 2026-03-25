@@ -14,6 +14,8 @@ import sys
 
 import threading
 
+import traceback
+
 import winreg
 
 import tkinter as tk
@@ -561,10 +563,8 @@ class LipSyncGUIBase:
             # Windows Shell 아이콘은 프로세스별 고유 ID가 안전 (이전 실행 캐시/충돌 완화)
             tray_uid = "AutoSync.%s" % (os.getpid(),)
 
+            # pystray는 PIL Image를 ICO로 저장해 Shell에 넘김 — RGB 변환은 일부 Pillow/Win 조합에서 실패할 수 있음
             img = pil_image_for_tray(64)
-            # pystray + Windows 알림 영역: RGB가 호환성이 더 나은 경우가 있음
-            if sys.platform == "win32":
-                img = img.convert("RGB")
 
             def tray_toggle_sync(icon, item):
 
@@ -618,8 +618,8 @@ class LipSyncGUIBase:
                         except Exception:
                             pass
                     self._tray.run()
-                except Exception as e:
-                    self._tray_run_error = str(e)
+                except Exception:
+                    self._tray_run_error = traceback.format_exc()[-900:]
                     self._tray = None
                 finally:
                     if sys.platform == "win32":
@@ -629,31 +629,25 @@ class LipSyncGUIBase:
                         except Exception:
                             pass
 
-            # pystray: run_detached()는 기본 setup에서 icon.visible=True 로 표시함.
-            # run_detached(setup=람다)처럼 빈 setup을 넘기면 아이콘이 숨겨진 채로 남을 수 있음.
-            _rd = getattr(self._tray, "run_detached", None)
-            if callable(_rd):
-                try:
-                    _rd()
-                except NotImplementedError:
-                    self._tray_thread = threading.Thread(
-                        target=_run_tray, daemon=False, name="pystray")
-                    self._tray_thread.start()
-                except Exception as e:
-                    self._tray_run_error = str(e)
-                    self._tray = None
-            else:
-                self._tray_thread = threading.Thread(
-                    target=_run_tray, daemon=False, name="pystray")
-                self._tray_thread.start()
+            # Tk 메인 스레드와 병행: pystray FAQ 권장대로 아이콘 루프는 별도 스레드에서 run().
+            # run_detached()는 환경에 따라 동기 예외/초기화 순서 문제가 있어 Windows에서도 동일 경로 사용.
+            self._tray_thread = threading.Thread(
+                target=_run_tray, daemon=False, name="pystray")
+            self._tray_thread.start()
 
         except ImportError as e:
             self._tray = None
-            self._tray_run_error = "pystray 미설치: %s" % e
+            msg = str(e)
+            if "PIL" in msg or "Image" in msg:
+                self._tray_run_error = (
+                    "Pillow(PIL)가 깨졌거나 EXE에 포함되지 않았습니다: %s" % e)
+            else:
+                self._tray_run_error = (
+                    "pystray 미설치 또는 백엔드 로드 실패: %s" % e)
 
-        except Exception as e:
+        except Exception:
             self._tray = None
-            self._tray_run_error = str(e)
+            self._tray_run_error = traceback.format_exc()[-900:]
 
     def _hide_to_tray(self):
 
@@ -673,7 +667,8 @@ class LipSyncGUIBase:
                         lambda: mb.showwarning(
                             "트레이",
                             "알림 영역(트레이) 아이콘을 만들 수 없습니다.\n"
-                            "pystray, Pillow, pywin32 설치 여부를 확인하세요.\n\n"
+                            "Python 실행이면: pip install pystray Pillow\n"
+                            "EXE 실행이면: Pillow 번들 누락일 수 있으니 소스 기준으로 다시 빌드하세요.\n\n"
                             "창은 작업 표시줄로 최소화됩니다.\n(%s)" % err,
                         ),
                     )

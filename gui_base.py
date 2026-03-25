@@ -10,6 +10,8 @@ import os
 
 import json
 
+import sys
+
 import threading
 
 import winreg
@@ -546,6 +548,8 @@ class LipSyncGUIBase:
 
             import pystray
 
+            self._tray_run_error = None
+
             if self._tray:
 
                 try: self._tray.stop()
@@ -554,7 +558,13 @@ class LipSyncGUIBase:
 
             self._tray = None
 
+            # Windows Shell 아이콘은 프로세스별 고유 ID가 안전 (이전 실행 캐시/충돌 완화)
+            tray_uid = "AutoSync.%s" % (os.getpid(),)
+
             img = pil_image_for_tray(64)
+            # pystray + Windows 알림 영역: RGB가 호환성이 더 나은 경우가 있음
+            if sys.platform == "win32":
+                img = img.convert("RGB")
 
             def tray_toggle_sync(icon, item):
 
@@ -596,23 +606,82 @@ class LipSyncGUIBase:
 
             )
 
-            self._tray = pystray.Icon("AutoSync", img, "Auto Sync", menu)
+            self._tray = pystray.Icon(tray_uid, img, "Auto Sync", menu)
+            self._tray_thread = None
 
-            self._tray_thread = threading.Thread(target=self._tray.run, daemon=True)
+            def _run_tray():
+                try:
+                    if sys.platform == "win32":
+                        try:
+                            import pythoncom
+                            pythoncom.CoInitialize()
+                        except Exception:
+                            pass
+                    self._tray.run()
+                except Exception as e:
+                    self._tray_run_error = str(e)
+                    self._tray = None
+                finally:
+                    if sys.platform == "win32":
+                        try:
+                            import pythoncom
+                            pythoncom.CoUninitialize()
+                        except Exception:
+                            pass
 
-            self._tray_thread.start()
+            # pystray: run_detached()는 기본 setup에서 icon.visible=True 로 표시함.
+            # run_detached(setup=람다)처럼 빈 setup을 넘기면 아이콘이 숨겨진 채로 남을 수 있음.
+            _rd = getattr(self._tray, "run_detached", None)
+            if callable(_rd):
+                try:
+                    _rd()
+                except NotImplementedError:
+                    self._tray_thread = threading.Thread(
+                        target=_run_tray, daemon=False, name="pystray")
+                    self._tray_thread.start()
+                except Exception as e:
+                    self._tray_run_error = str(e)
+                    self._tray = None
+            else:
+                self._tray_thread = threading.Thread(
+                    target=_run_tray, daemon=False, name="pystray")
+                self._tray_thread.start()
 
-        except ImportError:
-
+        except ImportError as e:
             self._tray = None
+            self._tray_run_error = "pystray 미설치: %s" % e
 
-        except Exception:
-
+        except Exception as e:
             self._tray = None
+            self._tray_run_error = str(e)
 
     def _hide_to_tray(self):
 
         self._save_pos()
+
+        if not self._tray:
+            # 첫 숨김 시 한 번만 트레이 재시도 (초기화 레이스 대비)
+            if not getattr(self, "_tray_retry_done", False):
+                self._tray_retry_done = True
+                self._setup_tray()
+            if not self._tray:
+                if not getattr(self, "_tray_warned", False):
+                    self._tray_warned = True
+                    err = getattr(self, "_tray_run_error", None) or "알 수 없음"
+                    self.root.after(
+                        0,
+                        lambda: mb.showwarning(
+                            "트레이",
+                            "알림 영역(트레이) 아이콘을 만들 수 없습니다.\n"
+                            "pystray, Pillow, pywin32 설치 여부를 확인하세요.\n\n"
+                            "창은 작업 표시줄로 최소화됩니다.\n(%s)" % err,
+                        ),
+                    )
+                try:
+                    self.root.iconify()
+                except Exception:
+                    self.root.deiconify()
+                return
 
         self.root.withdraw()
 

@@ -44,6 +44,7 @@ jobs:
       - name: PyInstaller EXE 빌드
         run: >
           pyinstaller
+          --clean
           --onefile
           --noconsole
           --name "Auto Sinc"

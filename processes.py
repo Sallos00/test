@@ -715,7 +715,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
             lip_buf.popleft()
 
-        while aud_buf and now - aud_buf[0][0] > BUF_SEC:
+        # aud_buf는 is_music_playing()이 MUSIC_WINDOW(15초)치를 필요로 하므로
+        # BUF_SEC(3초)가 아닌 MUSIC_WINDOW 기준으로 만료 처리
+        while aud_buf and now - aud_buf[0][0] > MUSIC_WINDOW:
 
             aud_buf.popleft()
 

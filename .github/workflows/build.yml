@@ -38,7 +38,7 @@ jobs:
 
       - name: 코드 난독화 (PyArmor)
         run: |
-          pyarmor gen --output dist_obf app_icon.py win32_utils.py processes.py gui_base.py gui_ui.py gui_run.py gui_auth.py auth.py
+          pyarmor gen --output dist_obf icon_asset.py app_icon.py win32_utils.py processes.py gui_base.py gui_ui.py gui_run.py gui_auth.py auth.py
           copy potplayer_lipsync_mp.py dist_obf\potplayer_lipsync_mp.py
 
       - name: PyInstaller EXE 빌드
@@ -50,6 +50,7 @@ jobs:
           --name "Auto Sinc"
           --icon "app.ico"
           --version-file "version_info.txt"
+          --hidden-import="icon_asset"
           --hidden-import="app_icon"
           --hidden-import="win32_utils"
           --hidden-import="processes"

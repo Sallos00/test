@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 def make_frame(size):
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    # 어두운 원 + 청록 테두리
+    # 구버전 스타일: 어두운 원 + 청록 테두리 + 청록 삼각형
     bw = max(2, size // 16)
     draw.ellipse(
         [bw, bw, size - bw - 1, size - bw - 1],

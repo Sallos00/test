@@ -551,11 +551,11 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     MUSIC_WINDOW   = 15.0          # 음악 감지 버퍼 길이(초)
 
-    MUSIC_MIN_RMS  = 0.01          # 최소 평균 RMS (무음 제외)
+    MUSIC_MIN_RMS  = 0.03          # 최소 평균 RMS (무음 제외)
 
-    MUSIC_MAX_CV   = 1.5           # 변동계수 상한 (낮을수록 에너지 일정 = 음악)
+    MUSIC_MAX_CV   = 0.8           # 변동계수 상한 (낮을수록 에너지 일정 = 음악)
 
-    MUSIC_MIN_FILL = 0.40          # 노이즈 floor 이상 프레임 비율 하한
+    MUSIC_MIN_FILL = 0.70          # 노이즈 floor 이상 프레임 비율 하한
 
     MUSIC_CONFIRM  = 2             # 연속 N회 감지 후 팝업/스킵 실행
 
@@ -951,50 +951,43 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         #
         # 음악 2회 연속 감지 시 → oped_prompt 발행 → GUI가 팝업 표시
 
+# ── [교체 구간] OP/ED 스킵 집중 로직 ──────────────────────────────────────────
         if hwnd:
-
+            # [원칙 1] 영상 전체 길이 및 현재 재생 위치 감지
             pos_ms, dur_ms = get_playback_info(hwnd)
-
+            
             if pos_ms is not None and dur_ms is not None and dur_ms > 0:
-
+                # 앞 3분(오프닝) 또는 뒤 3분(엔딩) 구간 계산
                 in_op = pos_ms < OPED_ZONE_SEC * 1000
-
                 in_ed = pos_ms > (dur_ms - OPED_ZONE_SEC * 1000)
-
                 since_last = time.time() - last_skip_t
 
+                # 스킵 쿨다운(3분)이 지났고 해당 구간일 때만 음악 분석 수행
                 if (in_op or in_ed) and since_last > SKIP_COOLDOWN:
-
                     if is_music_playing():
-
                         music_confirm += 1
-
                         zone_label = "오프닝" if in_op else "엔딩"
-
-                        add_log(f"🎵 {zone_label} 음악 감지 ({music_confirm}/{MUSIC_CONFIRM}회)")
-
+                        
+                        # 연속 감지 횟수 충족 시 동작 실행
                         if music_confirm >= MUSIC_CONFIRM:
-
-                            # 팝업 정보를 state_queue에 실어 GUI로 전달 (요구사항 2)
-
-                            oped_prompt = {
-
-                                "zone":     zone_label,
-
-                                "skip_sec": OPED_SKIP_SEC,
-
-                            }
-
-                            prompt_sent = True   # 팝업이 뜰 때까지 재감지 방지
-
-                            add_log(f"🎵 {zone_label} 팝업 전송")
-
+                            if OPED_AUTO_SKIP:
+                                # [원칙 2] 자동 스킵 활성화 시: 즉시 설정된 초(OPED_SKIP_SEC)만큼 점프
+                                add_log(f"🚀 {zone_label} 감지: 자동 스킵 실행 ({OPED_SKIP_SEC}초)")
+                                if execute_skip(hwnd, label="자동"):
+                                    last_skip_t = time.time()  # 쿨다운 시작
+                                    music_confirm = 0          # 카운터 초기화
+                            
+                            elif not prompt_sent:
+                                # [원칙 3] 활성화 미달 시: GUI에 팝업 요청 전송
+                                oped_prompt = {
+                                    "zone":     zone_label,
+                                    "skip_sec": OPED_SKIP_SEC,
+                                }
+                                prompt_sent = True  # 팝업 중복 발생 방지
+                                add_log(f"🎵 {zone_label} 감지: 스킵 팝업 요청")
                     else:
-
-                        # 음악이 멈추면 카운터 점진적 감소
-
+                        # 음악 미감지 시 카운터 점진적 감소
                         if music_confirm > 0:
-
                             music_confirm -= 1
 
         if lip_n < 10 or aud_n < 10:

@@ -951,7 +951,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         #
         # 음악 2회 연속 감지 시 → oped_prompt 발행 → GUI가 팝업 표시
 
-        if not OPED_AUTO_SKIP and hwnd and not prompt_sent:
+        if hwnd:
 
             pos_ms, dur_ms = get_playback_info(hwnd)
 

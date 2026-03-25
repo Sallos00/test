@@ -3,6 +3,7 @@
 processes.py -- P1(화면캡처), P2(오디오캡처), P3(싱크분석) 프로세스
 
 """
+from win32_utils import do_oped_skip
 
 import os
 
@@ -599,39 +600,23 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     # ── 스킵 실행 ─────────────────────────────────────────────────────────────
 
-    def execute_skip(hwnd, label="OP/ED"):
+ def execute_skip(hwnd, label="OP/ED"):
+    """현재 위치에서 OPED_SKIP_SEC 초 앞으로 이동."""
+    pos_ms, dur_ms = get_playback_info(hwnd)
+    if pos_ms is None:
+        add_log(f"Warning {label} 스킵 실패: 재생 정보 읽기 오류")
+        return False
 
-        """현재 위치에서 OPED_SKIP_SEC 초 앞으로 이동."""
-
-        pos_ms, dur_ms = get_playback_info(hwnd)
-
-        if pos_ms is None:
-
-            add_log(f"⚠ {label} 스킵 실패: 재생 정보 읽기 오류")
-
-            return False
-
-        new_pos = min(pos_ms + OPED_SKIP_SEC * 1000, dur_ms - 2000)
-
-        try:
-
-            _user32.SendMessageW(hwnd, WM_USER, new_pos, 0x5001)
-
-            def fmt(ms):
-
-                s = ms // 1000
-
-                return f"{s // 60}:{s % 60:02d}"
-
-            add_log(f"⏭ {label} 스킵 ({OPED_SKIP_SEC}초): {fmt(pos_ms)} → {fmt(new_pos)}")
-
-            return True
-
-        except Exception as e:
-
-            add_log(f"⚠ {label} 스킵 실패: {e}")
-
-            return False
+    new_pos, success = do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=OPED_SKIP_SEC)
+    if success:
+        def fmt(ms):
+            s = ms // 1000
+            return f"{s // 60}:{s % 60:02d}"
+        add_log(f"Right Arrow {label} 스킵 ({OPED_SKIP_SEC}초): {fmt(pos_ms)} → {fmt(new_pos)}")
+        return True
+    else:
+        add_log(f"Warning {label} 스킵 실패")
+        return False
 
     # ── 음악(노래) 감지 ───────────────────────────────────────────────────────
 

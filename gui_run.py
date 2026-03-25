@@ -105,7 +105,7 @@ class LipSyncGUIRun:
             key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path,
                                      0, winreg.KEY_SET_VALUE)
             winreg.SetValueEx(key, "DisplayName", 0,
-                              winreg.REG_SZ, "Auto Sync")
+                              winreg.REG_SZ, "Auto Sinc")
             winreg.CloseKey(key)
         except Exception:
             pass
@@ -430,5 +430,6 @@ class LipSyncGUIRun:
         if self._tray:
             try: self._tray.stop()
             except Exception: pass
+        self._tray = None
         try: self.root.destroy()
         except Exception: pass

@@ -118,5 +118,5 @@ def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
     new_pos = pos_ms + skip_ms
     if new_pos > dur_ms - 2000:
         new_pos = max(0, dur_ms - 2000)
-    _user32.PostMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, new_pos)
+    _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, new_pos)
     return new_pos, True

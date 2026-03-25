@@ -580,10 +580,13 @@ class LipSyncGUIBase:
                 self._save_settings()
                 # gui_run mixin이 있으면 즉시 상태 반영
                 if hasattr(self, "_start_auto_skip_monitor") and hasattr(self, "_stop_auto_skip_monitor"):
-                    if self._oped_auto_var.get() and not self._running:
-                        self.root.after(0, self._start_auto_skip_monitor)
-                    else:
+                    # 싱크가 꺼져있으면(op/ed 팝업 동작 필요) 자동 감지 모니터는
+                    # 토글 ON/OFF와 무관하게 유지되어야 한다.
+                    # 다만 OPED_AUTO 값은 프로세스 시작 시 cfg로 고정되므로,
+                    # 모드 변경을 반영하려면 재시작이 필요하다.
+                    if not self._running:
                         self.root.after(0, self._stop_auto_skip_monitor)
+                        self.root.after(80, self._start_auto_skip_monitor)
                 if hasattr(self, "_update_oped_btn"):
                     self.root.after(0, self._update_oped_btn)
 

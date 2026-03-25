@@ -319,7 +319,9 @@ class LipSyncGUIRun:
     def _refresh(self):
         if self._closing:
             return
-        want_auto_skip = (not self._running) and self._oped_auto_var.get()
+        # 싱크가 꺼져 있을 때도 OP/ED 감지 팝업은 동작해야 하므로,
+        # OPED 자동 스킵 토글(_oped_auto_var)과 무관하게 P2+P3 자동 감지 모니터를 유지한다.
+        want_auto_skip = (not self._running)
         if want_auto_skip and not getattr(self, "_auto_skip_running", False):
             self._start_auto_skip_monitor()
         elif (not want_auto_skip) and getattr(self, "_auto_skip_running", False):
@@ -328,6 +330,7 @@ class LipSyncGUIRun:
         if getattr(self, "_auto_skip_running", False):
             auto_latest = None
             auto_toasts = []
+            auto_prompts = []
             while True:
                 try:
                     item = self._auto_state_queue.get_nowait()
@@ -335,6 +338,9 @@ class LipSyncGUIRun:
                     n = item.get("notify")
                     if n:
                         auto_toasts.append(n)
+                    p = item.get("oped_prompt") if isinstance(item, dict) else None
+                    if p:
+                        auto_prompts.append(p)
                 except Exception:
                     break
             for title, msg in auto_toasts:
@@ -342,12 +348,17 @@ class LipSyncGUIRun:
                     target=self._toast,
                     args=(title, msg),
                     daemon=True).start()
+
+            for p in auto_prompts:
+                if hasattr(self, "_show_oped_skip_popup"):
+                    self._show_oped_skip_popup(p, auto_mode=True)
             if auto_latest:
                 logs = auto_latest.get("log_lines", [])
                 self._log_lines = collections.deque(logs, maxlen=100)
 
         latest = None
         main_toasts = []
+        main_prompts = []
         while True:
             try:
                 item = self.state_queue.get_nowait()
@@ -355,6 +366,9 @@ class LipSyncGUIRun:
                 n = item.get("notify")
                 if n:
                     main_toasts.append(n)
+                p = item.get("oped_prompt") if isinstance(item, dict) else None
+                if p:
+                    main_prompts.append(p)
             except Exception:
                 break
         for title, msg in main_toasts:
@@ -362,6 +376,10 @@ class LipSyncGUIRun:
                 target=self._toast,
                 args=(title, msg),
                 daemon=True).start()
+
+        for p in main_prompts:
+            if hasattr(self, "_show_oped_skip_popup"):
+                self._show_oped_skip_popup(p, auto_mode=False)
 
         if latest:
             pot_ok  = latest.get("potplayer_ok", False)

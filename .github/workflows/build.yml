@@ -73,7 +73,18 @@ jobs:
           --hidden-import="psutil"
           --hidden-import="pyaudiowpatch"
           --hidden-import="pystray"
+          --hidden-import="pystray._win32"
+          --hidden-import="pystray._base"
+          --hidden-import="pystray._util"
+          --hidden-import="pystray._util.win32"
+          --hidden-import="six"
           --hidden-import="PIL"
+          --hidden-import="PIL.Image"
+          --hidden-import="PIL._imaging"
+          --collect-all
+          PIL
+          --copy-metadata
+          Pillow
           --hidden-import="winotify"
           --hidden-import="urllib.request"
           --hidden-import="urllib.parse"

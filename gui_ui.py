@@ -6,6 +6,7 @@ gui_ui.py -- GUI 창/UI 구성, 팝업(설정/로그/메뉴) 메서드
 
 import tkinter as tk
 
+from app_icon import apply_to_root_window
 from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip
 
 class LipSyncGUIUI:
@@ -68,15 +69,7 @@ class LipSyncGUIUI:
 
         try:
 
-            import base64, tkinter as _tk
-
-            _ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABF0lEQVR4nOWXwQ2DMAxFQ9U5EGNwYgyGZIycOkbFIuVCICS24x8TqRL/SmI/vp1gnHu6OnjH5/sTn48DFFO/uJS4EqS8iEjczxO5dF08DCIDRMm5pJwuMALEq0XybI9QPpps3xCCrIuvggg63CCcyB1gaNfF0zVGRMRmSyA1GgoiuXcFSKyXhIIcMRMX+CZUylqWEwC9aBIICCTKlTlg7XYJhIptLkENSHMABOTdEkBTzmYOaHvpdgfQJs4cqD3X/TwVk1OxTwBwkkmTQ4pymUpguTOCriXYyUpl0Nidivsks6eAg6h5a+mF8hKMQ4fMgZCIPuMbzziSOaebC/mLKNpQczS1Q+mfj+UFEFG3/ZigIIYL7ZnaADPxiheQWUzuAAAAAElFTkSuQmCC"
-
-            _data = base64.b64decode(_ICON_B64)
-
-            self._icon_img = _tk.PhotoImage(data=_data)
-
-            r.iconphoto(True, self._icon_img)
+            apply_to_root_window(r)
 
         except Exception:
 

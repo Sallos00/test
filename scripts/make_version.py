@@ -16,12 +16,12 @@ content = """VSVersionInfo(
         u'041204B0',
         [
           StringStruct(u'CompanyName',      u''),
-          StringStruct(u'FileDescription',  u'PotPlayer \uc74c\uc131 \uc2f1\ud06c \uc790\ub3d9 \ubcf4\uc815\uae30'),
+          StringStruct(u'FileDescription',  u'Auto Sinc'),
           StringStruct(u'FileVersion',      u'2.0.0.0'),
-          StringStruct(u'InternalName',     u'PotPlayerLipsync'),
+          StringStruct(u'InternalName',     u'AutoSinc'),
           StringStruct(u'LegalCopyright',   u'Sinamon'),
-          StringStruct(u'OriginalFilename', u'Auto Sync.exe'),
-          StringStruct(u'ProductName',      u'Auto Sync'),
+          StringStruct(u'OriginalFilename', u'Auto Sinc.exe'),
+          StringStruct(u'ProductName',      u'Auto Sinc'),
           StringStruct(u'ProductVersion',   u'2.0.0.0'),
         ]
       )

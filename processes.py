@@ -3,7 +3,7 @@
 processes.py -- P1(화면캡처), P2(오디오캡처), P3(싱크분석) 프로세스
 
 """
-from win32_utils import do_oped_skip
+from win32_utils import do_oped_skip, get_playback_info   # ← 이 import가 최상단 import 부분에 있어야 함
 
 import os
 
@@ -600,7 +600,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     # ── 스킵 실행 ─────────────────────────────────────────────────────────────
 
- def execute_skip(hwnd, label="OP/ED"):
+     # ── OP/ED 스킵 실행 (win32_utils의 올바른 함수 사용) ─────────────────────────────
+
+def execute_skip(hwnd, label="OP/ED"):
     """현재 위치에서 OPED_SKIP_SEC 초 앞으로 이동."""
     pos_ms, dur_ms = get_playback_info(hwnd)
     if pos_ms is None:

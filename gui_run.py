@@ -320,7 +320,18 @@ class LipSyncGUIRun:
         if self._closing:
             return
         # 싱크가 꺼져 있을 때도 OP/ED 감지 팝업은 동작해야 하므로,
-        # OPED 자동 스킵 토글(_oped_auto_var)과 무관하게 P2+P3 자동 감지 모니터를 유지한다.
+        # P2+P3 자동 감지 모니터를 유지한다.
+        # 단, 자동스킵 ON/OFF 설정이 바뀌면 모니터를 재시작해서 새 설정을 반영한다.
+        current_auto_skip = self._oped_auto_var.get()
+        prev_auto_skip = getattr(self, "_prev_auto_skip_val", None)
+        auto_skip_changed = (prev_auto_skip is not None and
+                             prev_auto_skip != current_auto_skip)
+        self._prev_auto_skip_val = current_auto_skip
+
+        if auto_skip_changed and getattr(self, "_auto_skip_running", False):
+            # 설정이 바뀌었으면 모니터 재시작하여 새 cfg 반영
+            self._stop_auto_skip_monitor()
+
         want_auto_skip = (not self._running)
         if want_auto_skip and not getattr(self, "_auto_skip_running", False):
             self._start_auto_skip_monitor()

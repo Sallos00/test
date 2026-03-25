@@ -1,25 +1,61 @@
 # -*- coding: utf-8 -*-
-"""app.ico 생성 — 탐색기 '큰 아이콘/아주 큰 아이콘'은 128·256 프레임이 있어야 크고 선명하게 보인다."""
-import os
-import sys
+import io
+import struct
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from PIL import Image, ImageDraw
 
-from app_icon import ico_frame_images  # noqa: E402
+
+def make_frame(size):
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    # 어두운 원 + 청록 테두리
+    bw = max(2, size // 16)
+    draw.ellipse(
+        [bw, bw, size - bw - 1, size - bw - 1],
+        fill="#1e1e1e",
+        outline="#00c8e0",
+        width=bw,
+    )
+    # 청록 삼각형
+    t = int(size * 0.22)
+    b = int(size * 0.78)
+    l = int(size * 0.30)
+    r = int(size * 0.78)
+    draw.polygon([(l, t), (l, b), (r, (t + b) // 2)], fill="#00c8e0")
+    return img
 
 
 def main():
-    sizes = (16, 24, 32, 48, 64, 128, 256)
-    imgs = ico_frame_images(sizes)
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    out = os.path.join(root, "app.ico")
-    imgs[0].save(
-        out,
-        format="ICO",
-        sizes=[(i.width, i.height) for i in imgs],
-        append_images=imgs[1:],
-    )
-    print("app.ico created (%s)" % out)
+    sizes = [16, 24, 32, 48, 64, 128, 256]
+    pngs = []
+    for s in sizes:
+        buf = io.BytesIO()
+        make_frame(s).save(buf, format="PNG")
+        pngs.append(buf.getvalue())
+
+    # ICO 직접 작성
+    n = len(sizes)
+    offset = 6 + n * 16  # ICONDIR + n * ICONDIRENTRY
+    ico = io.BytesIO()
+
+    # ICONDIR
+    ico.write(struct.pack("<HHH", 0, 1, n))
+
+    # ICONDIRENTRY
+    for s, png in zip(sizes, pngs):
+        w = s if s < 256 else 0
+        h = s if s < 256 else 0
+        ico.write(struct.pack("<BBBBHHII", w, h, 0, 0, 1, 32, len(png), offset))
+        offset += len(png)
+
+    # PNG 데이터
+    for png in pngs:
+        ico.write(png)
+
+    with open("app.ico", "wb") as f:
+        f.write(ico.getvalue())
+
+    print("app.ico created (%d bytes)" % len(ico.getvalue()))
 
 
 if __name__ == "__main__":

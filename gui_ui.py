@@ -22,14 +22,14 @@ class LipSyncGUIUI:
         """트레이에서 완전 종료.
 
         pystray 메뉴 콜백은 알림 영역 메시지 루프 스레드에서 실행된다.
-        이 스레드에서 Icon.stop()/destroy를 직접 호출하면 Windows 처리 순서에
-        따라 종료가 걸리거나 멈출 수 있으므로, 항상 Tk 메인 스레드에서 _on_close로
-        통일한다 (_stop_auto_skip_monitor 등도 동일 경로에서 실행).
+        트레이 메뉴가 닫힌 뒤 짧은 지연을 두고 _on_close를 호출한다.
+        (_on_close 내부에서 트레이 stop은 백그라운드 스레드로 처리한다.)
         """
 
+        # 트레이 팝업 메뉴가 완전히 닫힌 뒤 종료 루틴 실행 (교착·무응답 완화)
         try:
 
-            self.root.after(0, self._on_close)
+            self.root.after(120, self._on_close)
 
         except Exception:
 

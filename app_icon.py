@@ -58,13 +58,16 @@ def ico_path_for_windows() -> str:
 
 
 def pil_image_for_tray(size: int = 64):
-    """pystray.Icon(..., image=...) 용 — 팝업 PNG와 동일 원본."""
+    """pystray.Icon(..., image=...) 용 — 팝업 PNG와 동일 모양, 트레이에서 투명만 보이지 않게 배경 합성."""
     from PIL import Image
 
-    im = Image.open(io.BytesIO(png_bytes())).convert("RGBA")
-    if im.size != (size, size):
-        im = im.resize((size, size), Image.Resampling.LANCZOS)
-    return im
+    src = Image.open(io.BytesIO(png_bytes())).convert("RGBA")
+    if src.size != (size, size):
+        src = src.resize((size, size), Image.Resampling.LANCZOS)
+    # Windows 알림 영역은 투명 픽셀만 있으면 '안 보임'처럼 느껴질 수 있음
+    base = Image.new("RGBA", (size, size), (30, 30, 30, 255))
+    base.paste(src, (0, 0), src)
+    return base
 
 
 def apply_iconphoto(tk_root):

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""app.ico 생성 — app_icon의 PNG(팝업과 동일)로 멀티해상도 ICO 작성."""
+"""app.ico 생성 — PyInstaller/탐색기용. 128·256 프레임은 일부 환경에서 깨져 보일 수 있어
+작은 해상도만 사용 (기존 app_icon._write_temp_ico_from_png와 동일 구성)."""
 import os
 import sys
 
@@ -13,7 +14,7 @@ def main():
     import io
 
     im = Image.open(io.BytesIO(png_bytes())).convert("RGBA")
-    sizes = (16, 24, 32, 48, 64, 128, 256)
+    sizes = (16, 24, 32, 48, 64)
     imgs = [im.resize((s, s), Image.Resampling.LANCZOS) for s in sizes]
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = os.path.join(root, "app.ico")

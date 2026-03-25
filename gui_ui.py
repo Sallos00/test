@@ -19,37 +19,27 @@ class LipSyncGUIUI:
 
     def _tray_quit(self, icon=None, item=None):
 
-        """트레이에서 완전 종료."""
+        """트레이에서 완전 종료.
 
-        self._closing = True
+        pystray 메뉴 콜백은 알림 영역 메시지 루프 스레드에서 실행된다.
+        이 스레드에서 Icon.stop()/destroy를 직접 호출하면 Windows 처리 순서에
+        따라 종료가 걸리거나 멈출 수 있으므로, 항상 Tk 메인 스레드에서 _on_close로
+        통일한다 (_stop_auto_skip_monitor 등도 동일 경로에서 실행).
+        """
 
-        if hasattr(self, "_popup_after_id"):
+        try:
 
-            try: self.root.after_cancel(self._popup_after_id)
+            self.root.after(0, self._on_close)
 
-            except Exception: pass
-
-        self._popup_open = False
-
-        self._save_pos()
-
-        self._stop_processes()
-
-        if self._tray:
+        except Exception:
 
             try:
 
-                self._tray.stop()
+                self._on_close()
 
             except Exception:
 
                 pass
-
-        self._tray = None
-
-        try: self.root.after(0, self.root.destroy)
-
-        except Exception: pass
 
     # ── 창 설정 ───────────────────────────────────────────────────────────────
 

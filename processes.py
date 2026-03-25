@@ -551,11 +551,11 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     MUSIC_WINDOW   = 15.0          # 음악 감지 버퍼 길이(초)
 
-    MUSIC_MIN_RMS  = 0.03          # 최소 평균 RMS (무음 제외)
+    MUSIC_MIN_RMS  = 0.01          # 최소 평균 RMS (무음 제외)
 
-    MUSIC_MAX_CV   = 0.8           # 변동계수 상한 (낮을수록 에너지 일정 = 음악)
+    MUSIC_MAX_CV   = 1.5           # 변동계수 상한 (낮을수록 에너지 일정 = 음악)
 
-    MUSIC_MIN_FILL = 0.70          # 노이즈 floor 이상 프레임 비율 하한
+    MUSIC_MIN_FILL = 0.40          # 노이즈 floor 이상 프레임 비율 하한
 
     MUSIC_CONFIRM  = 2             # 연속 N회 감지 후 팝업/스킵 실행
 

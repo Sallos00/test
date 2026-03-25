@@ -46,7 +46,7 @@ jobs:
           pyinstaller
           --onefile
           --noconsole
-          --name "Auto Sync"
+          --name "Auto Sinc"
           --icon "app.ico"
           --version-file "version_info.txt"
           --hidden-import="app_icon"
@@ -105,5 +105,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AutoSync-EXE
-          path: dist\Auto Sync.exe
+          path: dist\Auto Sinc.exe
           retention-days: 3

@@ -450,10 +450,14 @@ class LipSyncGUIRun:
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw = round(280 * r)
         ph = round(88  * r)
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        px = max(0, min(rect.right  - pw - 12, sw - pw))
-        py = max(0, min(rect.bottom - ph - 48, sh - ph))
+        # 멀티모니터: 가상 데스크탑 전체 범위로 클램프
+        import ctypes as _ct
+        vx = _ct.windll.user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+        vy = _ct.windll.user32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
+        vw = _ct.windll.user32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
+        vh = _ct.windll.user32.GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
+        px = max(vx, min(rect.right  - pw - 12, vx + vw - pw))
+        py = max(vy, min(rect.bottom - ph - 48, vy + vh - ph))
 
         self._oped_popup_open = True
 

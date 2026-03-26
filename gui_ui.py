@@ -302,9 +302,9 @@ class LipSyncGUIUI:
 
                                         bg=self.BG, fg=self.ACCENT), bg="BG", fg="ACCENT")
 
-        self._offset_lbl.pack(anchor="w", pady=(2, 0))
+        self._offset_lbl.pack(side="left", anchor="w", pady=(2, 0))
        
-        self._pip_btn.pack(side="right", pady=(5, 0))
+        self._pip_btn.pack(side="right", anchor="e", pady=(5, 0))
 
         bar_bg = reg(tk.Frame(mf, bg=self.BG3, height=4), bg="BG3")
 
@@ -422,7 +422,7 @@ class LipSyncGUIUI:
         pip_send(hwnd)
         if self._pip_on:
             self._pip_on = False
-            self._pip_btn.config(text="⧉ PIP", fg=self.TEXT_MID)
+            self._pip_btn.config(text="⧉ PIP OFF", fg=self.TEXT_MID)
         else:
             self._pip_on = True
             self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3)

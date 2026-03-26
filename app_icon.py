@@ -22,7 +22,7 @@ import tkinter as tk
 
 import tkinter.messagebox as mb
 
-from app_icon import apply_to_toplevel, pil_image_for_tray
+# from app_icon import apply_to_toplevel, pil_image_for_tray
 from win32_utils import find_potplayer_hwnd, CFG
 
 class LipSyncGUIBase:

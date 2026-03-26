@@ -420,7 +420,7 @@ class LipSyncGUIUI:
         if self._pip_on:
             pip_close(hwnd)
             self._pip_on = False
-            self._pip_btn.config(text="⧉ PIP OFF", fg=self.TEXT_MID)
+            self._pip_btn.config(text="⧉ PIP", fg=self.TEXT_MID)
         else:
             pip_open(hwnd)
             self._pip_on = True

@@ -35,18 +35,18 @@ _user32.FindWindowW.restype = ctypes.wintypes.HWND
 _user32.FindWindowW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPCWSTR]
 _user32.GetWindowTextW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.LPWSTR, ctypes.c_int]
 
-# ── 상수 정의 (누락 방지) ──
+# ── 상수 정의 ──
 WM_USER              = 0x0400
-POT_COMMAND          = 0x0400
-POT_GET_TOTAL_TIME   = 20482
-POT_GET_CURRENT_TIME = 20484
-POT_SET_CURRENT_TIME = 20485
-POT_SEND_VIRTUAL_KEY = 20496
+WM_KEYDOWN           = 0x0100
+WM_KEYUP             = 0x0101
+POT_GET_TOTAL_TIME   = 20482   # lParam for WM_USER
+POT_GET_CURRENT_TIME = 20484   # lParam for WM_USER
+POT_SET_CURRENT_TIME = 20485   # lParam for WM_USER
 
 VK_SHIFT      = 0x10
-VK_OEM_PERIOD = 0xBE # '>' key
-VK_OEM_COMMA  = 0xBC # '<' key
-VK_OEM_2      = 0xBF # '/' key (필수 상수 복구)
+VK_OEM_PERIOD = 0xBE  # '.' key  (Shift+. = '>')
+VK_OEM_COMMA  = 0xBC  # ',' key  (Shift+, = '<')
+VK_OEM_2      = 0xBF  # '/' key
 
 def queue_put(q, item):
     """멀티프로세싱 큐에 안전하게 데이터를 넣는다."""
@@ -66,11 +66,14 @@ def find_potplayer_hwnd():
     return hwnd
 
 def post_key_to_potplayer(hwnd, vk, shift=False):
-    """가상 키 메시지를 전송한다."""
+    """WM_KEYDOWN/WM_KEYUP으로 팟플레이어에 키 입력을 전송한다."""
     if not hwnd: return
     if shift:
-        _user32.PostMessageW(hwnd, POT_COMMAND, POT_SEND_VIRTUAL_KEY, VK_SHIFT)
-    _user32.PostMessageW(hwnd, POT_COMMAND, POT_SEND_VIRTUAL_KEY, vk)
+        _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT, 0)
+    _user32.PostMessageW(hwnd, WM_KEYDOWN, vk, 0)
+    _user32.PostMessageW(hwnd, WM_KEYUP,   vk, 0)
+    if shift:
+        _user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT, 0)
 
 def is_potplayer_playing(hwnd):
     """재생 상태 여부를 확인한다."""
@@ -118,5 +121,5 @@ def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
     new_pos = pos_ms + skip_ms
     if new_pos > dur_ms - 2000:
         new_pos = max(0, dur_ms - 2000)
-    _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, new_pos)
+    _user32.SendMessageW(hwnd, WM_USER, int(new_pos), POT_SET_CURRENT_TIME)
     return new_pos, True

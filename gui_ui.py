@@ -7,7 +7,7 @@ gui_ui.py -- GUI 창/UI 구성, 팝업(설정/로그/메뉴) 메서드
 import tkinter as tk
 
 from app_icon import apply_to_root_window
-from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip, pip_open, pip_close
+from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip, pip_send
 
 class LipSyncGUIUI:
 
@@ -285,6 +285,18 @@ class LipSyncGUIUI:
 
         self._badge.pack(side="right")
 
+        self._pip_on = False
+        self._pip_btn = reg(
+            tk.Button(top, text="⧉ PIP",
+                      font=("Consolas", max(7, round(8*r)), "bold"),
+                      bg=self.BG3, fg=self.TEXT_MID,
+                      activebackground=self.BORDER,
+                      relief="flat", cursor="hand2",
+                      padx=round(6*r), pady=2,
+                      command=self._pip_toggle),
+            bg="BG3", fg="TEXT_MID", abg="BORDER")
+        self._pip_btn.pack(side="right", padx=(0, 4))
+
         self._offset_lbl = reg(tk.Label(mf, text="— ms",
 
                                         font=("Consolas", self.F_OFFSET, "bold"),
@@ -293,16 +305,7 @@ class LipSyncGUIUI:
 
         self._offset_lbl.pack(anchor="w", pady=(2, 0))
 
-        self._pip_on = False
-        self._pip_btn = reg(
-            tk.Button(mf, text="⧉ PIP",
-                      font=("Consolas", max(8, round(8*r)), "bold"),
-                      bg=self.BG3, fg=self.TEXT_MID,
-                      activebackground=self.BORDER,
-                      relief="flat", cursor="hand2",
-                      command=self._pip_toggle),
-            bg="BG3", fg="TEXT_MID", abg="BORDER")
-        self._pip_btn.pack(fill="x", pady=(6, 0))
+
 
         bar_bg = reg(tk.Frame(mf, bg=self.BG3, height=4), bg="BG3")
 
@@ -413,16 +416,15 @@ class LipSyncGUIUI:
         self.root.after(1000, self._poll_playback_info)
 
     def _pip_toggle(self):
-        """PIP 토글: OFF→Shift+Q(열기), ON→Shift+W(닫기)."""
+        """PIP 토글: Shift+Q + Shift+W 동시 전송, 상태 반전."""
         hwnd = find_potplayer_hwnd()
         if not hwnd:
             return
+        pip_send(hwnd)
         if self._pip_on:
-            pip_close(hwnd)
             self._pip_on = False
             self._pip_btn.config(text="⧉ PIP", fg=self.TEXT_MID)
         else:
-            pip_open(hwnd)
             self._pip_on = True
             self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3)
 

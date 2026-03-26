@@ -325,21 +325,34 @@ class LipSyncGUIRun:
 
         # ── oped 모니터(싱크 OFF) state_queue 처리 ───────────────────────────
         if getattr(self, "_oped_monitor_running", False):
+            om_latest  = None
             om_prompts = []
-            om_logs    = None
             while True:
                 try:
                     item = self._om_state_queue.get_nowait()
+                    om_latest = item
                     p = item.get("oped_prompt") if isinstance(item, dict) else None
                     if p:
                         om_prompts.append(p)
-                    om_logs = item.get("log_lines")
                 except Exception:
                     break
             for p in om_prompts:
                 self._show_oped_skip_popup(p, use_om_queue=True)
-            if om_logs is not None:
-                self._log_lines = collections.deque(om_logs, maxlen=100)
+            if om_latest:
+                om_logs = om_latest.get("log_lines")
+                if om_logs is not None:
+                    self._log_lines = collections.deque(om_logs, maxlen=100)
+                # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
+                pot_ok = om_latest.get("potplayer_ok", False)
+                aud_n  = om_latest.get("audio_samples", 0)
+                c = self.ACCENT3 if pot_ok else self.ACCENT2
+                self._pot_dot.config(fg=c)
+                self._pot_lbl.config(text="연결됨" if pot_ok else "미감지", fg=c)
+                c = self.ACCENT3 if aud_n > 0 else self.TEXT_DIM
+                self._aud_dot.config(fg=c)
+                self._aud_lbl.config(text="캡처 중" if aud_n > 0 else "대기 중", fg=c)
+                self._proc_dot.config(fg=self.ACCENT)
+                self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
 
         latest       = None
         main_toasts  = []

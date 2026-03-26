@@ -118,13 +118,20 @@ def get_playback_info(hwnd):
     except Exception:
         return None, None
 
-def pip_open(hwnd):
-    """Shift+Q: PIP 창 열기."""
-    post_key_to_potplayer(hwnd, VK_Q, shift=True)
-
-def pip_close(hwnd):
-    """Shift+W: PIP 창 닫기."""
-    post_key_to_potplayer(hwnd, VK_W, shift=True)
+def pip_send(hwnd):
+    """Shift+Q + Shift+W 동시 입력."""
+    if not hwnd: return
+    def _lp(vk, up=False):
+        scan = _user32.MapVirtualKeyW(vk, 0)
+        lp = 1 | (scan << 16)
+        if up: lp |= (1 << 31) | (1 << 30)
+        return lp
+    _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT, _lp(VK_SHIFT))
+    _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_Q, _lp(VK_Q))
+    _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_W, _lp(VK_W))
+    _user32.PostMessageW(hwnd, WM_KEYUP, VK_W, _lp(VK_W, up=True))
+    _user32.PostMessageW(hwnd, WM_KEYUP, VK_Q, _lp(VK_Q, up=True))
+    _user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT, _lp(VK_SHIFT, up=True))
 
 def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
     """지정된 초만큼 스킵을 수행한다."""

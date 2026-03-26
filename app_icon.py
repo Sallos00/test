@@ -29,7 +29,7 @@ def make_frame(size: int, for_ico: bool = False) -> Image.Image:
     for_ico=False: 투명 배경 — iconphoto/트레이용
     """
     s = int(size)
-    bg = (30, 30, 30, 255) if for_ico else (0, 0, 0, 0)
+    bg = (0, 0, 0, 0) if for_ico else (0, 0, 0, 0)
     img = Image.new("RGBA", (s, s), bg)
     draw = ImageDraw.Draw(img)
     bw = max(2, s // 16)

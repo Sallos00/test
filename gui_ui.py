@@ -286,8 +286,17 @@ class LipSyncGUIUI:
         self._badge.pack(side="right")
 
         self._pip_on = False
+
+        offset_row = reg(tk.Frame(mf, bg=self.BG), bg="BG")
+        offset_row.pack(fill="x", pady=(2, 0))
+
+        self._offset_lbl = reg(tk.Label(offset_row, text="— ms",
+                                        font=("Consolas", self.F_OFFSET, "bold"),
+                                        bg=self.BG, fg=self.ACCENT), bg="BG", fg="ACCENT")
+        self._offset_lbl.pack(side="left", anchor="w")
+
         self._pip_btn = reg(
-            tk.Button(top, text="⧉ PIP OFF",
+            tk.Button(offset_row, text="⧉ PIP OFF",
                       font=("Consolas", max(7, round(8*r)), "bold"),
                       bg=self.BG3, fg=self.TEXT_MID,
                       activebackground=self.BORDER,
@@ -295,15 +304,7 @@ class LipSyncGUIUI:
                       padx=round(6*r), pady=2,
                       command=self._pip_toggle),
             bg="BG3", fg="TEXT_MID", abg="BORDER")
-        self._pip_btn.pack(side="right", padx=(0, 4))
-
-        self._offset_lbl = reg(tk.Label(mf, text="— ms",
-
-                                        font=("Consolas", self.F_OFFSET, "bold"),
-
-                                        bg=self.BG, fg=self.ACCENT), bg="BG", fg="ACCENT")
-
-        self._offset_lbl.pack(anchor="w", pady=(2, 0))
+        self._pip_btn.pack(side="right", anchor="s", padx=(4, 0))
 
 
 

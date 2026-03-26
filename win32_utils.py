@@ -34,6 +34,8 @@ _user32.PostMessageW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.UINT, cty
 _user32.FindWindowW.restype = ctypes.wintypes.HWND
 _user32.FindWindowW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPCWSTR]
 _user32.GetWindowTextW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.LPWSTR, ctypes.c_int]
+_user32.MapVirtualKeyW.restype  = ctypes.wintypes.UINT
+_user32.MapVirtualKeyW.argtypes = [ctypes.wintypes.UINT, ctypes.wintypes.UINT]
 
 # ── 상수 정의 ──
 WM_USER              = 0x0400
@@ -66,14 +68,22 @@ def find_potplayer_hwnd():
     return hwnd
 
 def post_key_to_potplayer(hwnd, vk, shift=False):
-    """WM_KEYDOWN/WM_KEYUP으로 팟플레이어에 키 입력을 전송한다."""
+    """PostMessage로 팟플레이어에 키 입력 전송 (스캔코드 포함, 포커스 이동 없음)."""
     if not hwnd: return
+
+    def _lp(vk_code, up=False):
+        scan = _user32.MapVirtualKeyW(vk_code, 0)
+        lp = 1 | (scan << 16)
+        if up:
+            lp |= (1 << 31) | (1 << 30)
+        return lp
+
     if shift:
-        _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT, 0)
-    _user32.PostMessageW(hwnd, WM_KEYDOWN, vk, 0)
-    _user32.PostMessageW(hwnd, WM_KEYUP,   vk, 0)
+        _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT, _lp(VK_SHIFT))
+    _user32.PostMessageW(hwnd, WM_KEYDOWN, vk, _lp(vk))
+    _user32.PostMessageW(hwnd, WM_KEYUP,   vk, _lp(vk, up=True))
     if shift:
-        _user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT, 0)
+        _user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT, _lp(VK_SHIFT, up=True))
 
 def is_potplayer_playing(hwnd):
     """재생 상태 여부를 확인한다."""

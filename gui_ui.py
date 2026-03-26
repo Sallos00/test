@@ -7,7 +7,7 @@ gui_ui.py -- GUI 창/UI 구성, 팝업(설정/로그/메뉴) 메서드
 import tkinter as tk
 
 from app_icon import apply_to_root_window
-from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip
+from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip, pip_open, pip_close
 
 class LipSyncGUIUI:
 
@@ -41,8 +41,6 @@ class LipSyncGUIUI:
 
                 pass
 
-    # ── 창 설정 ───────────────────────────────────────────────────────────────
-
     def _build_window(self):
 
         r = self.root
@@ -72,8 +70,6 @@ class LipSyncGUIUI:
         r.geometry(f"{self.W}x{self.H}+{x}+{y}")
 
         r.deiconify()
-
-    # ── UI 구성 ───────────────────────────────────────────────────────────────
 
     def _build_ui(self):
 
@@ -227,8 +223,6 @@ class LipSyncGUIUI:
 
         self._proc_lbl.pack(side="left", padx=4, anchor="center")
 
-        # ── 재생 위치 / 전체 길이 행 ──────────────────────────────────────────
-
         dur_row = reg(tk.Frame(card, bg=self.BG2), bg="BG2")
 
         dur_row.pack(fill="x", pady=(4, 0))
@@ -247,7 +241,6 @@ class LipSyncGUIUI:
 
         self._dur_lbl.pack(side="left", padx=4, anchor="center")
 
-        # ── OP/ED 스킵 버튼 (오프셋 섹션 바로 위) ────────────────────────────
         # 자동 스킵 OFF → 버튼 활성 (수동 스킵 가능)
         # 자동 스킵 ON  → 버튼 비활성 + "자동 스킵 ON" 표시
         oped_row = reg(tk.Frame(self.root, bg=self.BG, padx=PAD), bg="BG")
@@ -299,6 +292,17 @@ class LipSyncGUIUI:
                                         bg=self.BG, fg=self.ACCENT), bg="BG", fg="ACCENT")
 
         self._offset_lbl.pack(anchor="w", pady=(2, 0))
+
+        self._pip_on = False
+        self._pip_btn = reg(
+            tk.Button(mf, text="⧉ PIP",
+                      font=("Consolas", max(8, round(8*r)), "bold"),
+                      bg=self.BG3, fg=self.TEXT_MID,
+                      activebackground=self.BORDER,
+                      relief="flat", cursor="hand2",
+                      command=self._pip_toggle),
+            bg="BG3", fg="TEXT_MID", abg="BORDER")
+        self._pip_btn.pack(fill="x", pady=(6, 0))
 
         bar_bg = reg(tk.Frame(mf, bg=self.BG3, height=4), bg="BG3")
 
@@ -354,8 +358,6 @@ class LipSyncGUIUI:
 
         reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", padx=PAD2)
 
-        # ── 버튼 행 1: 시작 / 초기화 / 종료 ─────────────────────────────────
-
         bf = reg(tk.Frame(self.root, bg=self.BG, padx=round(10*r), pady=round(6*r)), bg="BG")
 
         bf.pack(fill="x")
@@ -410,7 +412,19 @@ class LipSyncGUIUI:
 
         self.root.after(1000, self._poll_playback_info)
 
-    # ── OP/ED 스킵 버튼 상태 동기화 ──────────────────────────────────────────
+    def _pip_toggle(self):
+        """PIP 토글: OFF→Shift+Q(열기), ON→Shift+W(닫기)."""
+        hwnd = find_potplayer_hwnd()
+        if not hwnd:
+            return
+        if self._pip_on:
+            pip_close(hwnd)
+            self._pip_on = False
+            self._pip_btn.config(text="⧉ PIP OFF", fg=self.TEXT_MID)
+        else:
+            pip_open(hwnd)
+            self._pip_on = True
+            self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3)
 
     def _update_oped_btn(self):
 
@@ -460,8 +474,6 @@ class LipSyncGUIUI:
 
             )
 
-    # ── OP/ED 수동 스킵 실행 ─────────────────────────────────────────────────
-
     def _oped_skip(self):
 
         """메인창 OP/ED 스킵 버튼 핸들러 — 팟플레이어에 직접 SendMessage."""
@@ -510,8 +522,6 @@ class LipSyncGUIUI:
 
                 )
 
-    # ── 재생 위치 폴링 (1초 간격) ─────────────────────────────────────────────
-
     def _poll_playback_info(self):
 
         """팟플레이어에서 재생 위치/전체 길이를 읽어 상태 카드에 표시한다."""
@@ -554,8 +564,6 @@ class LipSyncGUIUI:
         if not self._closing:
 
             self.root.after(1000, self._poll_playback_info)
-
-    # ── 톱니바퀴 드롭다운 메뉴 ───────────────────────────────────────────────
 
     def _toggle_gear_menu(self):
 
@@ -670,8 +678,6 @@ class LipSyncGUIUI:
         try: self.root.unbind("<Button-1>")
 
         except Exception: pass
-
-    # ── 로그 팝업 ─────────────────────────────────────────────────────────────
 
     def _open_log_popup(self):
 
@@ -885,8 +891,6 @@ class LipSyncGUIUI:
 
         self._update_log_popup()
 
-    # ── 설정 팝업 ─────────────────────────────────────────────────────────────
-
     def _open_settings(self):
 
         popup = tk.Toplevel(self.root)
@@ -929,8 +933,6 @@ class LipSyncGUIUI:
 
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", pady=(round(12*r), 0))
 
-        # ── 임시 변수 ──────────────────────────────────────────────────────────
-
         tmp_startup   = tk.BooleanVar(value=self._startup_var.get())
 
         tmp_autostart = tk.BooleanVar(value=self._autostart_var.get())
@@ -952,8 +954,6 @@ class LipSyncGUIUI:
                    activeforeground=self.TEXT,
 
                    relief="flat", cursor="hand2")
-
-        # ── 기본 설정 카드 ─────────────────────────────────────────────────────
 
         card = tk.Frame(popup, bg=self.BG2, padx=PAD2, pady=PAD)
 
@@ -1058,8 +1058,6 @@ class LipSyncGUIUI:
                            activeforeground=self.TEXT,
 
                            relief="flat", cursor="hand2").pack(side="left", padx=round(4*r))
-
-        # ── 저장 버튼 ──────────────────────────────────────────────────────────
 
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", padx=PAD, pady=(round(12*r), 0))
 

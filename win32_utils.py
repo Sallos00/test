@@ -41,9 +41,12 @@ _user32.MapVirtualKeyW.argtypes = [ctypes.wintypes.UINT, ctypes.wintypes.UINT]
 WM_USER              = 0x0400
 WM_KEYDOWN           = 0x0100
 WM_KEYUP             = 0x0101
-POT_GET_TOTAL_TIME   = 20482   # lParam for WM_USER
-POT_GET_CURRENT_TIME = 20484   # lParam for WM_USER
-POT_SET_CURRENT_TIME = 20485   # lParam for WM_USER
+POT_COMMAND          = 0x0400
+POT_SEND_VIRTUAL_KEY = 0x5010   # wParam for WM_USER (포커스 없이 가상 키 전송)
+POT_VIRTUAL_KEY_SHIFT = 0x0100
+POT_GET_TOTAL_TIME   = 0x5002   # wParam for WM_USER
+POT_GET_CURRENT_TIME = 0x5004   # wParam for WM_USER
+POT_SET_CURRENT_TIME = 0x5005   # wParam for WM_USER
 
 VK_SHIFT      = 0x10
 VK_OEM_PERIOD = 0xBE  # '.' key  (Shift+. = '>')
@@ -68,22 +71,12 @@ def find_potplayer_hwnd():
     return hwnd
 
 def post_key_to_potplayer(hwnd, vk, shift=False):
-    """PostMessage로 팟플레이어에 키 입력 전송 (스캔코드 포함, 포커스 이동 없음)."""
+    """POT_SEND_VIRTUAL_KEY로 팟플레이어에 키 전송 (포커스/게임 무관)."""
     if not hwnd: return
-
-    def _lp(vk_code, up=False):
-        scan = _user32.MapVirtualKeyW(vk_code, 0)
-        lp = 1 | (scan << 16)
-        if up:
-            lp |= (1 << 31) | (1 << 30)
-        return lp
-
+    lparam = vk
     if shift:
-        _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT, _lp(VK_SHIFT))
-    _user32.PostMessageW(hwnd, WM_KEYDOWN, vk, _lp(vk))
-    _user32.PostMessageW(hwnd, WM_KEYUP,   vk, _lp(vk, up=True))
-    if shift:
-        _user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT, _lp(VK_SHIFT, up=True))
+        lparam = lparam | POT_VIRTUAL_KEY_SHIFT
+    _user32.PostMessageW(hwnd, POT_COMMAND, POT_SEND_VIRTUAL_KEY, lparam)
 
 def is_potplayer_playing(hwnd):
     """재생 상태 여부를 확인한다."""
@@ -129,7 +122,8 @@ def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
         return pos_ms, False
     skip_ms = skip_sec * 1000
     new_pos = pos_ms + skip_ms
-    if new_pos > dur_ms - 2000:
+    if dur_ms is not None and new_pos > dur_ms - 2000:
         new_pos = max(0, dur_ms - 2000)
-    _user32.SendMessageW(hwnd, WM_USER, int(new_pos), POT_SET_CURRENT_TIME)
+    # wParam = 명령(POT_SET_CURRENT_TIME), lParam = 위치값
+    _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, int(new_pos))
     return new_pos, True

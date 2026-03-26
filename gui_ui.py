@@ -287,7 +287,7 @@ class LipSyncGUIUI:
 
         self._pip_on = False
         self._pip_btn = reg(
-            tk.Button(top, text="⧉ PIP",
+            tk.Button(top, text="⧉ PIP OFF",
                       font=("Consolas", max(7, round(8*r)), "bold"),
                       bg=self.BG3, fg=self.TEXT_MID,
                       activebackground=self.BORDER,
@@ -423,7 +423,7 @@ class LipSyncGUIUI:
         pip_send(hwnd)
         if self._pip_on:
             self._pip_on = False
-            self._pip_btn.config(text="⧉ PIP", fg=self.TEXT_MID)
+            self._pip_btn.config(text="⧉ PIP OFF", fg=self.TEXT_MID)
         else:
             self._pip_on = True
             self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3)

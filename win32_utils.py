@@ -119,25 +119,19 @@ def get_playback_info(hwnd):
         return None, None
 
 def pip_send(hwnd):
-    """Shift+Q, Shift+W 순차 전송 (각각 별도 인식)."""
+    """기존의 복잡한 로직을 지우고, 검증된 방식으로 교체"""
     if not hwnd: return
+    
     import time as _time
-    def _lp(vk, up=False):
-        scan = _user32.MapVirtualKeyW(vk, 0)
-        lp = 1 | (scan << 16)
-        if up: lp |= (1 << 31) | (1 << 30)
-        return lp
-    # Shift+Q 전송
-    _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT, _lp(VK_SHIFT))
-    _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_Q, _lp(VK_Q))
-    _user32.PostMessageW(hwnd, WM_KEYUP, VK_Q, _lp(VK_Q, up=True))
-    _user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT, _lp(VK_SHIFT, up=True))
+
+    # 1. Shift + Q 전송 (UI 숨기기)
+    post_key_to_potplayer(hwnd, VK_Q, shift=True)
+    
+    # 팟플레이어가 첫 번째 키를 인식할 수 있도록 0.05초 정도 기다려줍니다.
     _time.sleep(0.05)
-    # Shift+W 전송
-    _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT, _lp(VK_SHIFT))
-    _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_W, _lp(VK_W))
-    _user32.PostMessageW(hwnd, WM_KEYUP, VK_W, _lp(VK_W, up=True))
-    _user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT, _lp(VK_SHIFT, up=True))
+    
+    # 2. Shift + W 전송 (맨위 고정)
+    post_key_to_potplayer(hwnd, VK_W, shift=True)
 
 def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
     """지정된 초만큼 스킵을 수행한다."""

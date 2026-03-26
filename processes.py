@@ -641,7 +641,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 add_log("⚠ 스킵 실패: 전체 길이 미확인")
                 return False
             new_pos = min(pos + OPED_SKIP_SEC * 1000, dur - 2000)
-            _user32.PostMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, int(new_pos))
+            _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, int(new_pos))
             def fmt(ms): s = ms // 1000; return f"{s // 60}:{s % 60:02d}"
             add_log(f"⏭ 스킵 ({OPED_SKIP_SEC}초): {fmt(pos)} → {fmt(new_pos)}")
             return True

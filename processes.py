@@ -689,6 +689,13 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     prompt_sent   = False
                     add_log("✖ 스킵 건너뜀 → 쿨다운 3분")
 
+                elif cmd == "oped_reset":
+                    # 초기화 버튼 → OP/ED 쿨다운·카운터 전부 초기화
+                    music_confirm = 0
+                    last_action_t = 0.0
+                    prompt_sent   = False
+                    add_log("↺ OP/ED 상태 초기화")
+
                 elif cmd == "stop":
                     stop_flag.value = True
                     return

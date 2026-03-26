@@ -533,17 +533,17 @@ class LipSyncGUIUI:
                         return f"{s // 60}:{s % 60:02d}"
 
                     if dur_ms is not None:
-                        self._dur_lbl.config(text=f"{fmt(pos_ms)} / {fmt(dur_ms)}")
+                        self._dur_lbl.config(text=f"{fmt(pos_ms)} / {fmt(dur_ms)}", fg=self.ACCENT3)
                     else:
-                        self._dur_lbl.config(text=f"{fmt(pos_ms)} / —")
+                        self._dur_lbl.config(text=f"{fmt(pos_ms)} / —", fg=self.ACCENT3)
 
                 else:
 
-                    self._dur_lbl.config(text="— / —")
+                    self._dur_lbl.config(text="— / —", fg=self.TEXT_MID)
 
             else:
 
-                self._dur_lbl.config(text="— / —")
+                self._dur_lbl.config(text="— / —", fg=self.TEXT_MID)
 
         except Exception:
 

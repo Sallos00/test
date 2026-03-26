@@ -11,7 +11,6 @@ import tkinter as tk
 import winreg
 from multiprocessing import Process, Queue, Value
 
-
 import auth as _auth_module
 
 from win32_utils import (
@@ -24,9 +23,72 @@ from processes import proc_lip_capture, proc_audio_capture, proc_analyzer
 
 class LipSyncGUIRun:
 
-    # ── 시작 / 정지 ───────────────────────────────────────────────────────────
+    # ── OP/ED 백그라운드 모니터 (싱크 OFF 상태에서도 동작) ───────────────────
+    # 싱크가 꺼져 있어도 OP/ED 음악 감지 + 팝업/자동스킵은 항상 동작해야 한다.
+    # P2(오디오캡처) + P3(싱크분석, lip 없이 오디오만) 를 별도로 구동한다.
+
+    def _start_oped_monitor(self):
+        """싱크 미실행 상태 전용 OP/ED 감지 프로세스(P2+P3) 시작."""
+        if getattr(self, "_oped_monitor_running", False):
+            return
+        try:
+            runtime_cfg = self._build_cfg()
+            qsize = runtime_cfg.get("QUEUE_MAXSIZE", 200)
+
+            self._om_lip_queue   = Queue(maxsize=qsize)
+            self._om_audio_queue = Queue(maxsize=qsize)
+            self._om_state_queue = Queue(maxsize=20)
+            self._om_cmd_queue   = Queue(maxsize=10)
+            self._om_stop_flag   = Value("b", False)
+
+            # shared_pos/dur: GUI 메인스레드가 갱신, P3가 읽음
+            self._om_shared_pos  = Value(ctypes.c_longlong, -1)
+            self._om_shared_dur  = Value(ctypes.c_longlong, -1)
+
+            self._om_processes = []
+            for target, args in [
+                (proc_audio_capture, (
+                    self._om_audio_queue,
+                    self._om_stop_flag,
+                    runtime_cfg,
+                )),
+                (proc_analyzer, (
+                    self._om_lip_queue,
+                    self._om_audio_queue,
+                    self._om_state_queue,
+                    self._om_cmd_queue,
+                    self._om_stop_flag,
+                    runtime_cfg,
+                    self._om_shared_pos,
+                    self._om_shared_dur,
+                )),
+            ]:
+                p = Process(target=target, args=args, daemon=True)
+                p.start()
+                self._om_processes.append(p)
+
+            self._oped_monitor_running = True
+        except Exception:
+            self._oped_monitor_running = False
+
+    def _stop_oped_monitor(self):
+        """OP/ED 감지 전용 프로세스 중지."""
+        if not getattr(self, "_oped_monitor_running", False):
+            return
+        try:
+            self._om_stop_flag.value = True
+            for p in self._om_processes:
+                p.join(timeout=2)
+                if p.is_alive():
+                    p.terminate()
+        except Exception:
+            pass
+        self._om_processes            = []
+        self._oped_monitor_running    = False
+
     def _toggle(self):
         if not self._running:
+            self._stop_oped_monitor()   # 싱크 시작 전 모니터 중지 (중복 방지)
             hwnd = find_potplayer_hwnd()
             if not hwnd:
                 self._start_btn.config(text="⏳ 대기 중...",
@@ -46,10 +108,12 @@ class LipSyncGUIRun:
                                    activebackground=self.BORDER,
                                    state="normal")
             self._proc_lbl.config(text="중지됨", fg=self.TEXT_DIM)
+            self._start_oped_monitor()   # 싱크 정지 후 모니터 재시작
             threading.Thread(
                 target=self._monitor_for_popup,
                 kwargs={"wait_for_exit": True},
                 daemon=True).start()
+
 
     # ── Windows 토스트 알림 ───────────────────────────────────────────────────
     @staticmethod
@@ -182,7 +246,8 @@ class LipSyncGUIRun:
                   command=on_no, **BTN).pack(side="left", padx=round(6*r))
 
     def _start_processes(self):
-        """P1·P2·P3 프로세스 시작. shared_pos/dur를 P3에 전달."""
+        """P1·P2·P3 프로세스 시작."""
+        self._stop_oped_monitor()   # 싱크 시작 시 별도 모니터 중지
         self._running = True
         self.stop_flag.value = False
         runtime_cfg = self._build_cfg()
@@ -244,13 +309,37 @@ class LipSyncGUIRun:
         if self._closing:
             return
 
-        # GUI 메인스레드에서 재생 위치 읽어 shared_pos/dur 갱신
-        if self._running and hasattr(self, "_shared_pos"):
-            hwnd = find_potplayer_hwnd()
-            if hwnd:
-                pos, dur = get_playback_info(hwnd)
-                self._shared_pos.value = pos if pos is not None else -1
-                self._shared_dur.value = dur if dur is not None else -1
+        # ── 재생 위치/길이를 항상 갱신 (싱크 ON/OFF 무관) ────────────────────
+        # 싱크 실행 중이면 _shared_pos, oped 모니터 중이면 _om_shared_pos 갱신
+        hwnd = find_potplayer_hwnd()
+        if hwnd:
+            pos, dur = get_playback_info(hwnd)
+            pv = pos if pos is not None else -1
+            dv = dur if dur is not None else -1
+            if self._running and hasattr(self, "_shared_pos"):
+                self._shared_pos.value = pv
+                self._shared_dur.value = dv
+            if getattr(self, "_oped_monitor_running", False) and hasattr(self, "_om_shared_pos"):
+                self._om_shared_pos.value = pv
+                self._om_shared_dur.value = dv
+
+        # ── oped 모니터(싱크 OFF) state_queue 처리 ───────────────────────────
+        if getattr(self, "_oped_monitor_running", False):
+            om_prompts = []
+            om_logs    = None
+            while True:
+                try:
+                    item = self._om_state_queue.get_nowait()
+                    p = item.get("oped_prompt") if isinstance(item, dict) else None
+                    if p:
+                        om_prompts.append(p)
+                    om_logs = item.get("log_lines")
+                except Exception:
+                    break
+            for p in om_prompts:
+                self._show_oped_skip_popup(p, use_om_queue=True)
+            if om_logs is not None:
+                self._log_lines = collections.deque(om_logs, maxlen=100)
 
         latest       = None
         main_toasts  = []
@@ -341,7 +430,7 @@ class LipSyncGUIRun:
     # [스킵]              → "oped_skip"    → P3가 스킵 실행 + 쿨다운
     # [닫기] / 10초 경과  → "oped_no_skip" → P3가 쿨다운만 시작
 
-    def _show_oped_skip_popup(self, prompt_info: dict):
+    def _show_oped_skip_popup(self, prompt_info: dict, use_om_queue: bool = False):
         if getattr(self, "_oped_popup_open", False):
             return
 
@@ -375,8 +464,14 @@ class LipSyncGUIRun:
         popup.geometry(f"{pw}x{ph}+{px}+{py}")
 
         def send_cmd(cmd: str):
-            try: self.cmd_queue.put_nowait(cmd)
-            except Exception: pass
+            try:
+                # oped 모니터 큐 또는 싱크 큐로 전송
+                if use_om_queue and hasattr(self, "_om_cmd_queue"):
+                    self._om_cmd_queue.put_nowait(cmd)
+                else:
+                    self.cmd_queue.put_nowait(cmd)
+            except Exception:
+                pass
 
         countdown = [10]
         after_id  = [None]
@@ -450,6 +545,7 @@ class LipSyncGUIRun:
             except Exception: pass
         self._save_pos()
         self._stop_processes()
+        self._stop_oped_monitor()   # oped 모니터도 종료
         tray_ref = self._tray
         self._tray = None
 

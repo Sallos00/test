@@ -737,3 +737,31 @@ def write_app_ico_file(path: str):
     with open(path, "wb") as f:
         f.write(build_ico_bytes(ICO_SIZES_FULL))
     print(f"✅ 아이콘 생성 완료: {path}")
+
+# app_icon.py에 추가할 핵심 엔진 코드
+
+def build_ico_bytes(sizes: tuple) -> bytes:
+    """
+    여러 사이즈의 이미지를 하나의 ICO 바이너리로 결합합니다.
+    """
+    header = struct.pack("<HHH", 0, 1, len(sizes))
+    directory = []
+    image_data = []
+    offset = 6 + len(sizes) * 16
+
+    for s in sizes:
+        img = make_frame(s, for_ico=True)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        data = buf.getvalue()
+        
+        # 256은 ICO 규격상 0으로 표기함
+        width = 0 if s == 256 else s
+        height = 0 if s == 256 else s
+        
+        directory.append(struct.pack("<BBBBHHII", 
+            width, height, 0, 0, 1, 32, len(data), offset))
+        image_data.append(data)
+        offset += len(data)
+
+    return header + b"".join(directory) + b"".join(image_data)

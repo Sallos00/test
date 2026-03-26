@@ -287,11 +287,19 @@ class LipSyncGUIRun:
 
     def _reset(self):
         if self._running:
+            # 싱크 실행 중: P3에 reset + oped_reset 커맨드 전송
             try:
                 self.cmd_queue.put_nowait("reset")
+                self.cmd_queue.put_nowait("oped_reset")
             except Exception:
                 pass
             return
+        # 싱크 OFF: oped 모니터에 oped_reset 전송 + 팟플레이어 직접 초기화
+        if getattr(self, "_oped_monitor_running", False):
+            try:
+                self._om_cmd_queue.put_nowait("oped_reset")
+            except Exception:
+                pass
         hwnd = find_potplayer_hwnd()
         if not hwnd:
             self._proc_lbl.config(text="초기화 실패: 팟플레이어 미감지", fg=self.ACCENT2)

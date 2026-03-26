@@ -389,10 +389,12 @@ class LipSyncGUIBase:
             return default
 
     def _load_pos(self):
-
-        sw = self.root.winfo_screenwidth()
-
-        sh = self.root.winfo_screenheight()
+        # 멀티모니터: 가상 데스크탑 전체 범위로 클램프
+        import ctypes as _ct
+        vx = _ct.windll.user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+        vy = _ct.windll.user32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
+        vw = _ct.windll.user32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
+        vh = _ct.windll.user32.GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
 
         try:
 
@@ -400,9 +402,9 @@ class LipSyncGUIBase:
 
                 data = json.load(f)
 
-            x = max(0, min(int(data["x"]), sw - self.W))
+            x = max(vx, min(int(data["x"]), vx + vw - self.W))
 
-            y = max(0, min(int(data["y"]), sh - self.H))
+            y = max(vy, min(int(data["y"]), vy + vh - self.H))
 
             return x, y
 
@@ -467,15 +469,18 @@ class LipSyncGUIBase:
     def _save_pos(self): self._save_settings()
 
     def _place_popup(self, popup, pw, ph):
-
         popup.withdraw()
-
         self.root.update_idletasks()
-
         x = self.root.winfo_x() + (self.root.winfo_width()  - pw) // 2
-
         y = self.root.winfo_y() + (self.root.winfo_height() - ph) // 2
-
+        # 멀티모니터: 가상 데스크탑 전체 범위로 클램프
+        import ctypes as _ct
+        vx = _ct.windll.user32.GetSystemMetrics(76)
+        vy = _ct.windll.user32.GetSystemMetrics(77)
+        vw = _ct.windll.user32.GetSystemMetrics(78)
+        vh = _ct.windll.user32.GetSystemMetrics(79)
+        x = max(vx, min(x, vx + vw - pw))
+        y = max(vy, min(y, vy + vh - ph))
         popup.geometry(f"{pw}x{ph}+{x}+{y}")
 
         try:

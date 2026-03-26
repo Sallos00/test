@@ -729,3 +729,11 @@ class LipSyncGUIBase:
             self.root.after(40, self._unmap_maybe_minimize_to_tray)
         except Exception:
             pass
+
+def write_app_ico_file(path: str):
+    """
+    전체 사이즈(ICO_SIZES_FULL)를 포함한 정식 app.ico 파일을 생성합니다.
+    """
+    with open(path, "wb") as f:
+        f.write(build_ico_bytes(ICO_SIZES_FULL))
+    print(f"✅ 아이콘 생성 완료: {path}")

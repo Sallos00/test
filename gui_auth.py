@@ -38,6 +38,9 @@ class LipSyncGUIAuth:
         self._auth_ok = True
         if self._autostart_var.get():
             self.root.after(500, self._toggle)
+        else:
+            # 자동 시작이 아닐 때 → oped 모니터 바로 시작
+            self.root.after(200, self._start_oped_monitor)
         threading.Thread(
             target=self._monitor_for_popup,
             kwargs={"wait_for_exit": self._autostart_var.get()},

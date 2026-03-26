@@ -49,6 +49,8 @@ POT_GET_CURRENT_TIME = 0x5004   # wParam for WM_USER
 POT_SET_CURRENT_TIME = 0x5005   # wParam for WM_USER
 
 VK_SHIFT      = 0x10
+VK_Q          = 0x51  # Q key (Shift+Q = PIP 창 열기)
+VK_W          = 0x57  # W key (Shift+W = PIP 창 닫기)
 VK_OEM_PERIOD = 0xBE  # '.' key  (Shift+. = '>')
 VK_OEM_COMMA  = 0xBC  # ',' key  (Shift+, = '<')
 VK_OEM_2      = 0xBF  # '/' key
@@ -115,6 +117,14 @@ def get_playback_info(hwnd):
         return pos_ms, dur_ms
     except Exception:
         return None, None
+
+def pip_open(hwnd):
+    """Shift+Q: PIP 창 열기."""
+    post_key_to_potplayer(hwnd, VK_Q, shift=True)
+
+def pip_close(hwnd):
+    """Shift+W: PIP 창 닫기."""
+    post_key_to_potplayer(hwnd, VK_W, shift=True)
 
 def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
     """지정된 초만큼 스킵을 수행한다."""

@@ -119,18 +119,24 @@ def get_playback_info(hwnd):
         return None, None
 
 def pip_send(hwnd):
-    """Shift+Q + Shift+W 동시 입력."""
+    """Shift+Q, Shift+W 순차 전송 (각각 별도 인식)."""
     if not hwnd: return
+    import time as _time
     def _lp(vk, up=False):
         scan = _user32.MapVirtualKeyW(vk, 0)
         lp = 1 | (scan << 16)
         if up: lp |= (1 << 31) | (1 << 30)
         return lp
+    # Shift+Q 전송
     _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT, _lp(VK_SHIFT))
     _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_Q, _lp(VK_Q))
+    _user32.PostMessageW(hwnd, WM_KEYUP, VK_Q, _lp(VK_Q, up=True))
+    _user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT, _lp(VK_SHIFT, up=True))
+    _time.sleep(0.05)
+    # Shift+W 전송
+    _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT, _lp(VK_SHIFT))
     _user32.PostMessageW(hwnd, WM_KEYDOWN, VK_W, _lp(VK_W))
     _user32.PostMessageW(hwnd, WM_KEYUP, VK_W, _lp(VK_W, up=True))
-    _user32.PostMessageW(hwnd, WM_KEYUP, VK_Q, _lp(VK_Q, up=True))
     _user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT, _lp(VK_SHIFT, up=True))
 
 def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):

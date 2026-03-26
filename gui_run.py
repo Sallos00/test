@@ -10,7 +10,7 @@ import ctypes.wintypes
 import tkinter as tk
 import winreg
 from multiprocessing import Process, Queue, Value
-from multiprocessing import ctypes as mp_ctypes
+
 
 import auth as _auth_module
 
@@ -188,8 +188,8 @@ class LipSyncGUIRun:
         runtime_cfg = self._build_cfg()
 
         # GUI 메인스레드 → P3 공유 재생 위치/길이 (ms), -1 = 미확인
-        self._shared_pos = Value(mp_ctypes.c_longlong, -1)
-        self._shared_dur = Value(mp_ctypes.c_longlong, -1)
+        self._shared_pos = Value(ctypes.c_longlong, -1)
+        self._shared_dur = Value(ctypes.c_longlong, -1)
 
         for target, args in [
             (proc_lip_capture,   (self._lip_queue,   self.stop_flag, runtime_cfg)),

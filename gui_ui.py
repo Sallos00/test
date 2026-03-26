@@ -287,7 +287,7 @@ class LipSyncGUIUI:
 
         self._pip_on = False
         self._pip_btn = reg(
-            tk.Button(top, text="⧉ PIP",
+            tk.Button(mf, text="⧉ PIP OFF",
                       font=("Consolas", max(7, round(8*r)), "bold"),
                       bg=self.BG3, fg=self.TEXT_MID,
                       activebackground=self.BORDER,
@@ -295,7 +295,6 @@ class LipSyncGUIUI:
                       padx=round(6*r), pady=2,
                       command=self._pip_toggle),
             bg="BG3", fg="TEXT_MID", abg="BORDER")
-        self._pip_btn.pack(side="right", padx=(0, 4))
 
         self._offset_lbl = reg(tk.Label(mf, text="— ms",
 
@@ -304,8 +303,8 @@ class LipSyncGUIUI:
                                         bg=self.BG, fg=self.ACCENT), bg="BG", fg="ACCENT")
 
         self._offset_lbl.pack(anchor="w", pady=(2, 0))
-
-
+       
+        self._pip_btn.pack(side="right", pady=(5, 0))
 
         bar_bg = reg(tk.Frame(mf, bg=self.BG3, height=4), bg="BG3")
 

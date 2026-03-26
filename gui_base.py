@@ -376,6 +376,13 @@ class LipSyncGUIBase:
 
             pass
 
+        # _update_oped_btn은 .config()로 색을 직접 지정하므로
+        # 테마 전환 후 현재 테마 색으로 다시 적용
+        try:
+            self._update_oped_btn()
+        except Exception:
+            pass
+
     def _load_setting(self, key, default):
 
         try:

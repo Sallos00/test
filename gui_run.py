@@ -77,10 +77,13 @@ class LipSyncGUIRun:
             return
         try:
             self._om_stop_flag.value = True
-            for p in self._om_processes:
+            import threading as _th
+            def _join(p):
                 p.join(timeout=2)
-                if p.is_alive():
-                    p.terminate()
+                if p.is_alive(): p.terminate()
+            ts = [_th.Thread(target=_join, args=(p,), daemon=True) for p in self._om_processes]
+            for t in ts: t.start()
+            for t in ts: t.join()
         except Exception:
             pass
         self._om_processes            = []

@@ -1098,6 +1098,16 @@ class LipSyncGUIUI:
 
             popup.destroy()
 
+            # OP/ED 모니터 즉시 재시작 (변경된 설정을 실행 중인 프로세스에 반영)
+            # proc_analyzer는 _build_cfg()의 OPED_AUTO_SKIP/OPED_SKIP_SEC를 시작 시 고정으로 받으므로,
+            # 설정이 바뀌면 프로세스를 재시작해야 즉시 적용된다.
+            if not self._running:
+                try:
+                    self._stop_oped_monitor()
+                    self._start_oped_monitor()
+                except Exception:
+                    pass
+
             # OP/ED 버튼 상태 갱신
 
             self._update_oped_btn()

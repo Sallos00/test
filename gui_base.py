@@ -292,61 +292,7 @@ class LipSyncGUIBase:
 
                 pass
 
-        def update_widget_colors(widget):
-
-            try:
-
-                wtype = widget.winfo_class()
-
-                if wtype == "Toplevel":
-
-                    widget.config(bg=self.BG)
-
-                elif wtype == "Frame":
-
-                    widget.config(bg=self.BG2)
-
-                elif wtype == "Label":
-
-                    widget.config(bg=self.BG, fg=self.TEXT)
-
-                elif wtype == "Checkbutton":
-
-                    widget.config(bg=self.BG2, fg=self.TEXT,
-
-                                  selectcolor=self.BG3,
-
-                                  activebackground=self.BG2,
-
-                                  activeforeground=self.TEXT)
-
-                elif wtype == "Button":
-
-                    widget.config(bg=self.BG3, fg=self.TEXT,
-
-                                  activebackground=self.BORDER)
-
-            except Exception:
-
-                pass
-
-            for child in widget.winfo_children():
-
-                update_widget_colors(child)
-
-        for toplevel in self.root.winfo_children():
-
-            if isinstance(toplevel, tk.Toplevel):
-
-                try:
-
-                    toplevel.configure(bg=self.BG)
-
-                    update_widget_colors(toplevel)
-
-                except Exception:
-
-                    pass
+        # _theme_widgets에 모든 위젯이 등록되어 있으므로 별도 재귀 순회 불필요
 
         try:
 

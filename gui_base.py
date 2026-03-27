@@ -409,6 +409,8 @@ class LipSyncGUIBase:
 
                 "oped_skip_sec":  skip_sec,
 
+                "pip_on":         getattr(self, "_pip_on", False),
+
             })
 
             with open(self.CFG_FILE, "w") as f:

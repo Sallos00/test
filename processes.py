@@ -231,16 +231,20 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
 
     eRender = 0
 
+    _pid_cache = [None, 0.0]   # [pid, last_check_time]
+
     def find_potplayer_pid():
-
+        now = time.time()
+        if _pid_cache[0] is not None and now - _pid_cache[1] < 0.5:
+            return _pid_cache[0]
         for p in psutil.process_iter(["pid", "name"]):
-
             n = p.info["name"].lower()
-
             if "potplayer" in n or "pot player" in n:
-
-                return p.info["pid"]
-
+                _pid_cache[0] = p.info["pid"]
+                _pid_cache[1] = now
+                return _pid_cache[0]
+        _pid_cache[0] = None
+        _pid_cache[1] = now
         return None
 
     _com_meter = [None]
@@ -560,16 +564,19 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     # ── 음악 감지 ─────────────────────────────────────────────────────────────
     def is_music_playing():
         """최근 MUSIC_WINDOW 초 오디오 RMS로 음악 여부 판별."""
-        now    = time.time()
-        recent = [v for t, v in aud_buf if now - t <= MUSIC_WINDOW]
-        if len(recent) < 10:
+        if len(aud_buf) < 10:
             return False
-        arr      = np.array(recent, dtype=np.float32)
+        now    = time.time()
+        cutoff = now - MUSIC_WINDOW
+        vals   = [v for t, v in aud_buf if t >= cutoff]
+        if len(vals) < 10:
+            return False
+        arr      = np.array(vals, dtype=np.float32)
         mean_rms = float(arr.mean())
         if mean_rms < MUSIC_MIN_RMS:
             return False
         cv   = float(arr.std() / mean_rms) if mean_rms > 1e-9 else 999.0
-        fill = float((arr > 0.02).mean())
+        fill = float((arr > 0.02).sum()) / len(arr)
         return cv < MUSIC_MAX_CV and fill > MUSIC_MIN_FILL
 
     # ── 큐 drain ─────────────────────────────────────────────────────────────
@@ -617,11 +624,18 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         lag  = np.argmax(corr) - (len(aud_sig) - 1)
         return lag / FPS * 1000, lip_bin.std(), aud_bin.std(), lip.mean(), aud.mean()
 
+    _last_log_snapshot = [None]
+
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
                    notify=None, oped_prompt=None):
+        # 로그가 바뀐 경우에만 list 변환 (직렬화 비용 절감)
+        snap = _last_log_snapshot[0]
+        if snap is None or len(snap) != len(logs) or (logs and snap[-1] != logs[-1]):
+            snap = list(logs)
+            _last_log_snapshot[0] = snap
         queue_put(state_queue, dict(
             status=status, offset_ms=offset, correction_ms=correction,
-            log_lines=list(logs), potplayer_ok=pot_ok,
+            log_lines=snap, potplayer_ok=pot_ok,
             lip_samples=lip_n, audio_samples=aud_n,
             notify=notify,
             oped_prompt=oped_prompt,
@@ -764,14 +778,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             in_zone    = in_op or in_ed
             zone_label = "오프닝" if in_op else "엔딩"
             cooled     = (time.time() - last_action_t) > COOLDOWN_SEC
-
-            def fmt_ms(ms): s = int(ms) // 1000; return f"{s // 60}:{s % 60:02d}"
-            add_log(
-                f"📍 {fmt_ms(pos)}/{fmt_ms(dur)} "
-                f"구간={'오프닝' if in_op else '엔딩' if in_ed else '일반'} "
-                f"aud={aud_n} confirm={music_confirm} "
-                f"{'쿨다운중' if not cooled else 'OK'}"
-            )
 
             if in_zone and cooled:
                 if is_music_playing():

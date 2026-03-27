@@ -65,11 +65,19 @@ def queue_put(q, item):
         try: q.put_nowait(item)
         except: pass
 
+_hwnd_cache = [0, 0.0]   # [hwnd, last_check_time]
+
 def find_potplayer_hwnd():
-    """32/64비트 팟플레이어 핸들을 검색한다."""
+    """32/64비트 팟플레이어 핸들 검색 (0.3초 캐시)."""
+    import time as _t
+    now = _t.time()
+    if _hwnd_cache[0] and now - _hwnd_cache[1] < 0.3:
+        return _hwnd_cache[0]
     hwnd = _user32.FindWindowW("PotPlayer64", None)
     if not hwnd:
         hwnd = _user32.FindWindowW("PotPlayer", None)
+    _hwnd_cache[0] = hwnd
+    _hwnd_cache[1] = now
     return hwnd
 
 def post_key_to_potplayer(hwnd, vk, shift=False):

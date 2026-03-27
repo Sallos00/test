@@ -317,19 +317,22 @@ class LipSyncGUIRun:
         if self._closing:
             return
 
-        # ── 재생 위치/길이를 항상 갱신 (싱크 ON/OFF 무관) ────────────────────
-        # 싱크 실행 중이면 _shared_pos, oped 모니터 중이면 _om_shared_pos 갱신
-        hwnd = find_potplayer_hwnd()
-        if hwnd:
-            pos, dur = get_playback_info(hwnd)
-            pv = pos if pos is not None else -1
-            dv = dur if dur is not None else -1
-            if self._running and hasattr(self, "_shared_pos"):
-                self._shared_pos.value = pv
-                self._shared_dur.value = dv
-            if getattr(self, "_oped_monitor_running", False) and hasattr(self, "_om_shared_pos"):
-                self._om_shared_pos.value = pv
-                self._om_shared_dur.value = dv
+        # 재생 위치/길이 갱신 — 500ms 간격으로 throttle (FindWindowW 비용 절감)
+        _now = time.time()
+        if _now - getattr(self, '_hwnd_refresh_t', 0) >= 0.5:
+            self._hwnd_refresh_t = _now
+            hwnd = find_potplayer_hwnd()
+            self._cached_hwnd = hwnd
+            if hwnd:
+                pos, dur = get_playback_info(hwnd)
+                pv = pos if pos is not None else -1
+                dv = dur if dur is not None else -1
+                if self._running and hasattr(self, "_shared_pos"):
+                    self._shared_pos.value = pv
+                    self._shared_dur.value = dv
+                if getattr(self, "_oped_monitor_running", False) and hasattr(self, "_om_shared_pos"):
+                    self._om_shared_pos.value = pv
+                    self._om_shared_dur.value = dv
 
         # ── oped 모니터(싱크 OFF) state_queue 처리 ───────────────────────────
         if getattr(self, "_oped_monitor_running", False):
@@ -411,7 +414,6 @@ class LipSyncGUIRun:
             else:
                 self._offset_lbl.config(text="— ms", fg=self.ACCENT)
 
-            self._bar_ref.update_idletasks()
             bw    = self._bar_ref.winfo_width()
             ratio = min(abs(offset) / 500, 1.0)
             col   = self.ACCENT2 if abs(offset) >= 80 else self.ACCENT3

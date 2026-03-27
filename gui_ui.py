@@ -285,7 +285,7 @@ class LipSyncGUIUI:
 
         self._badge.pack(side="right")
 
-        self._pip_on = False
+        self._pip_on = bool(self._load_setting("pip_on", False))
 
         offset_row = reg(tk.Frame(mf, bg=self.BG), bg="BG")
         offset_row.pack(fill="x", pady=(2, 0))
@@ -305,6 +305,11 @@ class LipSyncGUIUI:
                       command=self._pip_toggle),
             bg="BG3", fg="TEXT_MID", abg="BORDER")
         self._pip_btn.pack(side="right", anchor="s", padx=(4, 0))
+        # 저장된 PIP 상태 복원
+        if self._pip_on:
+            self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3)
+        else:
+            self._pip_btn.config(text="⧉ PIP OFF", fg=self.TEXT_MID)
 
 
 
@@ -428,6 +433,7 @@ class LipSyncGUIUI:
         else:
             self._pip_on = True
             self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3)
+        self._save_settings()
 
     def _update_oped_btn(self):
 

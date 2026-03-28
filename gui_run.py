@@ -337,8 +337,18 @@ class LipSyncGUIRun:
                     self._om_shared_pos.value = pv
                     self._om_shared_dur.value = dv
 
-        # ── oped 모니터(싱크 OFF) state_queue 처리 ───────────────────────────
+        # ── oped 모니터(싱크 OFF) state_queue + audio_queue LOG 처리 ──────
         if getattr(self, "_oped_monitor_running", False):
+            # P2(audio_capture) 로그를 직접 수집 — P3 중계 없이 바로 표시
+            while True:
+                try:
+                    item = self._om_audio_queue.get_nowait()
+                    if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
+                        import time as _t
+                        self._log_lines.append(
+                            f"[{_t.strftime('%H:%M:%S')}] 🔊 {item[1]}")
+                except Exception:
+                    break
             om_latest  = None
             om_prompts = []
             while True:

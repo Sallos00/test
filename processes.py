@@ -196,7 +196,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             _last_log_snapshot[0] = snap
         queue_put(state_queue, dict(
             status=status, offset_ms=offset, correction_ms=correction,
-            lgl=snap, potplayer_ok=pot_ok,
+            log_lines=snap, potplayer_ok=pot_ok,
             lip_samples=lip_n, audio_samples=aud_n,
             notify=notify,
             oped_prompt=oped_prompt,

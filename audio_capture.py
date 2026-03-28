@@ -506,25 +506,51 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
         handler_ptr    = ctypes.addressof(handler_holder)
 
         iid_ac  = _make_guid(IID_IAudioClient)
-        mmdevapi = ctypes.windll.mmdevapi
-        mmdevapi.ActivateAudioInterfaceAsync.restype  = ctypes.c_long
-        mmdevapi.ActivateAudioInterfaceAsync.argtypes = [
-            ctypes.c_wchar_p,
-            ctypes.POINTER(_GUID),
-            ctypes.POINTER(_PROPVARIANT),
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        op = ctypes.c_void_p(0)
-        hr = mmdevapi.ActivateAudioInterfaceAsync(
-            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-            ctypes.byref(iid_ac),
-            ctypes.byref(pv),
-            ctypes.c_void_p(handler_ptr),
-            ctypes.byref(op),
-        )
-        if (hr & 0xFFFFFFFF) != 0:
-            return 0, 0, 0, 0, f"ActivateAudioInterfaceAsync hr=0x{hr & 0xFFFFFFFF:08X}"
+
+        # ActivateAudioInterfaceAsync 는 MTA 컨텍스트에서 콜백을 디스패치한다.
+        # 현재 스레드가 STA 로 초기화돼 있으면 ev.wait() 으로 블로킹 시
+        # COM 메시지 루프가 돌지 않아 콜백이 영영 오지 않는다.
+        # → 별도 MTA 스레드에서 Activate 를 호출해 콜백이 반드시 오도록 한다.
+        mta_hr_out = [0]
+
+        def _do_activate():
+            # 이 스레드는 MTA 로 초기화한다 (CoInitializeEx(None, 0))
+            ole32 = ctypes.windll.ole32
+            ole32.CoInitializeEx(None, 0)   # COINIT_MULTITHREADED
+            try:
+                mmdevapi = ctypes.windll.mmdevapi
+                mmdevapi.ActivateAudioInterfaceAsync.restype  = ctypes.c_long
+                mmdevapi.ActivateAudioInterfaceAsync.argtypes = [
+                    ctypes.c_wchar_p,
+                    ctypes.POINTER(_GUID),
+                    ctypes.POINTER(_PROPVARIANT),
+                    ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_void_p),
+                ]
+                op = ctypes.c_void_p(0)
+                hr = mmdevapi.ActivateAudioInterfaceAsync(
+                    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+                    ctypes.byref(iid_ac),
+                    ctypes.byref(pv),
+                    ctypes.c_void_p(handler_ptr),
+                    ctypes.byref(op),
+                )
+                mta_hr_out[0] = int(hr)
+                if (hr & 0xFFFFFFFF) != 0:
+                    ev.set()   # 실패 즉시 언블록
+            except Exception as exc:
+                send_log(f"⚠ _do_activate 예외: {exc}")
+                mta_hr_out[0] = -1
+                ev.set()
+            finally:
+                ole32.CoUninitialize()
+
+        mta_t = _th.Thread(target=_do_activate, daemon=True)
+        mta_t.start()
+        mta_t.join(timeout=1.0)   # Activate 호출 자체는 즉시 반환돼야 함
+
+        if (mta_hr_out[0] & 0xFFFFFFFF) != 0:
+            return 0, 0, 0, 0, f"ActivateAudioInterfaceAsync hr=0x{mta_hr_out[0] & 0xFFFFFFFF:08X}"
 
         ev.wait(timeout=5.0)
         if not ev.is_set():

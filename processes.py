@@ -378,7 +378,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
                 fallback = i
         return fallback, False
 
-    def _open_stream(p, device_idx, sr):
+    def _open_stream(p, device_idx, sr, pyaudio):
         """주어진 장치로 스트림 열기. 반환: (stream, ch, native_sr, sos, sosfilt)"""
         dev_info  = p.get_device_info_by_index(device_idx)
         ch        = int(dev_info.get("maxInputChannels", 1)) or 1
@@ -421,7 +421,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
         queue_put(audio_queue, ("LOG", f"🎙 루프백 연결: {label} ({dev_idx})"))
 
         try:
-            stream, ch, native_sr, sos, sosfilt = _open_stream(p, dev_idx, SR)
+            stream, ch, native_sr, sos, sosfilt = _open_stream(p, dev_idx, SR, pyaudio)
         except Exception as e:
             p.terminate()
             return False, f"스트림 열기 실패: {e}"
@@ -445,7 +445,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
                         try:
                             stream.stop_stream()
                             stream.close()
-                            stream, ch, native_sr, sos, sosfilt = _open_stream(p, new_idx, SR)
+                            stream, ch, native_sr, sos, sosfilt = _open_stream(p, new_idx, SR, pyaudio)
                             dev_idx  = new_idx
                             cur_excl = True
                             cur_pid  = new_pid
@@ -460,7 +460,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
                         try:
                             stream.stop_stream()
                             stream.close()
-                            stream, ch, native_sr, sos, sosfilt = _open_stream(p, new_idx, SR)
+                            stream, ch, native_sr, sos, sosfilt = _open_stream(p, new_idx, SR, pyaudio)
                             dev_idx  = new_idx
                             cur_excl = new_excl
                             cur_pid  = new_pid
@@ -477,7 +477,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
                 fallback_idx, _ = _find_loopback_device(p, None)
                 if fallback_idx is not None:
                     try:
-                        stream, ch, native_sr, sos, sosfilt = _open_stream(p, fallback_idx, SR)
+                        stream, ch, native_sr, sos, sosfilt = _open_stream(p, fallback_idx, SR, pyaudio)
                         cur_excl = False
                         queue_put(audio_queue, ("LOG", f"🎙 스트림 오류 → 시스템 전체 루프백으로 재연결 ({fallback_idx})"))
                         continue

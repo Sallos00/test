@@ -37,6 +37,7 @@ class LipSyncGUIRun:
 
             self._om_lip_queue   = Queue(maxsize=qsize)
             self._om_audio_queue = Queue(maxsize=qsize)
+            self._om_log_queue   = Queue(maxsize=200)   # P2 전용 로그 큐
             self._om_state_queue = Queue(maxsize=20)
             self._om_cmd_queue   = Queue(maxsize=10)
             self._om_stop_flag   = Value("b", False)
@@ -51,6 +52,7 @@ class LipSyncGUIRun:
                     self._om_audio_queue,
                     self._om_stop_flag,
                     runtime_cfg,
+                    self._om_log_queue,
                 )),
                 (proc_analyzer, (
                     self._om_lip_queue,
@@ -356,18 +358,18 @@ class LipSyncGUIRun:
 
         # ── oped 모니터(싱크 OFF) state_queue + audio_queue LOG 처리 ──────
         if getattr(self, "_oped_monitor_running", False):
-            # P2(audio_capture) 로그를 직접 수집 — P3 중계 없이 바로 표시
-            while True:
-                try:
-                    item = self._om_audio_queue.get_nowait()
-                    if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
-                        import time as _t
+            # P2 전용 로그 큐에서 직접 수집
+            if hasattr(self, "_om_log_queue"):
+                import time as _t
+                while True:
+                    try:
+                        msg = self._om_log_queue.get_nowait()
                         if not hasattr(self, "_log_lines"):
                             self._log_lines = collections.deque(maxlen=100)
                         self._log_lines.append(
-                            f"[{_t.strftime('%H:%M:%S')}] 🔊 {item[1]}")
-                except Exception:
-                    break
+                            f"[{_t.strftime('%H:%M:%S')}] 🔊 {msg}")
+                    except Exception:
+                        break
             om_latest  = None
             om_prompts = []
             while True:
@@ -384,13 +386,7 @@ class LipSyncGUIRun:
             if om_latest:
                 om_logs = om_latest.get("log_lines")
                 if om_logs is not None:
-                    # P3 로그를 병합 — P2 직접 로그(om_audio_queue에서 append한 것)를 덮어쓰지 않음
-                    existing = list(getattr(self, "_log_lines", []))
-                    merged   = sorted(set(existing) | set(om_logs),
-                                      key=lambda x: x[:10])  # 타임스탬프 정렬
-                    if not hasattr(self, "_log_lines"):
-                        self._log_lines = collections.deque(maxlen=100)
-                    self._log_lines = collections.deque(merged[-100:], maxlen=100)
+                    self._log_lines = collections.deque(om_logs, maxlen=100)
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0)

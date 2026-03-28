@@ -7,9 +7,19 @@ from multiprocessing import Queue, Value
 from win32_utils import CFG, queue_put
 
 
-def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
+def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queue=None):
     SR       = cfg["AUDIO_SR"]
     chunk_ms = 50
+
+    # ── LOG 헬퍼: log_queue가 있으면 거기로, 없으면 audio_queue로 ──────────────
+    def send_log(msg):
+        if log_queue is not None:
+            try:
+                log_queue.put_nowait(msg)
+            except Exception:
+                pass
+        else:
+            queue_put(audio_queue, ("LOG", msg))
 
     # ── PID 캐시 ─────────────────────────────────────────────────────────────
     _pc = [None, 0.0]
@@ -161,7 +171,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
             return False, "루프백 장치 없음"
 
         label = "팟플레이어 전용" if is_excl else "시스템 전체"
-        queue_put(audio_queue, ("LOG", f"🎙 루프백 연결: {label} (idx={dev_idx})"))
+        send_log(f"🎙 루프백 연결: {label} (idx={dev_idx})")
 
         try:
             stream, ch, native_sr, sos, sosfilt = open_stream(p, dev_idx, pyaudio)
@@ -193,10 +203,9 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
                             dev_idx  = new_idx
                             cur_excl = True
                             cur_pid  = new_pid
-                            queue_put(audio_queue, ("LOG",
-                                f"🎙 루프백 전환: 시스템 전체 → 팟플레이어 전용 (idx={new_idx})"))
+                            send_log(f"🎙 루프백 전환: 시스템 전체 → 팟플레이어 전용 (idx={new_idx})")
                         except Exception as e:
-                            queue_put(audio_queue, ("LOG", f"⚠ 루프백 전환 실패: {e}"))
+                            send_log(f"⚠ 루프백 전환 실패: {e}")
 
                 elif cur_pid != new_pid:
                     # 팟플레이어 PID 변경 → 새 전용 루프백으로 재연결
@@ -210,10 +219,9 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
                             cur_excl = new_excl
                             cur_pid  = new_pid
                             new_label = "팟플레이어 전용" if new_excl else "시스템 전체"
-                            queue_put(audio_queue, ("LOG",
-                                f"🎙 루프백 재연결: {new_label} (idx={new_idx})"))
+                            send_log(f"🎙 루프백 재연결: {new_label} (idx={new_idx})")
                         except Exception as e:
-                            queue_put(audio_queue, ("LOG", f"⚠ 루프백 재연결 실패: {e}"))
+                            send_log(f"⚠ 루프백 재연결 실패: {e}")
 
             # ── 오디오 읽기 ───────────────────────────────────────────────
             try:
@@ -230,8 +238,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
                     try:
                         stream, ch, native_sr, sos, sosfilt = open_stream(p, fb_idx, pyaudio)
                         cur_excl = False
-                        queue_put(audio_queue, ("LOG",
-                            f"🎙 스트림 오류 → 시스템 전체 루프백 재연결 (idx={fb_idx})"))
+                        send_log(f"🎙 스트림 오류 → 시스템 전체 루프백 재연결 (idx={fb_idx})")
                         continue
                     except Exception:
                         pass
@@ -267,20 +274,20 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
             # 정상 종료(stop_flag) → 루프 탈출
             continue
 
-        queue_put(audio_queue, ("LOG", f"pyaudiowpatch 실패: {reason}"))
-        queue_put(audio_queue, ("LOG", "IAudioMeter 폴백 시작"))
+        send_log(f"pyaudiowpatch 실패: {reason}")
+        send_log("IAudioMeter 폴백 시작")
 
         fallback_logged = False
         while not stop_flag.value:
             rms, err = get_potplayer_rms()
             if rms is not None:
                 if not fallback_logged:
-                    queue_put(audio_queue, ("LOG", "IAudioMeter 세션 캡처 시작"))
+                    send_log("IAudioMeter 세션 캡처 시작")
                     fallback_logged = True
                 queue_put(audio_queue, (time.time(), rms))
             else:
                 if not fallback_logged:
-                    queue_put(audio_queue, ("LOG", f"IAudioMeter 실패: {err}"))
+                    send_log(f"IAudioMeter 실패: {err}")
                     fallback_logged = True
                 if "PID없음" in err:
                     break

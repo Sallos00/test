@@ -56,11 +56,28 @@ def _make_guid(guid_str: str) -> _GUID:
 
 def _coinit() -> int:
     """
-    COINIT_APARTMENTTHREADED(0x2) 로 COM 초기화.
-    ole32 직접 호출 → comtypes 내부 상태에 의존하지 않음.
-    S_OK=0, S_FALSE=1(이미 초기화됨) 모두 정상.
+    COM 초기화. 우선순위:
+      1) COINIT_APARTMENTTHREADED(0x2) → S_OK(0) 이면 완료
+      2) S_FALSE(1): 이미 같은 타입으로 초기화됨 → 그대로 사용
+      3) RPC_E_CHANGED_MODE(0x80010106): 다른 타입으로 이미 초기화됨
+         → CoUninitialize 후 COINIT_MULTITHREADED(0x0) 재시도
+    WASAPI IMMDeviceEnumerator 는 MTA 에서도 동작하므로 MTA 폴백이 안전.
     """
-    return _ole32.CoInitializeEx(None, 2)
+    RPC_E_CHANGED_MODE = 0x80010106
+    hr = _ole32.CoInitializeEx(None, 2)  # STA 시도
+    if hr == 0:
+        return hr  # S_OK: 정상 초기화
+    if hr == 1:
+        return hr  # S_FALSE: 이미 STA 로 초기화됨, 그대로 사용
+    if (hr & 0xFFFFFFFF) == RPC_E_CHANGED_MODE:
+        # PyInstaller/multiprocessing 이 MTA 로 먼저 초기화한 경우
+        try:
+            _ole32.CoUninitialize()
+        except Exception:
+            pass
+        hr2 = _ole32.CoInitializeEx(None, 0)  # MTA 재시도
+        return hr2
+    return hr
 
 def _couninit():
     try:
@@ -374,7 +391,11 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
                 pass
         queue_put(audio_queue, ("LOG", full))
 
-    send_log(f"ℹ COM init hr=0x{_hr_init & 0xFFFFFFFF:08X} | "
+    _com_status = {0: "S_OK(새 초기화)", 1: "S_FALSE(기존 STA 재사용)"}.get(
+        _hr_init & 0xFFFFFFFF,
+        f"hr=0x{_hr_init & 0xFFFFFFFF:08X}(MTA 폴백 또는 오류)"
+    )
+    send_log(f"ℹ COM init {_com_status} | "
              f"Win build={_WIN_BUILD} | ProcessLoopback={_SUPPORT_PROCESS_LOOPBACK}")
 
     # ── PID 캐시 ──────────────────────────────────────────────────────────────

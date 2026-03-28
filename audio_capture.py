@@ -7,6 +7,16 @@ from multiprocessing import Queue, Value
 from win32_utils import CFG, queue_put
 
 def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
+    try:
+        _proc_audio_capture_inner(audio_queue, stop_flag, cfg)
+    except Exception as e:
+        try:
+            from win32_utils import queue_put as _qp
+            _qp(audio_queue, ("LOG", f"⚠ proc_audio_capture 크래시: {e}"))
+        except Exception:
+            pass
+
+def _proc_audio_capture_inner(audio_queue: Queue, stop_flag: Value, cfg: dict):
     SR       = cfg["AUDIO_SR"]
     chunk_ms = 50
     CLSID_MMDeviceEnumerator  = "{BCDE0395-E52F-467C-8E3D-C4579291692E}"

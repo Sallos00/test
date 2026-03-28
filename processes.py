@@ -105,12 +105,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                   stop_flag: Value, cfg: dict,
                   shared_pos=None, shared_dur=None):
     from scipy.signal import correlate
-    BUF_SEC      = cfg["BSC"]
-    FPS          = cfg["CFP"]
-    THRESH       = cfg["STM"]
-    STEP         = cfg["PSM"]
-    MAX_STEPS    = cfg["MCS"]
-    INTERVAL     = cfg["ANI"]
+    BUF_SEC      = cfg["BUFFER_SEC"]
+    FPS          = cfg["CAPTURE_FPS"]
+    THRESH       = cfg["SYNC_THRESHOLD_MS"]
+    STEP         = cfg["POTPLAYER_STEP_MS"]
+    MAX_STEPS    = cfg["MAX_CORRECT_STEP"]
+    INTERVAL     = cfg["ANALYSIS_INTERVAL"]
     MTM = cfg["MAX_TOTAL_SYNC_MS"]
     OAS = bool(cfg.get("OAS", False))
     OSS  = int(cfg.get("OSS", 90))

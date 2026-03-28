@@ -48,9 +48,6 @@ _SUPPORT_PROCESS_LOOPBACK = (_WIN_BUILD >= 19041)
 #   comtypes 를 쓰지 않으므로 multiprocessing 자식 프로세스에서도 안전.
 # ──────────────────────────────────────────────────────────────────────────────
 _ole32 = ctypes.windll.ole32
-_ole32.CoInitializeEx.restype      = ctypes.c_long
-_ole32.CoUninitialize.restype      = None
-_ole32.CoCreateInstance.restype    = ctypes.c_long
 _GUID  = ctypes.c_byte * 16
 
 def _make_guid(guid_str: str) -> _GUID:
@@ -59,27 +56,24 @@ def _make_guid(guid_str: str) -> _GUID:
 
 def _coinit() -> int:
     """
-    COM 초기화. 우선순위:
-      1) COINIT_APARTMENTTHREADED(0x2) → S_OK(0) 이면 완료
-      2) S_FALSE(1): 이미 같은 타입으로 초기화됨 → 그대로 사용
-      3) RPC_E_CHANGED_MODE(0x80010106): 다른 타입으로 이미 초기화됨
-         → CoUninitialize 후 COINIT_MULTITHREADED(0x0) 재시도
-    WASAPI IMMDeviceEnumerator 는 MTA 에서도 동작하므로 MTA 폴백이 안전.
+    COM 초기화. PyArmor/PyInstaller 환경에서도 안전하도록
+    매 호출 시 restype 을 강제 설정한다.
+    STA 시도 → RPC_E_CHANGED_MODE 시 MTA 폴백.
     """
+    # 항상 명시적으로 설정 (난독화 후 모듈 레벨 설정 유실 방지)
+    _ole32.CoInitializeEx.restype   = ctypes.c_long
+    _ole32.CoUninitialize.restype   = None
+    _ole32.CoCreateInstance.restype = ctypes.c_long
+
     RPC_E_CHANGED_MODE = 0x80010106
-    hr = _ole32.CoInitializeEx(None, 2)  # STA 시도
-    if hr == 0:
-        return hr  # S_OK: 정상 초기화
-    if hr == 1:
-        return hr  # S_FALSE: 이미 STA 로 초기화됨, 그대로 사용
-    if (hr & 0xFFFFFFFF) == RPC_E_CHANGED_MODE:
-        # PyInstaller/multiprocessing 이 MTA 로 먼저 초기화한 경우
-        try:
-            _ole32.CoUninitialize()
-        except Exception:
-            pass
-        hr2 = _ole32.CoInitializeEx(None, 0)  # MTA 재시도
-        return hr2
+    hr   = _ole32.CoInitializeEx(None, 2)   # STA 시도
+    hr_u = hr & 0xFFFFFFFF
+    if hr_u == 0 or hr_u == 1:              # S_OK / S_FALSE
+        return hr
+    if hr_u == RPC_E_CHANGED_MODE:
+        try: _ole32.CoUninitialize()
+        except Exception: pass
+        return _ole32.CoInitializeEx(None, 0)  # MTA 폴백
     return hr
 
 def _couninit():
@@ -90,6 +84,7 @@ def _couninit():
 
 def _co_create(clsid_str: str, iid_str: str) -> int:
     """CoCreateInstance → 인터페이스 포인터 value, 실패 시 0"""
+    _ole32.CoCreateInstance.restype = ctypes.c_long  # 호출마다 재설정
     clsid = _make_guid(clsid_str)
     iid   = _make_guid(iid_str)
     out   = ctypes.c_void_p(0)
@@ -97,7 +92,7 @@ def _co_create(clsid_str: str, iid_str: str) -> int:
         ctypes.byref(clsid), None, CLSCTX_ALL,
         ctypes.byref(iid), ctypes.byref(out),
     )
-    return out.value if hr == 0 and out.value else 0
+    return out.value if (hr & 0xFFFFFFFF) == 0 and out.value else 0
 
 def _vtbl_fn(ptr_val: int, idx: int, restype, *argtypes):
     """vtable[idx] 주소로부터 WINFUNCTYPE 함수 반환"""
@@ -197,10 +192,11 @@ _IACC_ReleaseBuffer           = 4
 _IACC_GetNextPacketSize       = 5
 
 
-def _get_default_device() -> int:
+def _get_default_device(log_fn=None) -> int:
     """IMMDeviceEnumerator → IMMDevice ptr value, 실패 시 0"""
     en = _co_create(CLSID_MMDeviceEnumerator, IID_IMMDeviceEnumerator)
     if not en:
+        if log_fn: log_fn("⚠ CoCreateInstance 실패 — COM 초기화 문제")
         return 0
     dev = ctypes.c_void_p(0)
     fn  = _vtbl_fn(en, _IMDE_GetDefaultAudioEndpoint,
@@ -209,7 +205,10 @@ def _get_default_device() -> int:
                    ctypes.POINTER(ctypes.c_void_p))
     hr  = fn(en, eRender, eConsole, ctypes.byref(dev))
     _release(en)
-    return dev.value if hr == 0 and dev.value else 0
+    if (hr & 0xFFFFFFFF) != 0 or not dev.value:
+        if log_fn: log_fn(f"⚠ GetDefaultAudioEndpoint hr=0x{hr & 0xFFFFFFFF:08X}")
+        return 0
+    return dev.value
 
 
 def _iter_session_pids(dev: int):
@@ -441,7 +440,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
 
     def _open_process_loopback(pid: int) -> tuple:
         """반환: (ac, cc, sr, ch, err_str)  실패 시 ac=cc=0"""
-        dev = _get_default_device()
+        dev = _get_default_device(log_fn=send_log)
         if not dev:
             return 0, 0, 0, 0, "IMMDevice 획득 실패"
 
@@ -533,7 +532,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
     # ══════════════════════════════════════════════════════════════════════════
 
     def capture_via_session_loopback() -> tuple[bool, str]:
-        dev = _get_default_device()
+        dev = _get_default_device(log_fn=send_log)
         if not dev:
             return False, "IMMDevice 획득 실패 (SessionLoopback)"
 
@@ -662,6 +661,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
 
     _retry_count = 0  # 재시도 횟수 (로그에 표시)
 
+    _retry_count = 0
     while not stop_flag.value:
 
         # 1순위: ProcessLoopback (Win 10 20H1+)

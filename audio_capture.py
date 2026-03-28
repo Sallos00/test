@@ -81,8 +81,14 @@ def _co_create(clsid_str: str, iid_str: str) -> int:
 
 def _vtbl_fn(ptr_val: int, idx: int, restype, *argtypes):
     """vtable[idx] 주소로부터 WINFUNCTYPE 함수 반환"""
+    if not ptr_val:
+        raise ValueError(f"_vtbl_fn: null ptr_val (idx={idx})")
     vtbl_ptr = ctypes.cast(ptr_val, ctypes.POINTER(ctypes.c_void_p)).contents.value
-    fn_addr  = ctypes.cast(vtbl_ptr, ctypes.POINTER(ctypes.c_void_p))[idx].value  # .value 필수: c_void_p 객체가 아닌 int 주소값
+    if not vtbl_ptr:
+        raise ValueError(f"_vtbl_fn: null vtbl_ptr (ptr_val={ptr_val:#x}, idx={idx})")
+    fn_addr = ctypes.cast(vtbl_ptr, ctypes.POINTER(ctypes.c_void_p))[idx].value
+    if not fn_addr:
+        raise ValueError(f"_vtbl_fn: null fn_addr (vtbl_ptr={vtbl_ptr:#x}, idx={idx})")
     return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(fn_addr)
 
 def _release(ptr_val: int):
@@ -340,6 +346,15 @@ def _read_capture_buffer(cc: int, ch: int) -> "np.ndarray | None":
 
 # ══════════════════════════════════════════════════════════════════════════════
 def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queue=None):
+    # ── PyInstaller 자식 프로세스에서 sys.stdout/stderr 가 None 이면
+    #    예외 traceback 출력 시 'NoneType has no attribute write' 발생.
+    #    무해한 null sink 로 교체해 크래시를 방지한다.
+    import sys, os
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+
     SR       = cfg["AUDIO_SR"]
     chunk_ms = 50
 

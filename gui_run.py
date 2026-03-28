@@ -384,7 +384,13 @@ class LipSyncGUIRun:
             if om_latest:
                 om_logs = om_latest.get("log_lines")
                 if om_logs is not None:
-                    self._log_lines = collections.deque(om_logs, maxlen=100)
+                    # P3 로그를 병합 — P2 직접 로그(om_audio_queue에서 append한 것)를 덮어쓰지 않음
+                    existing = list(getattr(self, "_log_lines", []))
+                    merged   = sorted(set(existing) | set(om_logs),
+                                      key=lambda x: x[:10])  # 타임스탬프 정렬
+                    if not hasattr(self, "_log_lines"):
+                        self._log_lines = collections.deque(maxlen=100)
+                    self._log_lines = collections.deque(merged[-100:], maxlen=100)
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0)

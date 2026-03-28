@@ -82,7 +82,7 @@ def _co_create(clsid_str: str, iid_str: str) -> int:
 def _vtbl_fn(ptr_val: int, idx: int, restype, *argtypes):
     """vtable[idx] 주소로부터 WINFUNCTYPE 함수 반환"""
     vtbl_ptr = ctypes.cast(ptr_val, ctypes.POINTER(ctypes.c_void_p)).contents.value
-    fn_addr  = ctypes.cast(vtbl_ptr, ctypes.POINTER(ctypes.c_void_p))[idx]
+    fn_addr  = ctypes.cast(vtbl_ptr, ctypes.POINTER(ctypes.c_void_p))[idx].value  # .value 필수: c_void_p 객체가 아닌 int 주소값
     return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(fn_addr)
 
 def _release(ptr_val: int):

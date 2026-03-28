@@ -71,9 +71,10 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
             lpid     = info.get("loopbackProcessId")
             dev_name = info.get("name", "")
             if log_devices:
+                match = "✅ PID일치" if (pot_pid and lpid_int is not None and lpid_int == int(pot_pid)) else ""
                 queue_put(audio_queue, ("LOG",
-                    f"🔍 루프백 장치 [{i}] loopbackProcessId={lpid!r} "
-                    f"(type={type(lpid).__name__}) name={dev_name[:40]}"))
+                    f"🔍 [{i}] pid={lpid_int!r} potPID={pot_pid!r} "
+                    f"name={dev_name[:30]} {match}"))
             try:
                 lpid_int = int(lpid) if lpid is not None else None
             except Exception:

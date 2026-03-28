@@ -363,150 +363,163 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
 
             return None, f"COM 예외: {e}"
 
+    def _find_loopback_device(p, pot_pid):
+        """팟플레이어 전용 루프백 우선, 없으면 시스템 전체 루프백 반환.
+        반환: (device_index, is_exclusive) or (None, False)"""
+        target   = None
+        fallback = None
+        for i in range(p.get_device_count()):
+            info = p.get_device_info_by_index(i)
+            if not info.get("isLoopbackDevice"):
+                continue
+            if pot_pid and info.get("loopbackProcessId") == pot_pid:
+                return i, True
+            if fallback is None and info.get("loopbackProcessId") is None:
+                fallback = i
+        return fallback, False
+
+    def _open_stream(p, device_idx, sr):
+        """주어진 장치로 스트림 열기. 반환: (stream, ch, native_sr, sos, sosfilt)"""
+        dev_info  = p.get_device_info_by_index(device_idx)
+        ch        = int(dev_info.get("maxInputChannels", 1)) or 1
+        native_sr = int(dev_info.get("defaultSampleRate", sr))
+        stream = p.open(
+            format=pyaudio.paFloat32,
+            channels=ch,
+            rate=native_sr,
+            input=True,
+            input_device_index=device_idx,
+            frames_per_buffer=int(native_sr * 0.05),
+        )
+        try:
+            from scipy.signal import butter, sosfilt as _sosfilt
+            sos = butter(4, [300, 3400], btype="bandpass", fs=native_sr, output="sos")
+        except Exception:
+            sos, _sosfilt = None, None
+        return stream, ch, native_sr, sos, _sosfilt
+
     def capture_via_pyaudiowpatch():
+        try:
+            import pyaudiowpatch as pyaudio
+        except Exception as e:
+            return False, f"pyaudiowpatch import 실패: {e}"
 
         try:
-
-            import pyaudiowpatch as pyaudio
-
             p = pyaudio.PyAudio()
+        except Exception as e:
+            return False, f"PyAudio 초기화 실패: {e}"
 
-            pot_pid       = find_potplayer_pid()
+        # 초기 장치 선택
+        pot_pid = find_potplayer_pid()
+        dev_idx, is_excl = _find_loopback_device(p, pot_pid)
 
-            target_device = None
+        if dev_idx is None:
+            p.terminate()
+            return False, "loopback 장치 없음"
 
-            fallback_device = None
+        label = "팟플레이어 전용" if is_excl else "시스템 전체"
+        queue_put(audio_queue, ("LOG", f"🎙 루프백 연결: {label} ({dev_idx})"))
 
-            for i in range(p.get_device_count()):
+        try:
+            stream, ch, native_sr, sos, sosfilt = _open_stream(p, dev_idx, SR)
+        except Exception as e:
+            p.terminate()
+            return False, f"스트림 열기 실패: {e}"
 
-                info = p.get_device_info_by_index(i)
+        # 재연결 체크 주기 (초)
+        RECHECK_INTERVAL = 3.0
+        last_recheck = time.time()
+        cur_excl     = is_excl
+        cur_pid      = pot_pid
 
-                if not info.get("isLoopbackDevice"):
-
-                    continue
-
-                if pot_pid and info.get("loopbackProcessId") == pot_pid:
-
-                    target_device = i
-
-                    break
-
-                if fallback_device is None and info.get("loopbackProcessId") is None:
-
-                    fallback_device = i
-
-            if target_device is None:
-
-                target_device = fallback_device
-
-            if target_device is None:
-
-                p.terminate()
-
-                return False, "loopback 장치 없음"
-
-            dev_info  = p.get_device_info_by_index(target_device)
-
-            ch        = int(dev_info.get("maxInputChannels", 1)) or 1
-
-            native_sr = int(dev_info.get("defaultSampleRate", SR))
-
-            stream = p.open(
-
-                format=pyaudio.paFloat32,
-
-                channels=ch,
-
-                rate=native_sr,
-
-                input=True,
-
-                input_device_index=target_device,
-
-                frames_per_buffer=int(native_sr * 0.05),
-
-            )
-
-            # 음성 주파수 필터 미리 생성 (300~3400Hz 대역통과)
+        while not stop_flag.value:
+            # 팟플레이어 전용 루프백 재연결 체크
+            now = time.time()
+            if now - last_recheck >= RECHECK_INTERVAL:
+                last_recheck = now
+                new_pid = find_potplayer_pid()
+                # 현재 시스템 전체 루프백이고, 팟플레이어 전용이 생겼으면 재연결
+                if not cur_excl:
+                    new_idx, new_excl = _find_loopback_device(p, new_pid)
+                    if new_excl and new_idx is not None:
+                        try:
+                            stream.stop_stream()
+                            stream.close()
+                            stream, ch, native_sr, sos, sosfilt = _open_stream(p, new_idx, SR)
+                            dev_idx  = new_idx
+                            cur_excl = True
+                            cur_pid  = new_pid
+                            queue_put(audio_queue, ("LOG", f"🎙 루프백 전환: 시스템 전체 → 팟플레이어 전용 ({new_idx})"))
+                        except Exception as e:
+                            queue_put(audio_queue, ("LOG", f"⚠ 루프백 전환 실패: {e}"))
+                # 현재 전용 루프백인데 팟플레이어 PID가 바뀌었거나 장치가 사라진 경우
+                elif cur_excl and new_pid != cur_pid:
+                    new_idx, new_excl = _find_loopback_device(p, new_pid)
+                    fallback_label = "팟플레이어 전용" if new_excl else "시스템 전체"
+                    if new_idx is not None:
+                        try:
+                            stream.stop_stream()
+                            stream.close()
+                            stream, ch, native_sr, sos, sosfilt = _open_stream(p, new_idx, SR)
+                            dev_idx  = new_idx
+                            cur_excl = new_excl
+                            cur_pid  = new_pid
+                            queue_put(audio_queue, ("LOG", f"🎙 루프백 재연결: {fallback_label} ({new_idx})"))
+                        except Exception as e:
+                            queue_put(audio_queue, ("LOG", f"⚠ 루프백 재연결 실패: {e}"))
 
             try:
-
-                from scipy.signal import butter, sosfilt
-
-                _sos = butter(4, [300, 3400], btype='bandpass',
-
-                              fs=native_sr, output='sos')
-
-            except Exception:
-
-                _sos    = None
-
-                sosfilt = None
-
-            while not stop_flag.value:
-
                 data = stream.read(int(native_sr * 0.05), exception_on_overflow=False)
-
-                arr  = np.frombuffer(data, dtype=np.float32)
-
-                if ch > 1:
-
-                    arr = arr.reshape(-1, ch).mean(axis=1)
-
-                if _sos is not None and sosfilt is not None:
-
+            except Exception:
+                # 스트림 오류 → 시스템 전체 루프백으로 폴백 재시도
+                try: stream.stop_stream(); stream.close()
+                except Exception: pass
+                fallback_idx, _ = _find_loopback_device(p, None)
+                if fallback_idx is not None:
                     try:
-
-                        arr = sosfilt(_sos, arr)
-
+                        stream, ch, native_sr, sos, sosfilt = _open_stream(p, fallback_idx, SR)
+                        cur_excl = False
+                        queue_put(audio_queue, ("LOG", f"🎙 스트림 오류 → 시스템 전체 루프백으로 재연결 ({fallback_idx})"))
+                        continue
                     except Exception:
-
                         pass
+                time.sleep(0.1)
+                continue
 
-                rms = float(np.sqrt(np.mean(arr ** 2)))
+            arr = np.frombuffer(data, dtype=np.float32)
+            if ch > 1:
+                arr = arr.reshape(-1, ch).mean(axis=1)
+            if sos is not None and sosfilt is not None:
+                try:
+                    arr = sosfilt(sos, arr)
+                except Exception:
+                    pass
+            rms = float(np.sqrt(np.mean(arr ** 2)))
+            queue_put(audio_queue, (time.time(), rms))
 
-                queue_put(audio_queue, (time.time(), rms))
-
+        try:
             stream.stop_stream()
-
             stream.close()
-
             p.terminate()
-
-            return True, ""
-
-        except Exception as e:
-
-            return False, f"pyaudiowpatch 예외: {e}"
+        except Exception:
+            pass
+        return True, ""
 
     ok, reason = capture_via_pyaudiowpatch()
 
     if not ok:
-
         queue_put(audio_queue, ("LOG", f"pyaudiowpatch 실패: {reason}"))
-
         fallback_logged = False
-
         while not stop_flag.value:
-
             rms, err = get_potplayer_rms()
-
             if rms is not None:
-
                 if not fallback_logged:
-
                     queue_put(audio_queue, ("LOG", "IAudioMeter 세션 캡처 시작"))
-
                     fallback_logged = True
-
                 queue_put(audio_queue, (time.time(), rms))
-
             else:
-
                 if not fallback_logged:
-
                     queue_put(audio_queue, ("LOG", f"IAudioMeter 실패: {err}"))
-
                     fallback_logged = True
 
             time.sleep(chunk_ms / 1000)

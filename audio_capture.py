@@ -48,6 +48,9 @@ _SUPPORT_PROCESS_LOOPBACK = (_WIN_BUILD >= 19041)
 #   comtypes 를 쓰지 않으므로 multiprocessing 자식 프로세스에서도 안전.
 # ──────────────────────────────────────────────────────────────────────────────
 _ole32 = ctypes.windll.ole32
+_ole32.CoInitializeEx.restype      = ctypes.c_long
+_ole32.CoUninitialize.restype      = None
+_ole32.CoCreateInstance.restype    = ctypes.c_long
 _GUID  = ctypes.c_byte * 16
 
 def _make_guid(guid_str: str) -> _GUID:

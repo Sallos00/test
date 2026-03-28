@@ -71,6 +71,8 @@ class LipSyncGUIRun:
         except Exception as e:
             self._oped_monitor_running = False
             import time as _t
+            if not hasattr(self, "_log_lines"):
+                self._log_lines = collections.deque(maxlen=100)
             self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] ⚠ oped 모니터 시작 실패: {e}")
 
     def _stop_oped_monitor(self):
@@ -346,9 +348,11 @@ class LipSyncGUIRun:
             running = getattr(self, "_oped_monitor_running", False)
             procs   = getattr(self, "_om_processes", [])
             alive   = [p.is_alive() for p in procs]
-            self._log_lines.append(
-                f"[{_diag_t.strftime('%H:%M:%S')}] 🔧 oped_monitor={running} "
-                f"procs={len(procs)} alive={alive}")
+            msg = (f"[{_diag_t.strftime('%H:%M:%S')}] 🔧 oped_monitor={running} "
+                   f"procs={len(procs)} alive={alive}")
+            if not hasattr(self, "_log_lines"):
+                self._log_lines = collections.deque(maxlen=100)
+            self._log_lines.append(msg)
 
         # ── oped 모니터(싱크 OFF) state_queue + audio_queue LOG 처리 ──────
         if getattr(self, "_oped_monitor_running", False):
@@ -358,6 +362,8 @@ class LipSyncGUIRun:
                     item = self._om_audio_queue.get_nowait()
                     if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
                         import time as _t
+                        if not hasattr(self, "_log_lines"):
+                            self._log_lines = collections.deque(maxlen=100)
                         self._log_lines.append(
                             f"[{_t.strftime('%H:%M:%S')}] 🔊 {item[1]}")
                 except Exception:

@@ -142,6 +142,8 @@ class LipSyncGUIBase:
 
         self._refresh()
 
+        # 최초 실행 시 APP_DIR 폴더 + settings.json 즉시 생성
+        self.root.after(0, self._ensure_settings_file)
         self.root.after(0, self._check_auth_on_start)
 
     # ── CFG 빌더: win32_utils.CFG + 런타임 GUI 설정값을 합쳐서 반환 ──────────
@@ -329,6 +331,14 @@ class LipSyncGUIBase:
         except Exception:
             pass
 
+    def _ensure_settings_file(self):
+        """최초 실행 시 APP_DIR 및 settings.json이 없으면 즉시 생성."""
+        try:
+            if not os.path.exists(self.CFG_FILE):
+                self._save_settings()
+        except Exception:
+            pass
+
     def _load_setting(self, key, default):
 
         try:
@@ -363,6 +373,8 @@ class LipSyncGUIBase:
 
         except Exception:
 
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
             return (sw - self.W) // 2, (sh - self.H) // 2
 
     def _save_settings(self):

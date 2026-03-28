@@ -365,28 +365,55 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
 
     def _find_loopback_device(p, pot_pid, log_devices=False):
         """팟플레이어 전용 루프백 우선, 없으면 시스템 전체 루프백 반환.
-        반환: (device_index, is_exclusive) or (None, False)"""
-        target   = None
-        fallback = None
+        반환: (device_index, is_exclusive) or (None, False)
+
+        탐색 우선순위:
+          1) loopbackProcessId == pot_pid  (PID 직접 매칭)
+          2) 장치 이름에 'potplayer' 포함  (PID를 채워주지 않는 환경 대응)
+          3) loopbackProcessId == None 인 첫 번째 루프백  (시스템 전체)
+        """
+        POT_NAMES = {"potplayer", "potplayermini", "potplayermini64",
+                     "pot player", "daumpotplayer"}
+
+        by_pid      = None   # 우선순위 1
+        by_name     = None   # 우선순위 2
+        by_fallback = None   # 우선순위 3
+
         for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
+            info     = p.get_device_info_by_index(i)
             if not info.get("isLoopbackDevice"):
                 continue
-            lpid = info.get("loopbackProcessId")
+            lpid     = info.get("loopbackProcessId")
+            dev_name = info.get("name", "")
+
             if log_devices:
                 queue_put(audio_queue, ("LOG",
                     f"🔍 루프백 장치 [{i}] loopbackProcessId={lpid!r} "
-                    f"(type={type(lpid).__name__}) name={info.get('name','?')[:30]}"))
-            # PID 비교 시 타입 통일 (int로 변환)
+                    f"(type={type(lpid).__name__}) name={dev_name[:40]}"))
+
+            # 우선순위 1: PID 직접 매칭
             try:
                 lpid_int = int(lpid) if lpid is not None else None
             except Exception:
                 lpid_int = None
-            if pot_pid and lpid_int == int(pot_pid):
-                return i, True
-            if fallback is None and lpid_int is None:
-                fallback = i
-        return fallback, False
+
+            if pot_pid and lpid_int is not None and lpid_int == int(pot_pid):
+                return i, True   # 가장 확실, 즉시 반환
+
+            # 우선순위 2: 장치 이름에 potplayer 포함
+            if by_name is None:
+                if any(n in dev_name.lower() for n in POT_NAMES):
+                    by_name = i
+
+            # 우선순위 3: PID 없는 일반 루프백 (시스템 전체)
+            if by_fallback is None and lpid_int is None:
+                by_fallback = i
+
+        if by_pid is not None:
+            return by_pid, True
+        if by_name is not None:
+            return by_name, True
+        return by_fallback, False
 
     def _open_stream(p, device_idx, sr, pyaudio):
         """주어진 장치로 스트림 열기. 반환: (stream, ch, native_sr, sos, sosfilt)"""

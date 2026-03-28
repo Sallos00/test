@@ -393,7 +393,15 @@ class LipSyncGUIRun:
             if om_latest:
                 om_logs = om_latest.get("log_lines")
                 if om_logs is not None:
-                    self._log_lines = collections.deque(om_logs, maxlen=100)
+                    # P3 log_lines 로 덮어쓰지 않고 새 항목만 추가
+                    # (P2 오디오 로그가 사라지는 것을 방지)
+                    existing = set(self._log_lines) if hasattr(self, "_log_lines") else set()
+                    if not hasattr(self, "_log_lines"):
+                        self._log_lines = collections.deque(maxlen=100)
+                    for line in om_logs:
+                        if line not in existing:
+                            self._log_lines.append(line)
+                            existing.add(line)
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0)
@@ -477,7 +485,14 @@ class LipSyncGUIRun:
             self._aud_cnt.config(text=str(aud_n))
             pc = self.ACCENT3 if self._running else self.TEXT_DIM
             self._proc_dot.config(fg=pc)
-            self._log_lines = collections.deque(logs, maxlen=100)
+            # P3 log_lines 로 덮어쓰지 않고 새 항목만 추가
+            existing = set(self._log_lines) if hasattr(self, "_log_lines") else set()
+            if not hasattr(self, "_log_lines"):
+                self._log_lines = collections.deque(maxlen=100)
+            for line in logs:
+                if line not in existing:
+                    self._log_lines.append(line)
+                    existing.add(line)
 
         self.root.after(100, self._refresh)
 

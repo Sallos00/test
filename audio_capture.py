@@ -243,7 +243,34 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
             vp=ctypes.cast(vt,cv); ho=cv(ctypes.addressof(vp)); hp=ctypes.addressof(ho)
             mmdev=ctypes.windll.mmdevapi
             ia=ctypes.create_unicode_buffer("{1CB9AD4C-DBFA-4c32-B178-C2F568A703B2}")
-            dp=ctypes.create_unicode_buffer(r"\?\SWD#MMDEVAPI#{0.0.1.00000000}.{b3f8fa53-0004-438e-9003-51a46e139bfc}")
+            # 기본 렌더 장치 ID를 동적으로 가져옴
+            _user32_l = ctypes.windll.user32
+            _ole32_l  = ctypes.windll.ole32
+            try:
+                _ole32_l.CoInitializeEx(None, 0)
+            except Exception:
+                pass
+            _enumerator_iid = "{A95664D2-9614-4F35-A746-DE8DB63617E6}"
+            _enumerator_clsid = "{BCDE0395-E52F-467C-8E3D-C4579291692E}"
+            _ien = ctypes.windll.ole32
+            # IMMDeviceEnumerator로 기본 장치 ID 가져오기
+            import comtypes
+            import comtypes.client
+            _enum = comtypes.CoCreateInstance(
+                comtypes.GUID(_enumerator_clsid),
+                interface=comtypes.IUnknown,
+                clsctx=comtypes.CLSCTX_ALL)
+            _ppDev = comtypes.POINTER(comtypes.IUnknown)()
+            if _enum._comobj.GetDefaultAudioEndpoint(0, 1, ctypes.byref(_ppDev)) != 0:
+                return False, "기본 오디오 장치 없음"
+            # IMMDevice::GetId로 장치 경로 가져오기
+            _GetId = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p))(
+                ctypes.cast(ctypes.cast(_ppDev._comobj, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))[4]
+            )
+            _dev_id_ptr = ctypes.c_wchar_p()
+            if _GetId(_ppDev._comobj, ctypes.byref(_dev_id_ptr)) != 0:
+                return False, "장치 ID 가져오기 실패"
+            dp = ctypes.create_unicode_buffer(_dev_id_ptr.value or "")
             gs=(ctypes.c_byte*16)(); ole32.CLSIDFromString(ia,gs)
             op=cv(0)
             hr=mmdev.ActivateAudioInterfaceAsync(dp,gs,ctypes.byref(pv),cv(hp),ctypes.byref(op))

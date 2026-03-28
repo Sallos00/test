@@ -68,8 +68,10 @@ class LipSyncGUIRun:
                 self._om_processes.append(p)
 
             self._oped_monitor_running = True
-        except Exception:
+        except Exception as e:
             self._oped_monitor_running = False
+            import time as _t
+            self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] ⚠ oped 모니터 시작 실패: {e}")
 
     def _stop_oped_monitor(self):
         """OP/ED 감지 전용 프로세스 중지."""
@@ -336,6 +338,17 @@ class LipSyncGUIRun:
                 if getattr(self, "_oped_monitor_running", False) and hasattr(self, "_om_shared_pos"):
                     self._om_shared_pos.value = pv
                     self._om_shared_dur.value = dv
+
+        # oped 모니터 상태 진단 (매 5초마다)
+        import time as _diag_t
+        if _diag_t.time() - getattr(self, "_diag_t", 0) > 5:
+            self._diag_t = _diag_t.time()
+            running = getattr(self, "_oped_monitor_running", False)
+            procs   = getattr(self, "_om_processes", [])
+            alive   = [p.is_alive() for p in procs]
+            self._log_lines.append(
+                f"[{_diag_t.strftime('%H:%M:%S')}] 🔧 oped_monitor={running} "
+                f"procs={len(procs)} alive={alive}")
 
         # ── oped 모니터(싱크 OFF) state_queue + audio_queue LOG 처리 ──────
         if getattr(self, "_oped_monitor_running", False):

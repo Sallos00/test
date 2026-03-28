@@ -7,16 +7,6 @@ from multiprocessing import Queue, Value
 from win32_utils import CFG, queue_put
 
 def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
-    try:
-        _proc_audio_capture_inner(audio_queue, stop_flag, cfg)
-    except Exception as e:
-        try:
-            from win32_utils import queue_put as _qp
-            _qp(audio_queue, ("LOG", f"⚠ proc_audio_capture 크래시: {e}"))
-        except Exception:
-            pass
-
-def _proc_audio_capture_inner(audio_queue: Queue, stop_flag: Value, cfg: dict):
     SR       = cfg["AUDIO_SR"]
     chunk_ms = 50
     CLSID_MMDeviceEnumerator  = "{BCDE0395-E52F-467C-8E3D-C4579291692E}"
@@ -323,14 +313,25 @@ def _proc_audio_capture_inner(audio_queue: Queue, stop_flag: Value, cfg: dict):
         except Exception as e:
             return False,f"예외:{e}"
     while not stop_flag.value:
-        ok, reason = capture_via_activate_audio_interface()
+        # 1순위: ProcessLoopback (팟플레이어 전용, Windows 10 2004+)
+        try:
+            ok, reason = capture_via_activate_audio_interface()
+        except Exception as e:
+            ok, reason = False, f"예외: {e}"
         if ok:
-            break
+            continue  # 정상 종료(stop_flag) 또는 PID변경 → 재시도
         queue_put(audio_queue, ("LOG", f"ActivateAudioInterface 실패: {reason}"))
-        ok, reason = capture_via_pyaudiowpatch()
+
+        # 2순위: pyaudiowpatch 루프백
+        try:
+            ok, reason = capture_via_pyaudiowpatch()
+        except Exception as e:
+            ok, reason = False, f"예외: {e}"
         if ok:
-            break
+            continue  # 정상 종료 → 재시도
         queue_put(audio_queue, ("LOG", f"pyaudiowpatch 실패: {reason}"))
+
+        # 3순위: IAudioMeter COM 폴백
         queue_put(audio_queue, ("LOG", "IAudioMeter 폴백 시작"))
         fallback_logged = False
         while not stop_flag.value:
@@ -347,3 +348,5 @@ def _proc_audio_capture_inner(audio_queue: Queue, stop_flag: Value, cfg: dict):
                 if "PID 없음" in err:
                     break
             time.sleep(chunk_ms / 1000)
+        # IAudioMeter도 실패 시 잠시 대기 후 재시도
+        time.sleep(1.0)

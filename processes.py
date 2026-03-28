@@ -363,7 +363,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
 
             return None, f"COM 예외: {e}"
 
-    def _find_loopback_device(p, pot_pid):
+    def _find_loopback_device(p, pot_pid, log_devices=False):
         """팟플레이어 전용 루프백 우선, 없으면 시스템 전체 루프백 반환.
         반환: (device_index, is_exclusive) or (None, False)"""
         target   = None
@@ -372,9 +372,19 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
             info = p.get_device_info_by_index(i)
             if not info.get("isLoopbackDevice"):
                 continue
-            if pot_pid and info.get("loopbackProcessId") == pot_pid:
+            lpid = info.get("loopbackProcessId")
+            if log_devices:
+                queue_put(audio_queue, ("LOG",
+                    f"🔍 루프백 장치 [{i}] loopbackProcessId={lpid!r} "
+                    f"(type={type(lpid).__name__}) name={info.get('name','?')[:30]}"))
+            # PID 비교 시 타입 통일 (int로 변환)
+            try:
+                lpid_int = int(lpid) if lpid is not None else None
+            except Exception:
+                lpid_int = None
+            if pot_pid and lpid_int == int(pot_pid):
                 return i, True
-            if fallback is None and info.get("loopbackProcessId") is None:
+            if fallback is None and lpid_int is None:
                 fallback = i
         return fallback, False
 
@@ -411,7 +421,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict):
 
         # 초기 장치 선택
         pot_pid = find_potplayer_pid()
-        dev_idx, is_excl = _find_loopback_device(p, pot_pid)
+        dev_idx, is_excl = _find_loopback_device(p, pot_pid, log_devices=True)
 
         if dev_idx is None:
             p.terminate()

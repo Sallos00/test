@@ -265,9 +265,13 @@ class LipSyncGUIRun:
         self._shared_pos = Value(ctypes.c_longlong, -1)
         self._shared_dur = Value(ctypes.c_longlong, -1)
 
+        # 싱크 ON 상태 전용 로그 큐 (P2 → GUI 직접 전달)
+        self._main_log_queue = Queue(maxsize=200)
+
         for target, args in [
             (proc_lip_capture,   (self._lip_queue,   self.stop_flag, runtime_cfg)),
-            (proc_audio_capture, (self._audio_queue, self.stop_flag, runtime_cfg)),
+            (proc_audio_capture, (self._audio_queue, self.stop_flag, runtime_cfg,
+                                  self._main_log_queue)),   # log_queue 전달
             (proc_analyzer,      (self._lip_queue, self._audio_queue,
                                   self.state_queue, self.cmd_queue,
                                   self.stop_flag, runtime_cfg,
@@ -356,20 +360,23 @@ class LipSyncGUIRun:
                 self._log_lines = collections.deque(maxlen=100)
             self._log_lines.append(msg)
 
-        # ── oped 모니터(싱크 OFF) state_queue + audio_queue LOG 처리 ──────
+        # ── P2 로그 큐 수집 (싱크 ON/OFF 무관하게 항상 처리) ────────────────
+        # audio_capture.py 의 send_log() 가 이미 타임스탬프를 붙여서 보냄
+        for _lq_attr in ("_main_log_queue", "_om_log_queue"):
+            _lq = getattr(self, _lq_attr, None)
+            if _lq is None:
+                continue
+            while True:
+                try:
+                    msg = _lq.get_nowait()
+                    if not hasattr(self, "_log_lines"):
+                        self._log_lines = collections.deque(maxlen=100)
+                    self._log_lines.append(f"🔊 {msg}")
+                except Exception:
+                    break
+
+        # ── oped 모니터(싱크 OFF) state_queue 처리 ───────────────────────
         if getattr(self, "_oped_monitor_running", False):
-            # P2 전용 로그 큐에서 직접 수집
-            if hasattr(self, "_om_log_queue"):
-                import time as _t
-                while True:
-                    try:
-                        msg = self._om_log_queue.get_nowait()
-                        if not hasattr(self, "_log_lines"):
-                            self._log_lines = collections.deque(maxlen=100)
-                        self._log_lines.append(
-                            f"[{_t.strftime('%H:%M:%S')}] 🔊 {msg}")
-                    except Exception:
-                        break
             om_latest  = None
             om_prompts = []
             while True:

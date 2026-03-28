@@ -439,10 +439,14 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
     # ══════════════════════════════════════════════════════════════════════════
 
     def _open_process_loopback(pid: int) -> tuple:
-        """반환: (ac, cc, sr, ch, err_str)  실패 시 ac=cc=0"""
-        dev = _get_default_device(log_fn=send_log)
-        if not dev:
-            return 0, 0, 0, 0, "IMMDevice 획득 실패"
+        """
+        ActivateAudioInterfaceAsync + VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK 방식.
+        OBS win-wasapi와 동일한 API 경로.
+        반환: (ac, cc, sr, ch, err_str)  실패 시 ac=cc=0
+        """
+        import threading as _th
+
+        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK =             r"\\?\SWD#MMDEVAPI#{0.0.1.00000000}.{b3f8fa53-0004-438e-9003-51a46e139bfc}#"
 
         params = _AUDIOCLIENT_ACTIVATION_PARAMS()
         params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
@@ -454,11 +458,81 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
         pv.blob_cbSize    = ctypes.sizeof(params)
         pv.blob_pBlobData = ctypes.cast(ctypes.addressof(params), ctypes.c_void_p)
 
-        ac = _activate_audio_client(dev, ctypes.byref(pv))
-        _release(dev)
-        if not ac:
-            return 0, 0, 0, 0, "IAudioClient Activate 실패 (ProcessLoopback)"
+        # ActivateAudioInterfaceAsync 콜백 구조
+        ev      = _th.Event()
+        ac_out  = [0]
+        hr_out  = [0]
 
+        # IActivateAudioInterfaceCompletionHandler vtable 구현
+        CB_FUNC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+
+        def _done(this, pOp):
+            try:
+                # IActivateAudioInterfaceAsyncOperation::GetActivateResult
+                fn_gr = ctypes.WINFUNCTYPE(
+                    ctypes.c_long,
+                    ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_long),
+                    ctypes.POINTER(ctypes.c_void_p),
+                )(ctypes.cast(
+                    ctypes.cast(pOp, ctypes.POINTER(ctypes.c_void_p)).contents.value,
+                    ctypes.POINTER(ctypes.c_void_p)
+                )[3])
+                hr_act = ctypes.c_long(0)
+                pp_ac  = ctypes.c_void_p(0)
+                fn_gr(pOp, ctypes.byref(hr_act), ctypes.byref(pp_ac))
+                hr_out[0]  = hr_act.value
+                ac_out[0]  = pp_ac.value
+            except Exception as e:
+                hr_out[0] = -1
+                send_log(f"⚠ _done 콜백 예외: {e}")
+            finally:
+                ev.set()
+            return 0
+
+        cb_fn = CB_FUNC(_done)
+        # IUnknown + IActivateAudioInterfaceCompletionHandler vtable
+        dummy_qi  = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(lambda t: 0)
+        dummy_add = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(lambda t: 1)
+        dummy_rel = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(lambda t: 1)
+        vt_arr = (ctypes.c_void_p * 4)(
+            ctypes.cast(dummy_qi,  ctypes.c_void_p).value,
+            ctypes.cast(dummy_add, ctypes.c_void_p).value,
+            ctypes.cast(dummy_rel, ctypes.c_void_p).value,
+            ctypes.cast(cb_fn,     ctypes.c_void_p).value,
+        )
+        vt_ptr = ctypes.cast(vt_arr, ctypes.c_void_p)
+        handler_holder = ctypes.c_void_p(ctypes.addressof(vt_ptr))
+        handler_ptr    = ctypes.addressof(handler_holder)
+
+        iid_ac  = _make_guid(IID_IAudioClient)
+        mmdevapi = ctypes.windll.mmdevapi
+        mmdevapi.ActivateAudioInterfaceAsync.restype  = ctypes.c_long
+        mmdevapi.ActivateAudioInterfaceAsync.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.POINTER(_GUID),
+            ctypes.POINTER(_PROPVARIANT),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        op = ctypes.c_void_p(0)
+        hr = mmdevapi.ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            ctypes.byref(iid_ac),
+            ctypes.byref(pv),
+            ctypes.c_void_p(handler_ptr),
+            ctypes.byref(op),
+        )
+        if (hr & 0xFFFFFFFF) != 0:
+            return 0, 0, 0, 0, f"ActivateAudioInterfaceAsync hr=0x{hr & 0xFFFFFFFF:08X}"
+
+        ev.wait(timeout=5.0)
+        if not ev.is_set():
+            return 0, 0, 0, 0, "ActivateAudioInterfaceAsync 타임아웃"
+        if hr_out[0] != 0 or not ac_out[0]:
+            return 0, 0, 0, 0, f"GetActivateResult hr=0x{hr_out[0] & 0xFFFFFFFF:08X}"
+
+        ac = ac_out[0]
         sr, ch = _get_mix_format(ac)
         flags  = (AUDCLNT_STREAMFLAGS_LOOPBACK |
                   AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |

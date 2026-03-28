@@ -186,9 +186,9 @@ _IASC2_GetProcessId           = 14
 _IAMI_GetPeakValue            = 3
 _IAC_Initialize               = 3
 _IAC_GetMixFormat             = 8
+_IAC_Start                    = 10   # IAudioClient vtable: 10=Start, 11=Stop
+_IAC_Stop                     = 11
 _IAC_GetService               = 14
-_IAC_Start                    = 11
-_IAC_Stop                     = 12
 _IACC_GetBuffer               = 3
 _IACC_ReleaseBuffer           = 4
 _IACC_GetNextPacketSize       = 5
@@ -657,6 +657,8 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
     # 메인 루프: ProcessLoopback → SessionLoopback → IAudioMeter
     # ══════════════════════════════════════════════════════════════════════════
 
+    _retry_count = 0  # 재시도 횟수 (로그에 표시)
+
     while not stop_flag.value:
 
         # 1순위: ProcessLoopback (Win 10 20H1+)
@@ -666,6 +668,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
             except Exception as e:
                 ok, reason = False, f"예외: {e}"
             if ok:
+                _retry_count = 0
                 continue
             send_log(f"⚠ ProcessLoopback 종료: {reason}")
 
@@ -675,10 +678,11 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
         except Exception as e:
             ok, reason = False, f"예외: {e}"
         if ok:
+            _retry_count = 0
             continue
 
         send_log(f"⚠ SessionLoopback 실패: {reason}")
-        send_log("IAudioMeter 폴백 시작")
+        send_log("⏳ IAudioMeter 폴백 시작 (5초 후 재시도 예정)")
 
         # 3순위: IAudioMeter 폴백
         fallback_logged = False
@@ -691,12 +695,18 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
                 queue_put(audio_queue, (time.time(), rms))
             else:
                 if not fallback_logged:
-                    send_log(f"IAudioMeter 실패: {err}")
+                    send_log(f"⚠ IAudioMeter 실패: {err}")
                     fallback_logged = True
                 if "PID없음" in err:
                     break
             time.sleep(chunk_ms / 1000)
 
-        time.sleep(1.0)
+        # 재시도 전 대기 — 로그를 읽을 수 있도록 5초 유지
+        _retry_count += 1
+        send_log(f"🔄 {_retry_count}회 재시도 대기 중 (5초)...")
+        for _ in range(50):          # 0.1초 × 50 = 5초, stop_flag 반응 유지
+            if stop_flag.value:
+                break
+            time.sleep(0.1)
 
     _couninit()

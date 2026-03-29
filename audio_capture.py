@@ -144,10 +144,19 @@ def _hresult_check(hr, label=""):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _co_initialize():
+    """
+    CoInitializeEx 를 시도한다.
+    RPC_E_CHANGED_MODE(0x80010106): 이미 다른 모드로 초기화된 스레드 → 무시하고 진행.
+    ctypes c_long 은 부호 있는 정수이므로 음수 값으로 비교한다.
+    """
+    _ole32.CoInitializeEx.restype = ctypes.c_long
     hr = _ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
-    # S_FALSE(0x1) = 이미 초기화됨, 정상
-    if hr not in (0, 1):
-        _hresult_check(hr, "CoInitializeEx")
+    if hr >= 0:
+        return  # S_OK(0) or S_FALSE(1)
+    # 0x80010106 을 signed int32 로 해석하면 -2147417850
+    if hr == ctypes.c_long(0x80010106).value:
+        return  # 이미 초기화돼 있음 — COM 준비된 상태이므로 그냥 진행
+    _hresult_check(hr, "CoInitializeEx")
 
 def _co_uninitialize():
     _ole32.CoUninitialize()

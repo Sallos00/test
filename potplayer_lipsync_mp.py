@@ -7,13 +7,12 @@ from multiprocessing import Queue, Value
 from win32_utils import CFG
 from gui_base import LipSyncGUIBase
 from gui_ui   import LipSyncGUIUI
-from gui_ui_popups import LipSyncGUIPopups
 from gui_run  import LipSyncGUIRun
 from gui_auth import LipSyncGUIAuth
 import tkinter as tk
 
 
-class LipSyncGUI(LipSyncGUIBase, LipSyncGUIUI, LipSyncGUIPopups, LipSyncGUIRun, LipSyncGUIAuth):
+class LipSyncGUI(LipSyncGUIBase, LipSyncGUIUI, LipSyncGUIRun, LipSyncGUIAuth):
     """세 Mixin을 합친 최종 GUI 클래스."""
     pass
 

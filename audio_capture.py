@@ -349,7 +349,10 @@ def _audio_client_initialize(client, sr: int, ch: int):
     wfe.dwChannelMask = 0x3 if ch == 2 else (0x1 if ch == 1 else 0)
     wfe.SubFormat     = _SUBTYPE_FLOAT
 
-    BUFFER_100NS = 5 * 10_000_000  # 5초
+    # ProcessLoopback Initialize 규칙:
+    #   hnsBufferDuration = 0  → 시스템 기본값 사용 (큰 값 지정 시 0x88890021 발생)
+    #   hnsPeriodicity    = 0  → Shared 모드에서는 항상 0
+    #   flags             = EVENTCALLBACK 만 (LOOPBACK 플래그 추가 시 E_NOTIMPL 발생)
 
     fn_type = ctypes.WINFUNCTYPE(
         ctypes.c_long,
@@ -362,12 +365,9 @@ def _audio_client_initialize(client, sr: int, ch: int):
         ctypes.c_void_p,   # AudioSessionGuid
     )
     fn = fn_type(_vtbl(client, 3))
-    # ProcessLoopback 로 활성화된 클라이언트는 이미 루프백 캡처 모드이다.
-    # AUDCLNT_STREAMFLAGS_LOOPBACK 를 추가로 넣으면 E_NOTIMPL(0x80004001) 이 반환된다.
-    # OBS win-wasapi 도 ProcessOutput 경로에서는 EVENTCALLBACK 만 사용한다.
     flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
     hr = fn(client, AUDCLNT_SHAREMODE_SHARED, flags,
-            BUFFER_100NS, 0, ctypes.addressof(wfe), None)
+            0, 0, ctypes.addressof(wfe), None)
     _hcheck(hr, "IAudioClient::Initialize")
     return wfe  # 포맷 유지 (GC 방지)
 

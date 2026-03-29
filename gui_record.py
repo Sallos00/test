@@ -360,8 +360,8 @@ class RecordCapturePopup:
         popup.title("녹화 및 캡처")
         popup.resizable(False, False)
         popup.configure(bg=g.BG)
-        popup.grab_set()
         g._place_popup(popup, pw, ph)
+        popup.grab_set()
         self._popup = popup
 
         F_TITLE = max(9,  round(11 * r))

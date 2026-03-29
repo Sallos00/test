@@ -481,10 +481,19 @@ class _ScreenRecorder:
 
         def _do_hide():
             _hide_all_overlays()
+            # update_idletasks()로 withdraw가 실제 화면에 반영될 때까지 대기
+            try:
+                self._root.update_idletasks()
+            except Exception:
+                pass
             hide_done.set()
 
         def _do_show():
             _show_all_overlays()
+            try:
+                self._root.update_idletasks()
+            except Exception:
+                pass
             show_done.set()
 
         root = self._root  # start()에서 저장
@@ -495,13 +504,16 @@ class _ScreenRecorder:
                 try:
                     hide_done.clear()
                     root.after(0, _do_hide)
-                    hide_done.wait(timeout=0.05)   # 최대 50ms 대기
+                    hide_done.wait(timeout=0.1)    # update_idletasks 포함이므로 100ms
+
+                    # 추가 여유: OS가 창 숨김을 화면에 실제 반영하도록 잠깐 대기
+                    time.sleep(0.02)
 
                     shot  = sct.grab(monitor)
 
                     show_done.clear()
                     root.after(0, _do_show)
-                    show_done.wait(timeout=0.05)
+                    show_done.wait(timeout=0.1)
 
                     frame = np.array(shot)
                     frame = _cv2.cvtColor(frame, _cv2.COLOR_BGRA2BGR)
@@ -531,15 +543,17 @@ class _ScreenRecorder:
 # MP4 저장 (비디오 + 오디오 병합)
 # ─────────────────────────────────────────────────────────────────────────────
 def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
-    """OpenCV로 비디오 저장 후 ffmpeg로 오디오 병합. ffmpeg 없으면 영상만 저장."""
-    import subprocess, numpy as np
+    """ffmpeg로 H.264 비디오 + AAC 오디오 MP4 저장. ffmpeg 없으면 OpenCV fallback."""
+    import subprocess, numpy as np, shutil
 
-    tmp_video = out_path + "_tmp_video.mp4"
+    tmp_video = out_path + "_tmp_video.avi"
     tmp_audio = out_path + "_tmp_audio.wav"
 
-    # 1. 비디오 임시 저장
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    vw = cv2.VideoWriter(tmp_video, fourcc, fps, size)
+    # 1. 비디오 임시 저장 (ffmpeg 입력용 무압축 AVI)
+    #    ffmpeg가 있으면 AVI → H.264로 재인코딩하므로 코덱은 무관.
+    #    없을 경우 fallback에서 직접 MP4로 쓴다.
+    fourcc_avi = cv2.VideoWriter_fourcc(*"MJPG")
+    vw = cv2.VideoWriter(tmp_video, fourcc_avi, fps, size)
     for f in video_frames:
         h, w = f.shape[:2]
         if (w, h) != size:
@@ -551,7 +565,7 @@ def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
     has_audio = False
     if audio_arr is not None and len(audio_arr) > 0:
         try:
-            import wave, struct
+            import wave
             audio_data = audio_arr.reshape(-1, audio_ch) if audio_ch > 1 else audio_arr.reshape(-1, 1)
             pcm = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
             with wave.open(tmp_audio, "wb") as wf:
@@ -563,33 +577,59 @@ def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
         except Exception:
             pass
 
-    # 3. ffmpeg로 병합
+    # 3. ffmpeg로 H.264 + AAC 인코딩
+    #    -c:v libx264  → 범용 H.264 (mp4v 대신)
+    #    -pix_fmt yuv420p → QuickTime/Windows Media Player 호환
+    #    -movflags +faststart → 스트리밍/빠른 열기용 moov 앞배치
     merged = False
+    ffmpeg_inputs = ["-i", tmp_video]
+    ffmpeg_audio  = ["-an"]
     if has_audio:
-        try:
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", tmp_video,
-                "-i", tmp_audio,
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-shortest",
-                out_path,
-            ]
-            subprocess.run(cmd, check=True,
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL)
-            merged = True
-        except Exception:
-            pass
+        ffmpeg_inputs += ["-i", tmp_audio]
+        ffmpeg_audio   = ["-c:a", "aac", "-b:a", "192k"]
 
+    try:
+        cmd = (
+            ["ffmpeg", "-y"]
+            + ffmpeg_inputs
+            + [
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+            ]
+            + ffmpeg_audio
+            + (["-shortest"] if has_audio else [])
+            + [out_path]
+        )
+        subprocess.run(cmd, check=True,
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        merged = True
+    except Exception:
+        pass
+
+    # 4. ffmpeg 없는 환경 fallback: OpenCV로 직접 MP4 저장
     if not merged:
-        import shutil
-        shutil.copy(tmp_video, out_path)
+        fourcc_mp4 = cv2.VideoWriter_fourcc(*"avc1")
+        vw2 = cv2.VideoWriter(out_path, fourcc_mp4, fps, size)
+        if not vw2.isOpened():
+            # avc1도 안 되면 최후 수단 mp4v
+            fourcc_mp4 = cv2.VideoWriter_fourcc(*"mp4v")
+            vw2 = cv2.VideoWriter(out_path, fourcc_mp4, fps, size)
+        for f in video_frames:
+            h, w = f.shape[:2]
+            if (w, h) != size:
+                f = cv2.resize(f, size)
+            vw2.write(f)
+        vw2.release()
 
     for p in [tmp_video, tmp_audio]:
-        try: os.remove(p)
-        except: pass
+        try:
+            os.remove(p)
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────

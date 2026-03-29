@@ -130,6 +130,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     lat = 0.0
     pst   = False
     lcd   = 0.0   # 마지막 쿨다운 로그 시각 (30초 throttle)
+    lrd   = 0.0   # 마지막 rms 진단 로그 시각 (30초 throttle)
     pending_prompt = [None]   # GUI 확인 전까지 반복 전송할 oped_prompt
     def add_log(msg):
         import time as _t
@@ -325,7 +326,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         _mean = float(_arr.mean())
                         _cv   = float(_arr.std() / _mean) if _mean > 1e-9 else 999.0
                         _fill = float((_arr > _mean * 0.5).sum()) / len(_arr)
-                        add_log(f"🔍 {zone_label} rms={_mean:.4f} cv={_cv:.2f} fill={_fill:.2f} music={music} mco={mco} OAS={OAS}")
+                        _now_rd = time.time()
+                        if _now_rd - lrd >= 30:
+                            lrd = _now_rd
+                            add_log(f"🔍 {zone_label} rms={_mean:.4f} cv={_cv:.2f} fill={_fill:.2f} music={music} mco={mco} OAS={OAS}")
                 if music:
                     mco += 1
                     add_log(f"🎵 {zone_label} 음악 감지 ({mco}/{MCF}회)")

@@ -386,7 +386,6 @@ class LipSyncGUIUI:
         import traceback, collections
         try:
             from gui_record import RecordCapturePopup
-            # 이미 열려있으면 앞으로 가져오기
             inst = getattr(self, "_record_popup_inst", None)
             if inst is not None and inst._popup is not None:
                 try:
@@ -395,12 +394,11 @@ class LipSyncGUIUI:
                         return
                 except Exception:
                     pass
-            # 새 인스턴스 생성
             self._record_popup_inst = RecordCapturePopup(self)
             self._record_popup_inst.open()
         except Exception as e:
-            msg = f"❌ 녹화/캡처 오류: {e}
-{traceback.format_exc()}"
+            tb = traceback.format_exc()
+            msg = "\u274c 녹화/캡체 오류: " + str(e) + "\n" + tb
             print(msg)
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)

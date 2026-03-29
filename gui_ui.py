@@ -383,7 +383,16 @@ class LipSyncGUIUI:
         tk.Button(bf, text="닫기",   font=("Consolas", FB, "bold"), bg=self.BG3, fg=self.TEXT,   activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(16*r), pady=round(6*r), command=popup.destroy).pack(side="left")
 
     def _open_record_capture(self):
-        if not hasattr(self, "_record_popup_inst") or self._record_popup_inst is None:
-            from gui_record import RecordCapturePopup
-            self._record_popup_inst = RecordCapturePopup(self)
+        from gui_record import RecordCapturePopup
+        # 이미 열려있으면 앞으로 가져오기
+        inst = getattr(self, "_record_popup_inst", None)
+        if inst is not None and inst._popup is not None:
+            try:
+                if inst._popup.winfo_exists():
+                    inst._popup.lift()
+                    return
+            except Exception:
+                pass
+        # 새 인스턴스 생성
+        self._record_popup_inst = RecordCapturePopup(self)
         self._record_popup_inst.open()

@@ -5,19 +5,6 @@ import tkinter as tk
 class LipSyncGUIRecordOpen:
 
     def _open_record_capture(self):
-        from gui_record import RecordCapturePopup
-        inst = getattr(self, "_record_popup_inst", None)
-        if inst is not None and inst._popup is not None:
-            try:
-                if inst._popup.winfo_exists():
-                    inst._popup.lift()
-                    return
-            except Exception:
-                pass
-        self._record_popup_inst = RecordCapturePopup(self)
-        self._record_popup_inst.open()
-
-    def _open_record_capture(self):
         save_dir = self._load_setting("record_save_dir", "")
 
         r     = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
@@ -43,6 +30,7 @@ class LipSyncGUIRecordOpen:
             "recording":  False,
             "screen_rec": None,
             "audio_rec":  None,
+            "overlay":    None,
         }
 
         tk.Label(popup, text="🎬 녹화 및 캡처",
@@ -58,16 +46,19 @@ class LipSyncGUIRecordOpen:
         dir_row = tk.Frame(dir_card, bg=self.BG2)
         dir_row.pack(fill="x", pady=(round(4*r), 0))
         save_dir_var = tk.StringVar(value=save_dir)
+
         tk.Entry(dir_row, textvariable=save_dir_var,
                  font=("Consolas", max(7, F_MONO - 1)),
-                 bg=self.BG3, fg=self.TEXT,
+                 bg="white", fg="#111111",
+                 disabledforeground="#111111",
+                 readonlybackground="white",
                  insertbackground=self.ACCENT,
                  relief="flat", bd=4, state="readonly").pack(side="left", fill="x", expand=True)
+
         btn_kw = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
                       padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
 
         def pick_dir():
-            import os
             from tkinter import filedialog
             path = filedialog.askdirectory(
                 title="저장 위치 선택",
@@ -84,17 +75,16 @@ class LipSyncGUIRecordOpen:
                     except Exception:
                         pass
                     existing["record_save_dir"] = path
-                    import os as _os
-                    _os.makedirs(self.APP_DIR, exist_ok=True)
+                    os.makedirs(self.APP_DIR, exist_ok=True)
                     with open(self.CFG_FILE, "w") as f:
                         json.dump(existing, f)
                 except Exception:
                     pass
-                rec_btn.config(state="normal" if path else "disabled")
-                cap_btn.config(state="normal" if path else "disabled")
+                s = "normal" if os.path.isdir(path) else "disabled"
+                rec_btn.config(state=s)
+                cap_btn.config(state=s)
 
         def open_dir():
-            import os
             d = state["save_dir"]
             if d and os.path.isdir(d):
                 os.startfile(d)
@@ -136,9 +126,9 @@ class LipSyncGUIRecordOpen:
         tab_pages["record"]  = record_page
         tab_pages["capture"] = capture_page
 
-        range_var       = tk.BooleanVar(value=False)
-        start_time_var  = tk.StringVar(value="00:00")
-        end_time_var    = tk.StringVar(value="00:00")
+        range_var      = tk.BooleanVar(value=False)
+        start_time_var = tk.StringVar(value="00:00")
+        end_time_var   = tk.StringVar(value="00:00")
 
         tk.Checkbutton(record_page, text="구간 녹화", variable=range_var,
                        font=("Consolas", F_MONO),
@@ -174,7 +164,7 @@ class LipSyncGUIRecordOpen:
 
         tk.Frame(record_page, bg=self.BORDER, height=1).pack(fill="x", pady=(round(4*r), round(8*r)))
 
-        btn_state = "normal" if (save_dir and __import__("os").path.isdir(save_dir)) else "disabled"
+        btn_state = "normal" if (save_dir and os.path.isdir(save_dir)) else "disabled"
         rec_btn = tk.Button(record_page, text="⏺ 녹화 시작",
                             font=("Consolas", F_BTN, "bold"),
                             bg=self.BG3, fg=self.ACCENT2,
@@ -213,49 +203,81 @@ class LipSyncGUIRecordOpen:
                 return 0
 
         def ensure_subdir(sub):
-            import os
             path = os.path.join(state["save_dir"], sub)
             os.makedirs(path, exist_ok=True)
             return path
+
+        def show_recording_overlay():
+            try:
+                from gui_record_backend import _get_potplayer_rect
+                rect = _get_potplayer_rect()
+                if rect is None:
+                    return
+                px, py = rect[0], rect[1]
+                ov = tk.Toplevel(self.root)
+                ov.overrideredirect(True)
+                ov.attributes("-topmost", True)
+                ov.attributes("-alpha", 0.88)
+                ov.configure(bg="#101010")
+                ov.geometry(f"+{px + 12}+{py + 12}")
+                tk.Label(ov, text="🔴 녹화중",
+                         font=("Segoe UI", 11, "bold"),
+                         bg="#101010", fg="#00c8e0",
+                         padx=14, pady=8).pack()
+                ov.update_idletasks()
+                state["overlay"] = ov
+            except Exception:
+                pass
+
+        def close_recording_overlay():
+            ov = state.get("overlay")
+            if ov:
+                try:
+                    ov.destroy()
+                except Exception:
+                    pass
+                state["overlay"] = None
 
         def stop_record():
             if not state["recording"]:
                 return
             state["recording"] = False
             rec_btn.config(text="⏺ 녹화 시작", fg=self.ACCENT2)
-            rec_status.config(text="💾 저장 중...", fg=self.TEXT_MID)
-            from gui_record_backend import _show_overlay, _save_mp4
-            _show_overlay(self.root, "✅ 녹화가 종료되었습니다.", duration_ms=3000)
+            close_recording_overlay()
+
             def _save():
-                import os, time as _t
+                import time as _t
+                rec_status.config(text="💾 저장 중...", fg=self.TEXT_MID)
                 try:
                     video_frames, fps, size = state["screen_rec"].stop()
                     audio_arr, audio_sr, audio_ch = state["audio_rec"].stop()
-                    ts = _t.strftime("%Y%m%d_%H%M%S")
+                    ts  = _t.strftime("%Y%m%d_%H%M%S")
                     out = os.path.join(ensure_subdir("Video"), f"record_{ts}.mp4")
+                    from gui_record_backend import _save_mp4
                     _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out)
                     self.root.after(0, lambda: rec_status.config(
-                        text="✅ 저장 완료: Video/" + os.path.basename(out), fg=self.ACCENT3))
+                        text="✅ 저장 완료: Video/" + os.path.basename(out),
+                        fg=self.ACCENT3))
                 except Exception as e:
                     self.root.after(0, lambda: rec_status.config(
                         text="⚠ 저장 실패: " + str(e), fg="#e0a03c"))
-            import threading as _th
-            _th.Thread(target=_save, daemon=True).start()
+
+            threading.Thread(target=_save, daemon=True).start()
 
         def start_record():
-            from gui_record_backend import _CV2_OK, _PIL_OK, _AudioRecorder, _ScreenRecorder, _show_overlay
+            from gui_record_backend import _CV2_OK, _PIL_OK, _AudioRecorder, _ScreenRecorder
             if not _CV2_OK:
                 rec_status.config(text="⚠ opencv-python 필요", fg="#e0a03c"); return
-            if not _PIL_OK:
-                rec_status.config(text="⚠ Pillow 필요", fg="#e0a03c"); return
             use_range = range_var.get()
             start_sec = parse_time(start_time_var.get()) if use_range else None
             end_sec   = parse_time(end_time_var.get())   if use_range else None
+
             def _run():
-                import time as _t, psutil
+                import time as _t
                 if use_range and start_sec is not None:
                     from win32_utils import find_potplayer_hwnd, get_playback_info
-                    rec_status.config(text=f"⏳ {start_sec//60:02d}:{start_sec%60:02d} 대기 중...")
+                    self.root.after(0, lambda: rec_status.config(
+                        text=f"⏳ {start_sec//60:02d}:{start_sec%60:02d} 대기 중..."))
                     while True:
                         hwnd = find_potplayer_hwnd()
                         if hwnd:
@@ -263,24 +285,30 @@ class LipSyncGUIRecordOpen:
                             if pos_ms is not None and pos_ms // 1000 >= start_sec:
                                 break
                         _t.sleep(0.2)
+
+                import psutil
                 pid = None
                 for p in psutil.process_iter(["pid", "name"]):
                     if "potplayer" in p.info["name"].lower():
                         pid = p.info["pid"]; break
+
                 state["audio_rec"]  = _AudioRecorder()
                 state["screen_rec"] = _ScreenRecorder()
                 try:
                     state["screen_rec"].start(fps=30)
                 except Exception as e:
-                    rec_status.config(text="⚠ 화면 캡처 실패: " + str(e), fg="#e0a03c"); return
+                    self.root.after(0, lambda: rec_status.config(
+                        text="⚠ 화면 캡처 실패: " + str(e), fg="#e0a03c"))
+                    return
                 if pid:
                     state["audio_rec"].start(pid)
+
                 state["recording"] = True
-                rec_btn.config(text="⏹ 녹화 정지", fg=self.ACCENT3)
-                rec_status.config(text="🔴 녹화 중...", fg=self.ACCENT2)
-                _show_overlay(self.root, "🔴 녹화중", duration_ms=99999999)
+                self.root.after(0, lambda: rec_btn.config(text="⏹ 녹화 정지", fg=self.ACCENT3))
+                self.root.after(0, lambda: rec_status.config(text="🔴 녹화 중...", fg=self.ACCENT2))
+                self.root.after(0, show_recording_overlay)
+
                 if use_range and end_sec is not None:
-                    import time as _t
                     from win32_utils import find_potplayer_hwnd, get_playback_info
                     while state["recording"]:
                         hwnd = find_potplayer_hwnd()
@@ -291,8 +319,8 @@ class LipSyncGUIRecordOpen:
                         _t.sleep(0.2)
                     if state["recording"]:
                         self.root.after(0, stop_record)
-            import threading as _th
-            _th.Thread(target=_run, daemon=True).start()
+
+            threading.Thread(target=_run, daemon=True).start()
 
         def toggle_record():
             if state["recording"]:
@@ -303,27 +331,29 @@ class LipSyncGUIRecordOpen:
         rec_btn.config(command=toggle_record)
 
         def do_capture():
-            from gui_record_backend import _PIL_OK, _get_potplayer_rect, _show_overlay
-            import os, time as _t
-            if not _PIL_OK:
-                cap_status.config(text="⚠ Pillow 필요", fg="#e0a03c"); return
+            import time as _t
+            from gui_record_backend import _get_potplayer_rect, _show_overlay
             rect = _get_potplayer_rect()
             if rect is None:
                 cap_status.config(text="⚠ 팟플레이어 창 없음", fg="#e0a03c"); return
             try:
-                from PIL import ImageGrab
+                import mss, numpy as np, cv2
+                from PIL import Image
                 px, py, pw, ph = rect
-                img = ImageGrab.grab(bbox=(px, py, px+pw, py+ph))
+                with mss.mss() as sct:
+                    shot = sct.grab({"left": px, "top": py, "width": pw, "height": ph})
+                    img = np.array(shot)
+                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
                 ts  = _t.strftime("%Y%m%d_%H%M%S")
                 out = os.path.join(ensure_subdir("Screenshot"), f"capture_{ts}.png")
-                img.save(out, "PNG")
-                cap_status.config(text="✅ 저장: Screenshot/" + os.path.basename(out), fg=self.ACCENT3)
+                Image.fromarray(img).save(out, "PNG")
+                cap_status.config(text="✅ 저장: Screenshot/" + os.path.basename(out),
+                                  fg=self.ACCENT3)
                 _show_overlay(self.root, "📷 장면이 캡처되었습니다.", duration_ms=3000)
             except Exception as e:
                 cap_status.config(text="⚠ 캡처 실패: " + str(e), fg="#e0a03c")
 
         cap_btn.config(command=do_capture)
-
         switch_tab("record")
 
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", padx=PAD)
@@ -331,6 +361,7 @@ class LipSyncGUIRecordOpen:
         def on_close():
             if state["recording"]:
                 stop_record()
+            close_recording_overlay()
             try:
                 popup.destroy()
             except Exception:

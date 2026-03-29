@@ -314,31 +314,20 @@ def _audio_client_get_mix_format(client) -> "tuple[WAVEFORMATEX, ctypes.c_void_p
     return fmt, ptr
 
 
-def _audio_client_initialize(client) -> "tuple[ctypes.c_void_p, int, int]":
+def _audio_client_initialize(client) -> "tuple[int, int]":
     """
     IAudioClient::Initialize — vtable[3]
 
-    ProcessLoopback 전용 올바른 방식:
-      1. GetMixFormat() 으로 시스템 믹스 포맷 획득
-      2. Initialize(SHARED, LOOPBACK|EVENTCALLBACK|NOPERSIST, 0, 0, pMixFormat)
-         - hnsBufferDuration = 0  (시스템 기본값, 임의 값 지정 시 0x88890021)
-         - pFormat = GetMixFormat 반환값 그대로 사용
-    반환: (fmt_ptr, sample_rate, channels)  ← fmt_ptr 은 CoTaskMemFree 전까지 유지
+    Microsoft ApplicationLoopback 공식 샘플 기준:
+      Initialize(SHARED, LOOPBACK|EVENTCALLBACK, 1초, 0, NULL, NULL)
+      - pFormat = NULL  → ProcessLoopback 는 GetMixFormat 을 지원하지 않으므로
+                          NULL 로 넘기면 시스템이 내부 믹스 포맷을 자동 사용
+      - hnsBufferDuration = 10_000_000 (1초)
+      - NOPERSIST 불필요
+    반환: (sample_rate, channels) — 기본값 48000/2 반환 (NULL 포맷 사용 시 실제값 불명)
     """
-    # GetMixFormat — vtable[8]
-    fn_gmf = ctypes.WINFUNCTYPE(
-        ctypes.c_long, ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_void_p),
-    )(_vtbl(client, 8))
-    fmt_ptr = ctypes.c_void_p()
-    _hcheck(fn_gmf(client, ctypes.byref(fmt_ptr)), "GetMixFormat")
+    REFTIMES_PER_SEC = 10_000_000  # 1초 (100ns 단위)
 
-    # 포맷에서 sr/ch 읽기
-    wfx = ctypes.cast(fmt_ptr, ctypes.POINTER(WAVEFORMATEX)).contents
-    sr  = wfx.nSamplesPerSec
-    ch  = wfx.nChannels
-
-    # Initialize
     fn_type = ctypes.WINFUNCTYPE(
         ctypes.c_long,
         ctypes.c_void_p,   # this
@@ -346,15 +335,15 @@ def _audio_client_initialize(client) -> "tuple[ctypes.c_void_p, int, int]":
         ctypes.c_uint,     # StreamFlags
         ctypes.c_longlong, # hnsBufferDuration
         ctypes.c_longlong, # hnsPeriodicity
-        ctypes.c_void_p,   # pFormat
+        ctypes.c_void_p,   # pFormat  (NULL → 시스템 기본 믹스 포맷)
         ctypes.c_void_p,   # AudioSessionGuid
     )
     fn    = fn_type(_vtbl(client, 3))
-    flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST
+    flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
     hr    = fn(client, AUDCLNT_SHAREMODE_SHARED, flags,
-               0, 0, fmt_ptr, None)
+               REFTIMES_PER_SEC, 0, None, None)
     _hcheck(hr, "IAudioClient::Initialize")
-    return fmt_ptr, int(sr), int(ch)
+    return 48000, 2  # ProcessLoopback 기본값
 
 
 def _audio_client_set_event(client, h_event):
@@ -477,9 +466,9 @@ def _run_capture_session(pid: int, audio_queue: Queue,
         # 1. ProcessLoopback IAudioClient 활성화 (OBS 동일 방식)
         client = _activate_process_loopback(pid)
 
-        # 2. 시스템 믹스 포맷으로 Initialize (GetMixFormat 반환값 그대로 사용)
-        fmt_ptr, sr, ch = _audio_client_initialize(client)
-        wfe_ref = fmt_ptr  # GC / CoTaskMemFree 전까지 유지
+        # 2. Initialize (pFormat=NULL, Microsoft 공식 샘플 방식)
+        sr, ch = _audio_client_initialize(client)
+        wfe_ref = None
 
         # 3. 이벤트 핸들 생성 & 등록
         h_event = _kernel32.CreateEventW(None, False, False, None)
@@ -548,8 +537,7 @@ def _run_capture_session(pid: int, audio_queue: Queue,
             _com_release(client)
         if h_event:
             _kernel32.CloseHandle(h_event)
-        if wfe_ref and hasattr(wfe_ref, "value") and wfe_ref.value:
-            _ole32.CoTaskMemFree(wfe_ref)
+        # wfe_ref: pFormat=NULL 방식 사용으로 해제 불필요
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 진입점

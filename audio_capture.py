@@ -234,48 +234,70 @@ def _activate_process_loopback(pid: int) -> ctypes.c_void_p:
     OBS InitClient(ProcessOutput) 동일 흐름:
       ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, ...)
     반환: IAudioClient COM 포인터
+
+    ActivateAudioInterfaceAsync 는 반드시 MTA(COINIT_MULTITHREADED) 스레드에서
+    호출해야 한다. GUI(STA) 스레드에서 호출하면 ActivateCompleted 콜백이
+    같은 스레드의 메시지 루프를 기다리면서 데드락된다.
+    별도 daemon 스레드를 생성해 MTA 컨텍스트를 보장한다.
     """
-    # Mmdevapi.dll 에서 ActivateAudioInterfaceAsync 로드
-    mmdevapi = ctypes.windll.LoadLibrary("Mmdevapi.dll")
-    fn_activate = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_wchar_p,   # deviceInterfacePath
-        ctypes.c_byte * 16, # riid
-        ctypes.POINTER(PROPVARIANT),  # activationParams
-        ctypes.c_void_p,    # completionHandler (IActivateAudioInterfaceCompletionHandler*)
-        ctypes.POINTER(ctypes.c_void_p),  # activationOperation
-    )(("ActivateAudioInterfaceAsync", mmdevapi))
+    import threading
 
-    # AUDIOCLIENT_ACTIVATION_PARAMS 설정
-    act_params = AUDIOCLIENT_ACTIVATION_PARAMS()
-    act_params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
-    act_params.ProcessLoopbackParams.TargetProcessId     = pid
-    act_params.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+    result_box = [None, None]  # [client_or_None, exception_or_None]
 
-    # PROPVARIANT{VT_BLOB}
-    pv = PROPVARIANT()
-    pv.vt = VT_BLOB
-    pv.u.blob.cbSize    = ctypes.sizeof(act_params)
-    pv.u.blob.pBlobData = ctypes.addressof(act_params)
+    def _do_activate():
+        COINIT_MULTITHREADED = 0x0
+        hr_co = _ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
+        # S_OK(0)/S_FALSE(1) → OK, 0x80010106 → 이 스레드는 새로 생성했으므로 발생 안 함
+        _co_initialized = (hr_co == 0)
+        try:
+            mmdevapi = ctypes.windll.LoadLibrary("Mmdevapi.dll")
+            fn_activate = ctypes.WINFUNCTYPE(
+                ctypes.c_long,
+                ctypes.c_wchar_p,                # deviceInterfacePath
+                ctypes.c_byte * 16,              # riid
+                ctypes.POINTER(PROPVARIANT),     # activationParams
+                ctypes.c_void_p,                 # completionHandler
+                ctypes.POINTER(ctypes.c_void_p), # activationOperation
+            )(("ActivateAudioInterfaceAsync", mmdevapi))
 
-    # completion handler
-    handler = _CompletionHandlerImpl()
-    async_op = ctypes.c_void_p()
+            act_params = AUDIOCLIENT_ACTIVATION_PARAMS()
+            act_params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
+            act_params.ProcessLoopbackParams.TargetProcessId     = pid
+            act_params.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
 
-    try:
-        hr = fn_activate(
-            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-            _IID_IAudioClient,
-            ctypes.byref(pv),
-            ctypes.c_void_p(handler.com_ptr),
-            ctypes.byref(async_op),
-        )
-        _hcheck(hr, "ActivateAudioInterfaceAsync")
-        client = handler.wait_and_get_client(timeout_ms=5000)
-    finally:
-        handler.close()
+            pv = PROPVARIANT()
+            pv.vt = VT_BLOB
+            pv.u.blob.cbSize    = ctypes.sizeof(act_params)
+            pv.u.blob.pBlobData = ctypes.addressof(act_params)
 
-    return client
+            handler = _CompletionHandlerImpl()
+            async_op = ctypes.c_void_p()
+            try:
+                hr = fn_activate(
+                    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+                    _IID_IAudioClient,
+                    ctypes.byref(pv),
+                    ctypes.c_void_p(handler.com_ptr),
+                    ctypes.byref(async_op),
+                )
+                _hcheck(hr, "ActivateAudioInterfaceAsync")
+                result_box[0] = handler.wait_and_get_client(timeout_ms=5000)
+            except Exception as e:
+                result_box[1] = e
+            finally:
+                handler.close()
+        finally:
+            if _co_initialized:
+                _ole32.CoUninitialize()
+
+    t = threading.Thread(target=_do_activate, daemon=True)
+    t.start()
+    t.join(timeout=8)
+    if t.is_alive():
+        raise OSError("ActivateAudioInterfaceAsync: MTA 스레드 타임아웃")
+    if result_box[1] is not None:
+        raise result_box[1]
+    return result_box[0]
 
 
 def _audio_client_get_mix_format(client) -> "tuple[WAVEFORMATEX, ctypes.c_void_p]":
@@ -340,7 +362,10 @@ def _audio_client_initialize(client, sr: int, ch: int):
         ctypes.c_void_p,   # AudioSessionGuid
     )
     fn = fn_type(_vtbl(client, 5))
-    flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+    # ProcessLoopback 로 활성화된 클라이언트는 이미 루프백 캡처 모드이다.
+    # AUDCLNT_STREAMFLAGS_LOOPBACK 를 추가로 넣으면 E_NOTIMPL(0x80004001) 이 반환된다.
+    # OBS win-wasapi 도 ProcessOutput 경로에서는 EVENTCALLBACK 만 사용한다.
+    flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
     hr = fn(client, AUDCLNT_SHAREMODE_SHARED, flags,
             BUFFER_100NS, 0, ctypes.addressof(wfe), None)
     _hcheck(hr, "IAudioClient::Initialize")

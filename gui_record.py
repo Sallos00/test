@@ -476,6 +476,10 @@ class RecordCapturePopup:
             from PIL import ImageGrab
             px, py, pw, ph = rect
             _hide_all_overlays()
+            # withdraw가 실제 화면에 반영될 때까지 대기
+            g.root.update_idletasks()
+            import time as _time
+            _time.sleep(0.02)   # OS 렌더링 반영 여유
             img = ImageGrab.grab(bbox=(px, py, px + pw, py + ph))
             _show_all_overlays()
             img.save(out_path, "PNG")

@@ -746,6 +746,16 @@ class LipSyncGUIUI:
 
                   command=self._clear_log).pack(side="left", padx=round(6*r))
 
+        _close_btn_ref = [None]
+
+        def _close_via_btn():
+            _close_fn = getattr(self, "_log_popup_close_fn", None)
+            if _close_fn:
+                _close_fn()
+            else:
+                try: popup.destroy()
+                except Exception: pass
+
         tk.Button(bf, text="닫기",
 
                   font=("Consolas", F_BTN, "bold"),
@@ -758,7 +768,7 @@ class LipSyncGUIUI:
 
                   padx=round(12*r), pady=round(5*r),
 
-                  command=popup.destroy).pack(side="left", padx=round(6*r))
+                  command=_close_via_btn).pack(side="left", padx=round(6*r))
 
         frame = tk.Frame(popup, bg=self.BG2, padx=2, pady=2)
 
@@ -788,13 +798,41 @@ class LipSyncGUIUI:
 
         # 드래그 선택/복사는 허용하고, 직접 편집은 차단
         def _block_edit(event):
+            # Ctrl+C(복사)는 허용
+            if event.keysym == "c" and (event.state & 0x4):
+                return
             return "break"
 
         txt.bind("<Key>", _block_edit)
         txt.bind("<<Paste>>", _block_edit)
         txt.bind("<<Cut>>", _block_edit)
+        # Ctrl+C 명시적 허용 (플랫폼 무관)
+        txt.bind("<Control-c>", lambda e: None)
+        txt.bind("<Control-C>", lambda e: None)
 
-        scrollbar.config(command=txt.yview)
+        # 사용자가 스크롤을 직접 움직였는지 추적
+        self._log_user_scrolled = False
+
+        def _on_scroll(*args):
+            """스크롤바 조작 시 사용자가 스크롤했다고 표시."""
+            txt.yview(*args)
+            y1, y2 = txt.yview()
+            self._log_user_scrolled = y2 < 0.999
+
+        scrollbar.config(command=_on_scroll)
+
+        def _on_mousewheel(event):
+            txt.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            y1, y2 = txt.yview()
+            self._log_user_scrolled = y2 < 0.999
+
+        txt.bind("<MouseWheel>", _on_mousewheel)
+        txt.bind("<Button-4>",   lambda e: (txt.yview_scroll(-1, "units"),
+                                             setattr(self, "_log_user_scrolled",
+                                                     txt.yview()[1] < 0.999)))
+        txt.bind("<Button-5>",   lambda e: (txt.yview_scroll(1, "units"),
+                                             setattr(self, "_log_user_scrolled",
+                                                     txt.yview()[1] < 0.999)))
 
         txt.tag_config("ok",   foreground=self.ACCENT3)
 
@@ -813,6 +851,17 @@ class LipSyncGUIUI:
         txt.tag_config("dim",  foreground=self.TEXT_DIM)
 
         self._log_popup_txt = txt
+        self._log_user_scrolled = False
+
+        def _on_popup_close():
+            self._log_user_scrolled = False
+            self._log_popup_txt = None
+            self._log_popup_close_fn = None
+            try: popup.destroy()
+            except Exception: pass
+
+        self._log_popup_close_fn = _on_popup_close
+        popup.protocol("WM_DELETE_WINDOW", _on_popup_close)
 
         self._update_log_popup()
 
@@ -831,13 +880,21 @@ class LipSyncGUIUI:
         try:
 
             txt = self._log_popup_txt
+            if txt is None:
+                return
 
-            # 맨 아래를 보고 있을 때만 자동 스크롤, 아니면 현재 첫 줄 고정
+            # ── 스크롤 위치 기억 ─────────────────────────────────────────────
             y1, y2 = txt.yview()
-            at_bottom = y2 >= 0.999
-            # 첫 번째로 보이는 줄 번호 계산 (비율 → 라인 인덱스)
-            total_before = int(txt.index("end-1c").split(".")[0])
-            first_visible_line = max(1, round(y1 * total_before)) if not at_bottom else None
+            at_bottom = not getattr(self, "_log_user_scrolled", False)
+            # 현재 뷰포트 상단에 보이는 텍스트 내용을 앵커로 저장
+            anchor_text = None
+            if not at_bottom:
+                try:
+                    anchor_idx = txt.index(f"@0,0")          # 좌상단 문자 인덱스
+                    line_no    = int(anchor_idx.split(".")[0])
+                    anchor_text = txt.get(f"{line_no}.0", f"{line_no}.end").strip()
+                except Exception:
+                    anchor_text = None
 
             txt.delete("1.0", "end")
 
@@ -886,10 +943,19 @@ class LipSyncGUIUI:
 
                     txt.insert("end", line, tag)
 
+            # ── 스크롤 위치 복원 ─────────────────────────────────────────────
             if at_bottom:
                 txt.see("end")
-            elif first_visible_line is not None:
-                txt.see(f"{first_visible_line}.0")
+            elif anchor_text:
+                # 앵커 텍스트가 있는 줄을 검색해 해당 위치로 이동
+                found = txt.search(anchor_text, "1.0", stopindex="end", nocase=False)
+                if found:
+                    txt.see(found)
+                else:
+                    # 찾지 못하면 비율 기반으로 근사 복원
+                    txt.yview_moveto(y1)
+            else:
+                txt.yview_moveto(y1)
 
         except Exception:
 

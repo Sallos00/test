@@ -542,16 +542,39 @@ class _ScreenRecorder:
 # ─────────────────────────────────────────────────────────────────────────────
 # MP4 저장 (비디오 + 오디오 병합)
 # ─────────────────────────────────────────────────────────────────────────────
+def _find_ffmpeg() -> str:
+    """ffmpeg 실행 파일 경로 반환. 없으면 빈 문자열."""
+    import shutil
+    # 1. PATH에서 찾기
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    # 2. 프로그램 동작 폴더 옆에 ffmpeg.exe 가 있는 경우 (번들 배포)
+    here = os.path.dirname(os.path.abspath(__file__))
+    local = os.path.join(here, "ffmpeg.exe")
+    if os.path.isfile(local):
+        return local
+    # 3. 일반적인 설치 위치
+    for candidate in [
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
 def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
     """ffmpeg로 H.264 비디오 + AAC 오디오 MP4 저장. ffmpeg 없으면 OpenCV fallback."""
-    import subprocess, numpy as np, shutil
+    import subprocess, numpy as np, shutil, tempfile
 
-    tmp_video = out_path + "_tmp_video.avi"
-    tmp_audio = out_path + "_tmp_audio.wav"
+    # 한글/특수문자 경로 문제를 피하기 위해 임시 파일은 TEMP 폴더에 생성
+    tmp_dir   = tempfile.gettempdir()
+    tmp_video = os.path.join(tmp_dir, "autosinc_tmp_video.avi")
+    tmp_audio = os.path.join(tmp_dir, "autosinc_tmp_audio.wav")
 
-    # 1. 비디오 임시 저장 (ffmpeg 입력용 무압축 AVI)
-    #    ffmpeg가 있으면 AVI → H.264로 재인코딩하므로 코덱은 무관.
-    #    없을 경우 fallback에서 직접 MP4로 쓴다.
+    # 1. 비디오 임시 저장 (MJPG AVI — ffmpeg 입력용)
     fourcc_avi = cv2.VideoWriter_fourcc(*"MJPG")
     vw = cv2.VideoWriter(tmp_video, fourcc_avi, fps, size)
     for f in video_frames:
@@ -578,52 +601,72 @@ def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
             pass
 
     # 3. ffmpeg로 H.264 + AAC 인코딩
-    #    -c:v libx264  → 범용 H.264 (mp4v 대신)
-    #    -pix_fmt yuv420p → QuickTime/Windows Media Player 호환
-    #    -movflags +faststart → 스트리밍/빠른 열기용 moov 앞배치
-    merged = False
-    ffmpeg_inputs = ["-i", tmp_video]
-    ffmpeg_audio  = ["-an"]
-    if has_audio:
-        ffmpeg_inputs += ["-i", tmp_audio]
-        ffmpeg_audio   = ["-c:a", "aac", "-b:a", "192k"]
+    #    -c:v libx264      → 범용 H.264
+    #    -pix_fmt yuv420p  → Windows Media Player / QuickTime 호환
+    #    -movflags +faststart → moov 박스 앞배치 (빠른 열기)
+    merged    = False
+    ffmpeg_bin = _find_ffmpeg()
 
-    try:
-        cmd = (
-            ["ffmpeg", "-y"]
-            + ffmpeg_inputs
-            + [
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "18",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-            ]
-            + ffmpeg_audio
-            + (["-shortest"] if has_audio else [])
-            + [out_path]
-        )
-        subprocess.run(cmd, check=True,
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
-        merged = True
-    except Exception:
-        pass
+    if ffmpeg_bin:
+        ffmpeg_inputs = ["-i", tmp_video]
+        ffmpeg_audio  = ["-an"]
+        if has_audio:
+            ffmpeg_inputs += ["-i", tmp_audio]
+            ffmpeg_audio   = ["-c:a", "aac", "-b:a", "192k"]
+
+        # out_path에 한글이 있어도 ffmpeg가 처리할 수 있도록
+        # 임시 출력 파일을 TEMP에 먼저 쓴 뒤 shutil.move로 이동
+        tmp_out = os.path.join(tmp_dir, "autosinc_tmp_out.mp4")
+        try:
+            cmd = (
+                [ffmpeg_bin, "-y"]
+                + ffmpeg_inputs
+                + [
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "18",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                ]
+                + ffmpeg_audio
+                + (["-shortest"] if has_audio else [])
+                + [tmp_out]
+            )
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if result.returncode == 0 and os.path.isfile(tmp_out):
+                shutil.move(tmp_out, out_path)
+                merged = True
+            else:
+                # 디버깅용: 에러 로그를 out_path 옆에 남김
+                try:
+                    log_path = out_path + "_ffmpeg_error.txt"
+                    with open(log_path, "wb") as lf:
+                        lf.write(result.stderr)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # 4. ffmpeg 없는 환경 fallback: OpenCV로 직접 MP4 저장
     if not merged:
-        fourcc_mp4 = cv2.VideoWriter_fourcc(*"avc1")
-        vw2 = cv2.VideoWriter(out_path, fourcc_mp4, fps, size)
-        if not vw2.isOpened():
-            # avc1도 안 되면 최후 수단 mp4v
-            fourcc_mp4 = cv2.VideoWriter_fourcc(*"mp4v")
+        # avc1(H.264) 시도 → 안 되면 mp4v
+        for fourcc_str in ("avc1", "mp4v"):
+            fourcc_mp4 = cv2.VideoWriter_fourcc(*fourcc_str)
             vw2 = cv2.VideoWriter(out_path, fourcc_mp4, fps, size)
-        for f in video_frames:
-            h, w = f.shape[:2]
-            if (w, h) != size:
-                f = cv2.resize(f, size)
-            vw2.write(f)
-        vw2.release()
+            if vw2.isOpened():
+                for f in video_frames:
+                    h, w = f.shape[:2]
+                    if (w, h) != size:
+                        f = cv2.resize(f, size)
+                    vw2.write(f)
+                vw2.release()
+                merged = True
+                break
+            vw2.release()
 
     for p in [tmp_video, tmp_audio]:
         try:

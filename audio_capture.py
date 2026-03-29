@@ -259,6 +259,10 @@ def _activate_process_loopback(pid: int) -> ctypes.c_void_p:
     호출해야 한다. GUI(STA) 스레드에서 호출하면 ActivateCompleted 콜백이
     같은 스레드의 메시지 루프를 기다리면서 데드락된다.
     별도 daemon 스레드를 생성해 MTA 컨텍스트를 보장한다.
+
+    ※ CoUninitialize 를 여기서 하지 않는다. 호출자(_run_capture_session_mta)가
+       동일 MTA 스레드에서 이후 COM 호출(_get_render_mix_format 등)을 이어서
+       수행하므로, 세션 종료 시점에 한 번만 CoUninitialize 한다.
     """
     import threading
 
@@ -267,8 +271,8 @@ def _activate_process_loopback(pid: int) -> ctypes.c_void_p:
     def _do_activate():
         COINIT_MULTITHREADED = 0x0
         hr_co = _ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
-        # S_OK(0)/S_FALSE(1) → OK, 0x80010106 → 이 스레드는 새로 생성했으므로 발생 안 함
-        _co_initialized = (hr_co == 0)
+        # S_OK(0)/S_FALSE(1) → OK, 0x80010106 → 이미 초기화된 MTA(호출자 스레드가 MTA인 경우)
+        _co_initialized = (hr_co in (0, 1))
         try:
             mmdevapi = ctypes.windll.LoadLibrary("Mmdevapi.dll")
             fn_activate = ctypes.WINFUNCTYPE(
@@ -306,9 +310,7 @@ def _activate_process_loopback(pid: int) -> ctypes.c_void_p:
                 result_box[1] = e
             finally:
                 handler.close()
-        finally:
-            if _co_initialized:
-                _ole32.CoUninitialize()
+        # ※ CoUninitialize 하지 않음. 호출자(MTA 세션 스레드)가 세션 종료 시 해제.
 
     t = threading.Thread(target=_do_activate, daemon=True)
     t.start()
@@ -537,10 +539,40 @@ def _apply_filter(arr, sos, sosfilt):
     return arr
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 캡처 세션 1회 실행
+# 캡처 세션 1회 실행  (MTA COM 컨텍스트를 세션 전체에 유지)
 # ─────────────────────────────────────────────────────────────────────────────
 def _run_capture_session(pid: int, audio_queue: Queue,
                           stop_flag: Value, send_log) -> "tuple[bool, str]":
+    """
+    MTA 스레드 래퍼.
+    _activate_process_loopback, _audio_client_initialize(_get_render_mix_format),
+    그리고 캡처 루프 전체가 동일 MTA COM 컨텍스트 안에서 실행되어야
+    COM 포인터가 유효하게 유지된다.
+    """
+    import threading
+    result_box = [None]
+
+    def _session_mta():
+        COINIT_MULTITHREADED = 0x0
+        hr_co = _ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
+        co_ok = hr_co in (0, 1)
+        try:
+            result_box[0] = _run_capture_session_impl(pid, audio_queue, stop_flag, send_log)
+        except Exception as e:
+            result_box[0] = (False, f"예외(MTA): {e}")
+        finally:
+            if co_ok:
+                _ole32.CoUninitialize()
+
+    t = threading.Thread(target=_session_mta, daemon=True)
+    t.start()
+    t.join()
+    return result_box[0] if result_box[0] is not None else (False, "MTA 스레드 비정상 종료")
+
+
+def _run_capture_session_impl(pid: int, audio_queue: Queue,
+                               stop_flag: Value, send_log) -> "tuple[bool, str]":
+    """실제 캡처 세션 — _run_capture_session 의 MTA 스레드 안에서만 호출된다."""
     client  = None
     cap     = None
     h_event = None

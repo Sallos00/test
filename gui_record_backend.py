@@ -74,8 +74,26 @@ except Exception:
 # ─────────────────────────────────────────────────────────────────────────────
 # 팟플레이어 창 영역 획득
 # ─────────────────────────────────────────────────────────────────────────────
+def _get_potplayer_video_hwnd(parent_hwnd):
+    """팟플레이어 내 영상 렌더러 자식 창 hwnd 반환. 없으면 None."""
+    children = []
+    def _cb(hwnd, _):
+        rc = _wt.RECT()
+        _user32.GetClientRect(hwnd, _ct.byref(rc))
+        w = rc.right - rc.left
+        h = rc.bottom - rc.top
+        if w > 100 and h > 100:
+            children.append((w * h, hwnd))
+        return True
+    CB = _ct.WINFUNCTYPE(_ct.c_bool, _ct.c_void_p, _ct.c_void_p)
+    _user32.EnumChildWindows(parent_hwnd, CB(_cb), 0)
+    if children:
+        children.sort(reverse=True)
+        return children[0][1]
+    return None
+
 def _get_potplayer_rect():
-    """팟플레이어 클라이언트 영역 (x, y, w, h) 반환. 실패 시 None."""
+    """팟플레이어 영상 영역 (x, y, w, h) 반환. 실패 시 None."""
     if not _WIN_OK:
         return None
     try:
@@ -83,10 +101,13 @@ def _get_potplayer_rect():
         hwnd = find_potplayer_hwnd()
         if not hwnd:
             return None
+        # 영상 렌더러 자식 창 찾기 → 없으면 클라이언트 영역 fallback
+        video_hwnd = _get_potplayer_video_hwnd(hwnd)
+        target = video_hwnd if video_hwnd else hwnd
         rc = _wt.RECT()
-        _user32.GetClientRect(hwnd, _ct.byref(rc))
+        _user32.GetClientRect(target, _ct.byref(rc))
         pt = _wt.POINT(0, 0)
-        _user32.ClientToScreen(hwnd, _ct.byref(pt))
+        _user32.ClientToScreen(target, _ct.byref(pt))
         w = rc.right - rc.left
         h = rc.bottom - rc.top
         if w <= 0 or h <= 0:
@@ -142,75 +163,122 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
 # ─────────────────────────────────────────────────────────────────────────────
 class _AudioRecorder:
     """
-    audio_capture.py 의 WASAPI ProcessLoopback 을 직접 이용해
-    팟플레이어 오디오를 float32 raw 버퍼로 수집한다.
+    pyaudiowpatch WASAPI loopback으로 팟플레이어 오디오 캡처.
+    포커스 무관, Windows 10/11 모두 지원.
     """
     def __init__(self):
-        self._frames   = []
-        self._sr       = 48000
-        self._ch       = 2
-        self._running  = False
-        self._thread   = None
+        self._frames  = []
+        self._sr      = 48000
+        self._ch      = 2
+        self._running = False
+        self._thread  = None
 
     def start(self, pid: int):
-        from multiprocessing import Value as _Value
-        import audio_capture as _ac
         self._frames  = []
         self._running = True
-        self._stop_v  = _Value("b", False)
 
         def _loop():
-            import ctypes as _c
             import numpy as np
-
-            COINIT_MULTITHREADED = 0x0
-            _ole32 = _c.windll.ole32
-            hr_co  = _ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
-            co_ok  = hr_co in (0, 1)
-            client = cap = h_event = None
             try:
-                client  = _ac._activate_process_loopback(pid)
-                sr, ch  = _ac._audio_client_initialize(client)
+                import pyaudiowpatch as pyaudio
+            except ImportError:
+                self._running = False
+                return
+
+            pa = pyaudio.PyAudio()
+            try:
+                # 팟플레이어 프로세스가 사용하는 오디오 세션 찾기
+                # pyaudiowpatch는 GetProcessLoopback을 지원 — pid로 특정 프로세스만 캡처
+                loopback_device = None
+                try:
+                    wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+                    default_out_idx = wasapi_info["defaultOutputDevice"]
+                    device_info = pa.get_device_info_by_index(default_out_idx)
+                    # loopback 디바이스 탐색
+                    for i in range(pa.get_device_count()):
+                        d = pa.get_device_info_by_index(i)
+                        if d.get("isLoopbackDevice") and d["name"] == device_info["name"]:
+                            loopback_device = d
+                            loopback_device["index"] = i
+                            break
+                except Exception:
+                    pass
+
+                if loopback_device is None:
+                    self._running = False
+                    return
+
+                sr = int(loopback_device["defaultSampleRate"])
+                ch = min(loopback_device["maxInputChannels"], 2)
                 self._sr = sr
                 self._ch = ch
-                h_event  = _ac._kernel32.CreateEventW(None, False, False, None)
-                _ac._audio_client_set_event(client, h_event)
-                cap = _ac._get_capture_client(client)
-                _ac._audio_client_start(client)
 
-                WAIT_MS = 10
+                def _cb(in_data, frame_count, time_info, status):
+                    if self._running and in_data:
+                        arr = np.frombuffer(in_data, dtype=np.float32).copy()
+                        self._frames.append(arr)
+                    return (None, pyaudio.paContinue)
+
+                stream = pa.open(
+                    format=pyaudio.paFloat32,
+                    channels=ch,
+                    rate=sr,
+                    input=True,
+                    input_device_index=loopback_device["index"],
+                    frames_per_buffer=1024,
+                    stream_callback=_cb,
+                    as_loopback=True,
+                    loopback_process_id=pid,
+                )
+                stream.start_stream()
                 while self._running:
-                    _ac._kernel32.WaitForSingleObject(h_event, WAIT_MS)
-                    while True:
-                        try:
-                            pkt = _ac._get_next_packet_size(cap)
-                        except OSError:
-                            break
-                        if pkt == 0:
-                            break
-                        data, num_frames, flg = _ac._get_buffer(cap)
-                        if num_frames > 0:
-                            if flg & _ac.AUDCLNT_BUFFERFLAGS_SILENT:
-                                arr = np.zeros(num_frames * ch, dtype=np.float32)
-                            else:
-                                import ctypes
-                                buf = (ctypes.c_float * (num_frames * ch)).from_address(data.value)
-                                arr = np.frombuffer(buf, dtype=np.float32).copy()
-                            self._frames.append(arr)
-                        _ac._release_buffer(cap, num_frames)
+                    import time as _t
+                    _t.sleep(0.05)
+                stream.stop_stream()
+                stream.close()
             except Exception:
-                pass
+                # loopback_process_id 미지원 버전이면 전체 루프백으로 fallback
+                try:
+                    self._frames = []
+                    wasapi_info = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+                    default_out_idx = wasapi_info["defaultOutputDevice"]
+                    device_info = pa.get_device_info_by_index(default_out_idx)
+                    loopback_device = None
+                    for i in range(pa.get_device_count()):
+                        d = pa.get_device_info_by_index(i)
+                        if d.get("isLoopbackDevice") and d["name"] == device_info["name"]:
+                            loopback_device = d
+                            loopback_device["index"] = i
+                            break
+                    if loopback_device:
+                        sr = int(loopback_device["defaultSampleRate"])
+                        ch = min(loopback_device["maxInputChannels"], 2)
+                        self._sr = sr
+                        self._ch = ch
+                        def _cb2(in_data, frame_count, time_info, status):
+                            if self._running and in_data:
+                                arr = np.frombuffer(in_data, dtype=np.float32).copy()
+                                self._frames.append(arr)
+                            return (None, pyaudio.paContinue)
+                        stream2 = pa.open(
+                            format=pyaudio.paFloat32,
+                            channels=ch,
+                            rate=sr,
+                            input=True,
+                            input_device_index=loopback_device["index"],
+                            frames_per_buffer=1024,
+                            stream_callback=_cb2,
+                        )
+                        stream2.start_stream()
+                        while self._running:
+                            import time as _t
+                            _t.sleep(0.05)
+                        stream2.stop_stream()
+                        stream2.close()
+                except Exception:
+                    pass
             finally:
-                if cap and client:
-                    try: _ac._audio_client_stop(client)
-                    except Exception: pass
-                    _ac._com_release(cap)
-                if client:
-                    _ac._com_release(client)
-                if h_event:
-                    _ac._kernel32.CloseHandle(h_event)
-                if co_ok:
-                    _ole32.CoUninitialize()
+                pa.terminate()
 
         self._thread = threading.Thread(target=_loop, daemon=True)
         self._thread.start()
@@ -218,16 +286,13 @@ class _AudioRecorder:
     def stop(self):
         self._running = False
         if self._thread:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=5)
         import numpy as np
         if self._frames:
             return np.concatenate(self._frames), self._sr, self._ch
         return None, self._sr, self._ch
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 화면 녹화 스레드
-# ─────────────────────────────────────────────────────────────────────────────
 class _ScreenRecorder:
     """팟플레이어 클라이언트 영역을 mss로 캡처 (GPU 렌더링 지원)."""
     def __init__(self):
@@ -285,8 +350,8 @@ class _ScreenRecorder:
 # MP4 저장 (비디오 + 오디오 병합)
 # ─────────────────────────────────────────────────────────────────────────────
 def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
-    """OpenCV 로 비디오 저장 후 ffmpeg 로 오디오 병합."""
-    import subprocess, tempfile, numpy as np
+    """OpenCV로 비디오 저장 후 ffmpeg로 오디오 병합. ffmpeg 없으면 영상만 저장."""
+    import subprocess, numpy as np
 
     tmp_video = out_path + "_tmp_video.mp4"
     tmp_audio = out_path + "_tmp_audio.wav"
@@ -301,44 +366,49 @@ def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
         vw.write(f)
     vw.release()
 
-    # 2. 오디오 임시 저장
+    # 2. 오디오 wav 저장
+    has_audio = False
     if audio_arr is not None and len(audio_arr) > 0:
-        audio_data = audio_arr.reshape(-1, audio_ch) if audio_ch > 1 else audio_arr
-        sf.write(tmp_audio, audio_data, audio_sr, subtype="PCM_16")
-        has_audio = True
-    else:
-        has_audio = False
+        try:
+            import wave, struct
+            audio_data = audio_arr.reshape(-1, audio_ch) if audio_ch > 1 else audio_arr.reshape(-1, 1)
+            pcm = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
+            with wave.open(tmp_audio, "wb") as wf:
+                wf.setnchannels(audio_ch)
+                wf.setsampwidth(2)
+                wf.setframerate(audio_sr)
+                wf.writeframes(pcm.tobytes())
+            has_audio = True
+        except Exception:
+            pass
 
-    # 3. ffmpeg 병합
+    # 3. ffmpeg로 병합
+    merged = False
     if has_audio:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", tmp_video,
-            "-i", tmp_audio,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-shortest",
-            out_path,
-        ]
-    else:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", tmp_video,
-            "-c:v", "copy",
-            out_path,
-        ]
-    try:
-        subprocess.run(cmd, check=True,
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
-    except Exception:
-        # ffmpeg 없으면 비디오만이라도 저장
+        try:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", tmp_video,
+                "-i", tmp_audio,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-shortest",
+                out_path,
+            ]
+            subprocess.run(cmd, check=True,
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            merged = True
+        except Exception:
+            pass
+
+    if not merged:
         import shutil
         shutil.copy(tmp_video, out_path)
-    finally:
-        for p in [tmp_video, tmp_audio]:
-            try: os.remove(p)
-            except: pass
+
+    for p in [tmp_video, tmp_audio]:
+        try: os.remove(p)
+        except: pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────

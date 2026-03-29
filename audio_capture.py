@@ -71,6 +71,25 @@ _IID_IAudioCaptureClient = (ctypes.c_byte * 16)(
     0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17,  # Data4
 )
 
+# IID_IMMDeviceEnumerator {A95664D2-9614-4F35-A746-DE8DB63617E6}
+_IID_IMMDeviceEnumerator = (ctypes.c_byte * 16)(
+    0xD2, 0x64, 0x56, 0xA9,
+    0x14, 0x96,
+    0x35, 0x4F,
+    0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6,
+)
+# CLSID_MMDeviceEnumerator {BCDE0395-E52F-467C-8E3D-C4579291692E}
+_CLSID_MMDeviceEnumerator = (ctypes.c_byte * 16)(
+    0x95, 0x03, 0xDE, 0xBC,
+    0x2F, 0xE5,
+    0x7C, 0x46,
+    0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E,
+)
+# IID_IAudioClient (재사용)
+# eRender=0, eConsole=0
+_EDataFlow_eRender  = 0
+_ERole_eConsole     = 0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVEFORMATEX
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,36 +333,101 @@ def _audio_client_get_mix_format(client) -> "tuple[WAVEFORMATEX, ctypes.c_void_p
     return fmt, ptr
 
 
+def _get_render_mix_format() -> "tuple[ctypes.c_void_p, int, int]":
+    """
+    기본 렌더 디바이스(스피커)에서 믹스 포맷을 가져온다.
+    ProcessLoopback IAudioClient 는 GetMixFormat 을 지원하지 않으므로(E_NOTIMPL),
+    Microsoft 공식 샘플과 동일하게 렌더 디바이스 포맷을 사용한다.
+    반환: (fmt_ptr, sample_rate, channels)  — 호출자가 CoTaskMemFree 해야 함
+    """
+    CLSCTX_ALL = 0x17
+
+    # CoCreateInstance(CLSID_MMDeviceEnumerator, IID_IMMDeviceEnumerator)
+    enumerator = ctypes.c_void_p()
+    hr = _ole32.CoCreateInstance(
+        ctypes.byref(_CLSID_MMDeviceEnumerator),
+        None, CLSCTX_ALL,
+        ctypes.byref(_IID_IMMDeviceEnumerator),
+        ctypes.byref(enumerator),
+    )
+    _hcheck(hr, "CoCreateInstance(MMDeviceEnumerator)")
+
+    try:
+        # IMMDeviceEnumerator::GetDefaultAudioEndpoint(eRender, eConsole) — vtable[4]
+        fn_gde = ctypes.WINFUNCTYPE(
+            ctypes.c_long, ctypes.c_void_p,
+            ctypes.c_uint, ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(_vtbl(enumerator, 4))
+        device = ctypes.c_void_p()
+        _hcheck(fn_gde(enumerator, _EDataFlow_eRender, _ERole_eConsole,
+                       ctypes.byref(device)), "GetDefaultAudioEndpoint")
+
+        try:
+            # IMMDevice::Activate(IID_IAudioClient, CLSCTX_ALL, NULL, ppInterface) — vtable[3]
+            fn_act = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p,
+                ctypes.c_byte * 16, ctypes.c_uint,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            )(_vtbl(device, 3))
+            render_client = ctypes.c_void_p()
+            _hcheck(fn_act(device, _IID_IAudioClient, CLSCTX_ALL,
+                           None, ctypes.byref(render_client)),
+                    "IMMDevice::Activate(IAudioClient)")
+
+            try:
+                # IAudioClient::GetMixFormat — vtable[8]
+                fn_gmf = ctypes.WINFUNCTYPE(
+                    ctypes.c_long, ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_void_p),
+                )(_vtbl(render_client, 8))
+                fmt_ptr = ctypes.c_void_p()
+                _hcheck(fn_gmf(render_client, ctypes.byref(fmt_ptr)), "GetMixFormat")
+
+                wfx = ctypes.cast(fmt_ptr, ctypes.POINTER(WAVEFORMATEX)).contents
+                return fmt_ptr, int(wfx.nSamplesPerSec), int(wfx.nChannels)
+            finally:
+                _com_release(render_client)
+        finally:
+            _com_release(device)
+    finally:
+        _com_release(enumerator)
+
+
 def _audio_client_initialize(client) -> "tuple[int, int]":
     """
     IAudioClient::Initialize — vtable[3]
 
     Microsoft ApplicationLoopback 공식 샘플 기준:
-      Initialize(SHARED, LOOPBACK|EVENTCALLBACK, 1초, 0, NULL, NULL)
-      - pFormat = NULL  → ProcessLoopback 는 GetMixFormat 을 지원하지 않으므로
-                          NULL 로 넘기면 시스템이 내부 믹스 포맷을 자동 사용
-      - hnsBufferDuration = 10_000_000 (1초)
-      - NOPERSIST 불필요
-    반환: (sample_rate, channels) — 기본값 48000/2 반환 (NULL 포맷 사용 시 실제값 불명)
+      1. 기본 렌더 디바이스에서 GetMixFormat 으로 포맷 획득
+         (ProcessLoopback 클라이언트는 GetMixFormat 미지원 → E_NOTIMPL)
+      2. Initialize(SHARED, LOOPBACK|EVENTCALLBACK, 1초, 0, pRenderMixFormat)
+    반환: (sample_rate, channels)
     """
-    REFTIMES_PER_SEC = 10_000_000  # 1초 (100ns 단위)
+    REFTIMES_PER_SEC = 10_000_000  # 1초
 
-    fn_type = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_void_p,   # this
-        ctypes.c_uint,     # ShareMode
-        ctypes.c_uint,     # StreamFlags
-        ctypes.c_longlong, # hnsBufferDuration
-        ctypes.c_longlong, # hnsPeriodicity
-        ctypes.c_void_p,   # pFormat  (NULL → 시스템 기본 믹스 포맷)
-        ctypes.c_void_p,   # AudioSessionGuid
-    )
-    fn    = fn_type(_vtbl(client, 3))
-    flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-    hr    = fn(client, AUDCLNT_SHAREMODE_SHARED, flags,
-               REFTIMES_PER_SEC, 0, None, None)
-    _hcheck(hr, "IAudioClient::Initialize")
-    return 48000, 2  # ProcessLoopback 기본값
+    fmt_ptr, sr, ch = _get_render_mix_format()
+    try:
+        fn_type = ctypes.WINFUNCTYPE(
+            ctypes.c_long,
+            ctypes.c_void_p,   # this
+            ctypes.c_uint,     # ShareMode
+            ctypes.c_uint,     # StreamFlags
+            ctypes.c_longlong, # hnsBufferDuration
+            ctypes.c_longlong, # hnsPeriodicity
+            ctypes.c_void_p,   # pFormat
+            ctypes.c_void_p,   # AudioSessionGuid
+        )
+        fn    = fn_type(_vtbl(client, 3))
+        flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+        hr    = fn(client, AUDCLNT_SHAREMODE_SHARED, flags,
+                   REFTIMES_PER_SEC, 0, fmt_ptr, None)
+        _hcheck(hr, "IAudioClient::Initialize")
+    finally:
+        _ole32.CoTaskMemFree(fmt_ptr)
+
+    return sr, ch
 
 
 def _audio_client_set_event(client, h_event):

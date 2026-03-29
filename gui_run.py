@@ -347,9 +347,9 @@ class LipSyncGUIRun:
                     self._om_shared_pos.value = pv
                     self._om_shared_dur.value = dv
 
-        # oped 모니터 상태 진단 (매 5초마다)
+        # oped 모니터 상태 진단 (매 30초마다)
         import time as _diag_t
-        if _diag_t.time() - getattr(self, "_diag_t", 0) > 5:
+        if _diag_t.time() - getattr(self, "_diag_t", 0) > 30:
             self._diag_t = _diag_t.time()
             running = getattr(self, "_oped_monitor_running", False)
             procs   = getattr(self, "_om_processes", [])

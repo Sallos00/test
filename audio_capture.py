@@ -14,7 +14,7 @@ import platform
 import numpy as np
 import psutil
 from multiprocessing import Queue, Value
-from win32_utils import CFG, queue_put
+from win32_utils import CFG, queue_put, find_potplayer_hwnd, is_potplayer_playing
 
 
 def _windows_build() -> int:
@@ -229,7 +229,8 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
         pot_active = False
 
         def _check_pot() -> bool:
-            return find_potplayer_pid() is not None
+            hwnd = find_potplayer_hwnd()
+            return bool(hwnd) and is_potplayer_playing(hwnd)
 
         try:
             while not stop_flag.value:
@@ -239,9 +240,9 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
                     was        = pot_active
                     pot_active = _check_pot()
                     if pot_active and not was:
-                        send_log("🎙 [Loopback] 팟플레이어 감지 → 캡처 활성")
+                        send_log("🎙 [Loopback] 팟플레이어 재생 감지 → 캡처 활성")
                     elif not pot_active and was:
-                        send_log("⚠ [Loopback] 팟플레이어 없음 → 대기")
+                        send_log("⚠ [Loopback] 팟플레이어 재생 중지 → 대기")
 
                 try:
                     raw = stream.read(CHUNK, exception_on_overflow=False)

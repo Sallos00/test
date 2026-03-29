@@ -387,7 +387,7 @@ class RecordCapturePopup:
             self._audio_rec  = _AudioRecorder()
             self._screen_rec = _ScreenRecorder()
             try:
-                self._screen_rec.start(fps=30)
+                self._screen_rec.start(fps=30, root=g.root)
             except Exception as e:
                 self._rec_status.config(text=f"⚠ 화면 캡처 실패: {e}", fg="#e0a03c")
                 return

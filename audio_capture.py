@@ -310,7 +310,9 @@ def _activate_process_loopback(pid: int) -> ctypes.c_void_p:
                 result_box[1] = e
             finally:
                 handler.close()
-        # ※ CoUninitialize 하지 않음. 호출자(MTA 세션 스레드)가 세션 종료 시 해제.
+        except Exception as e:
+            result_box[1] = e
+        # ※ CoUninitialize 하지 않음. 호출자(_session_mta)가 세션 종료 시 한 번만 해제.
 
     t = threading.Thread(target=_do_activate, daemon=True)
     t.start()

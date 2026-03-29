@@ -598,6 +598,10 @@ def _run_capture_session(pid: int, audio_queue: Queue,
 
                 _release_buffer(cap, num_frames)
 
+        first_packet  = True
+        last_stat     = time.time()
+        total_packets = 0
+
         while not stop_flag.value:
             # PID 재확인
             now = time.time()
@@ -609,9 +613,53 @@ def _run_capture_session(pid: int, audio_queue: Queue,
                 if new_pid != cur_pid:
                     return False, f"PID 변경 ({cur_pid} → {new_pid}) — 재연결"
 
+            # 10초마다 상태 로그
+            if now - last_stat >= 10.0:
+                last_stat = now
+                try:
+                    pkt_peek = _get_next_packet_size(cap)
+                except OSError as _e:
+                    send_log(f"⚠ GetNextPacketSize 오류: {_e}")
+                    pkt_peek = -1
+                send_log(f"🔍 캡처 상태: total_packets={total_packets} next_pkt={pkt_peek}")
+
             # 이벤트 대기 (타임아웃 시에도 폴링 — ProcessLoopback 이벤트 미발생 대비)
-            _kernel32.WaitForSingleObject(h_event, WAIT_MS)
-            _drain_packets()
+            wait_ret = _kernel32.WaitForSingleObject(h_event, WAIT_MS)
+
+            # 패킷 수집
+            while not stop_flag.value:
+                try:
+                    pkt = _get_next_packet_size(cap)
+                except OSError as _e:
+                    send_log(f"⚠ GetNextPacketSize: {_e}")
+                    break
+                if pkt == 0:
+                    break
+
+                data, num_frames, flg = _get_buffer(cap)
+                total_packets += 1
+
+                if first_packet:
+                    first_packet = False
+                    send_log(f"✅ 첫 패킷 수신! frames={num_frames} flags=0x{flg:X} wait_ret={wait_ret}")
+
+                if num_frames > 0:
+                    if flg & AUDCLNT_BUFFERFLAGS_SILENT:
+                        rms = 0.0
+                    else:
+                        if data.value is None or data.value == 0:
+                            send_log(f"⚠ data.value=NULL frames={num_frames}")
+                            _release_buffer(cap, num_frames)
+                            continue
+                        buf = (ctypes.c_float * (num_frames * ch)).from_address(data.value)
+                        arr = np.frombuffer(buf, dtype=np.float32).copy()
+                        if ch > 1:
+                            arr = arr.reshape(-1, ch).mean(axis=1)
+                        arr = _apply_filter(arr, sos, sosfilt)
+                        rms = float(np.sqrt(np.mean(arr ** 2)))
+                    queue_put(audio_queue, (time.time(), rms))
+
+                _release_buffer(cap, num_frames)
 
         return True, ""
 

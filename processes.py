@@ -341,7 +341,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             elif in_zone and not cooled:
                 remain = int(CDS - (time.time() - lat))
                 add_log(f"⏳ {zone_label} 쿨다운 {remain}초 남음")
-        if aud_n < 10 or (lip_n < 10 and not oped_prompt):
+        _has_prompt = oped_prompt is not None or pending_prompt[0] is not None
+        if aud_n < 10 or (lip_n < 10 and not _has_prompt):
             push_state("데이터 수집 중", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
@@ -349,6 +350,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         lip_sig = resample(lpb, FPS)
         aud_sig = resample(aub, FPS)
         if lip_sig is None or aud_sig is None:
+            if _has_prompt:
+                push_state("데이터 수집 중", 0, tms, lgl, pot_ok,
+                           lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
         n = min(len(lip_sig), len(aud_sig))

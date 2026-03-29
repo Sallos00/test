@@ -190,9 +190,13 @@ def _show_all_overlays():
 # ─────────────────────────────────────────────────────────────────────────────
 class _AudioRecorder:
     """
-    audio_capture.py 와 동일한 COM/WinAPI ProcessLoopback 방식으로
-    팟플레이어 오디오를 캡처하여 raw PCM(float32) 프레임을 수집한다.
-    Windows 10 20H1(빌드 19041) 이상에서 동작.
+    audio_capture.py 의 COM/WinAPI ProcessLoopback 구현을 재사용해
+    팟플레이어 오디오를 raw PCM(float32)으로 수집한다.
+
+    핵심 제약:
+      _activate_process_loopback → _audio_client_initialize → 캡처 루프
+      전체가 반드시 하나의 MTA 스레드 안에서 실행되어야 COM 포인터가 유효.
+      → _session_mta() 안에서 모두 처리하고, 바깥에서 CoInitializeEx 하지 않음.
     """
     def __init__(self):
         self._frames  = []
@@ -205,20 +209,20 @@ class _AudioRecorder:
         self._frames  = []
         self._running = True
 
-        def _loop():
-            import numpy as np
+        recorder = self  # 클로저용
+
+        def _session_mta():
             import ctypes as ct
-            import ctypes.wintypes as wt
+            import numpy as np
 
             ole32    = ct.windll.ole32
             kernel32 = ct.windll.kernel32
-            COINIT_MULTITHREADED = 0x0
 
-            # ── 같은 MTA 스레드 안에서 COM 초기화 + 캡처 세션 실행 ──────────
+            COINIT_MULTITHREADED = 0x0
             hr_co = ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
-            co_ok = hr_co in (0, 1)
+            co_ok = hr_co in (0, 1, 0x80010106)  # S_OK / S_FALSE / RPC_E_CHANGED_MODE(이미 MTA)
+
             try:
-                # audio_capture 모듈의 헬퍼 함수 재사용
                 from audio_capture import (
                     _activate_process_loopback,
                     _audio_client_initialize,
@@ -233,11 +237,16 @@ class _AudioRecorder:
                     AUDCLNT_BUFFERFLAGS_SILENT,
                 )
 
-                client  = _activate_process_loopback(pid)
-                sr, ch  = _audio_client_initialize(client)
-                self._sr = sr
-                self._ch = ch
+                # 1. ProcessLoopback 클라이언트 활성화
+                #    (내부에서 별도 스레드로 ActivateAudioInterfaceAsync 호출 후 join)
+                client = _activate_process_loopback(pid)
 
+                # 2. Initialize (렌더 디바이스 MixFormat 사용)
+                sr, ch = _audio_client_initialize(client)
+                recorder._sr = sr
+                recorder._ch = ch
+
+                # 3. 이벤트 핸들 + CaptureClient
                 h_event = kernel32.CreateEventW(None, False, False, None)
                 _audio_client_set_event(client, h_event)
                 cap = _get_capture_client(client)
@@ -245,14 +254,13 @@ class _AudioRecorder:
 
                 WAIT_MS = 10
                 try:
-                    while self._running:
+                    while recorder._running:
                         kernel32.WaitForSingleObject(h_event, WAIT_MS)
-                        # 패킷 드레인
-                        while self._running:
+                        while recorder._running:
                             try:
                                 pkt = _get_next_packet_size(cap)
                             except OSError:
-                                self._running = False
+                                recorder._running = False
                                 break
                             if pkt == 0:
                                 break
@@ -261,10 +269,9 @@ class _AudioRecorder:
                                 if not (flg & AUDCLNT_BUFFERFLAGS_SILENT) and data.value:
                                     buf = (ct.c_float * (num_frames * ch)).from_address(data.value)
                                     arr = np.frombuffer(buf, dtype=np.float32).copy()
-                                    self._frames.append(arr)
                                 else:
-                                    # 무음 구간 — 0으로 채워 타임라인 유지
-                                    self._frames.append(np.zeros(num_frames * ch, dtype=np.float32))
+                                    arr = np.zeros(num_frames * ch, dtype=np.float32)
+                                recorder._frames.append(arr)
                             _release_buffer(cap, num_frames)
                 finally:
                     try:
@@ -276,13 +283,13 @@ class _AudioRecorder:
                     kernel32.CloseHandle(h_event)
 
             except Exception:
-                # ProcessLoopback 실패 시 조용히 종료 (오디오 없이 영상만 저장)
-                self._running = False
+                recorder._running = False
             finally:
                 if co_ok:
                     ole32.CoUninitialize()
 
-        self._thread = threading.Thread(target=_loop, daemon=True)
+        # MTA 전용 스레드 — 이 스레드 안에서만 COM 포인터를 사용
+        self._thread = threading.Thread(target=_session_mta, daemon=True)
         self._thread.start()
 
     def stop(self):
@@ -314,14 +321,16 @@ class _ScreenRecorder:
         self._fps     = 30
         self._size    = (1280, 720)
         self._hwnd    = None
+        self._root    = None
 
-    def start(self, fps: int = 30):
+    def start(self, fps: int = 30, root=None):
         from win32_utils import find_potplayer_hwnd
         hwnd = find_potplayer_hwnd()
         if hwnd is None:
             raise RuntimeError("팟플레이어 창을 찾을 수 없습니다.")
         video_hwnd = _get_potplayer_video_hwnd(hwnd)
         self._hwnd = video_hwnd if video_hwnd else hwnd
+        self._root = root  # mss fallback의 after() 호출용
 
         rect = _get_potplayer_rect()
         if rect is None:
@@ -449,6 +458,7 @@ class _ScreenRecorder:
     # ── 2순위: mss fallback (hide/show 방식) ─────────────────────────────
     def _mss_loop(self):
         import numpy as np
+        import threading as _th
         try:
             import mss as _mss
             import cv2 as _cv2
@@ -464,18 +474,43 @@ class _ScreenRecorder:
         monitor  = {"left": px, "top": py, "width": pw, "height": ph}
         interval = 1.0 / self._fps
 
+        # tkinter는 메인 스레드에서만 호출 가능.
+        # hide_done 이벤트로 메인 스레드의 withdraw 완료를 기다린 뒤 grab.
+        hide_done = _th.Event()
+        show_done = _th.Event()
+
+        def _do_hide():
+            _hide_all_overlays()
+            hide_done.set()
+
+        def _do_show():
+            _show_all_overlays()
+            show_done.set()
+
+        root = self._root  # start()에서 저장
+
         with _mss.mss() as sct:
             while self._running:
                 t0 = time.time()
                 try:
-                    _hide_all_overlays()
+                    hide_done.clear()
+                    root.after(0, _do_hide)
+                    hide_done.wait(timeout=0.05)   # 최대 50ms 대기
+
                     shot  = sct.grab(monitor)
-                    _show_all_overlays()
+
+                    show_done.clear()
+                    root.after(0, _do_show)
+                    show_done.wait(timeout=0.05)
+
                     frame = np.array(shot)
                     frame = _cv2.cvtColor(frame, _cv2.COLOR_BGRA2BGR)
                     self._frames.append(frame)
                 except Exception:
-                    _show_all_overlays()
+                    try:
+                        root.after(0, _do_show)
+                    except Exception:
+                        pass
                 sl = interval - (time.time() - t0)
                 if sl > 0:
                     time.sleep(sl)

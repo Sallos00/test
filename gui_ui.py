@@ -886,15 +886,18 @@ class LipSyncGUIUI:
             # ── 스크롤 위치 기억 ─────────────────────────────────────────────
             y1, y2 = txt.yview()
             at_bottom = not getattr(self, "_log_user_scrolled", False)
-            # 현재 뷰포트 상단에 보이는 텍스트 내용을 앵커로 저장
-            anchor_text = None
+
+            # 재렌더 전 총 줄 수와 상단 보이는 줄 번호를 저장
             if not at_bottom:
                 try:
-                    anchor_idx = txt.index(f"@0,0")          # 좌상단 문자 인덱스
-                    line_no    = int(anchor_idx.split(".")[0])
-                    anchor_text = txt.get(f"{line_no}.0", f"{line_no}.end").strip()
+                    total_before = int(txt.index("end-1c").split(".")[0])
+                    anchor_line  = int(txt.index("@0,0").split(".")[0])  # 뷰포트 상단 줄
                 except Exception:
-                    anchor_text = None
+                    total_before = 0
+                    anchor_line  = 0
+            else:
+                total_before = 0
+                anchor_line  = 0
 
             txt.delete("1.0", "end")
 
@@ -946,16 +949,17 @@ class LipSyncGUIUI:
             # ── 스크롤 위치 복원 ─────────────────────────────────────────────
             if at_bottom:
                 txt.see("end")
-            elif anchor_text:
-                # 앵커 텍스트가 있는 줄을 검색해 해당 위치로 이동
-                found = txt.search(anchor_text, "1.0", stopindex="end", nocase=False)
-                if found:
-                    txt.see(found)
-                else:
-                    # 찾지 못하면 비율 기반으로 근사 복원
-                    txt.yview_moveto(y1)
-            else:
-                txt.yview_moveto(y1)
+            elif total_before > 0 and anchor_line > 0:
+                # 재렌더 후 총 줄 수를 구해, 같은 줄 번호로 이동
+                # (로그는 append-only라 앞쪽 줄 번호는 그대로 유지됨)
+                txt.see(f"{anchor_line}.0")
+                txt.update_idletasks()
+                # see()는 줄을 뷰포트 안에 넣을 뿐, 상단 정렬은 아님
+                # yview_moveto로 정확한 비율 재지정
+                total_after = int(txt.index("end-1c").split(".")[0])
+                if total_after > 0:
+                    ratio = (anchor_line - 1) / total_after
+                    txt.yview_moveto(ratio)
 
         except Exception:
 

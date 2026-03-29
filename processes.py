@@ -117,7 +117,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     OZM   = 180 * 1000
     CDS   = 180
     MWI   = 15.0
-    MMR  = 0.03
+    MMR  = 0.002   # 최소 RMS (오프닝 음악은 0.007 수준도 있음)
     MMC   = 0.8
     MMF = 0.70
     MCF  = 2
@@ -146,7 +146,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         if mean_rms < MMR:
             return False
         cv   = float(arr.std() / mean_rms) if mean_rms > 1e-9 else 999.0
-        fill = float((arr > 0.02).sum()) / len(arr)
+        fill = float((arr > mean_rms * 0.5).sum()) / len(arr)  # 동적 임계값
         return cv < MMC and fill > MMF
     def drain_queues():
         for q, buf, tag in [(lip_queue, lpb, "👁"), (audio_queue, aub, "🔊")]:
@@ -311,7 +311,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         _arr  = np.array(_vals, dtype=np.float32)
                         _mean = float(_arr.mean())
                         _cv   = float(_arr.std() / _mean) if _mean > 1e-9 else 999.0
-                        _fill = float((_arr > 0.02).sum()) / len(_arr)
+                        _fill = float((_arr > _mean * 0.5).sum()) / len(_arr)
                         add_log(f"🔍 {zone_label} rms={_mean:.4f} cv={_cv:.2f} fill={_fill:.2f} music={music} mco={mco} OAS={OAS}")
                 if music:
                     mco += 1

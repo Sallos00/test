@@ -112,8 +112,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     MAX_STEPS    = cfg["MAX_CORRECT_STEP"]
     INTERVAL     = cfg["ANALYSIS_INTERVAL"]
     MTM = cfg["MAX_TOTAL_SYNC_MS"]
-    OAS = bool(cfg.get("OAS", False))
-    OSS  = int(cfg.get("OSS", 90))
+    OAS = bool(cfg.get("OAS", cfg.get("OPED_AUTO_SKIP", False)))
+    OSS  = int(cfg.get("OSS", cfg.get("OPED_SKIP_SEC", 90)))
     OZM   = 180 * 1000
     CDS   = 180
     MWI   = 15.0
@@ -304,7 +304,16 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             zone_label = "오프닝" if in_op else "엔딩"
             cooled     = (time.time() - lat) > CDS
             if in_zone and cooled:
-                if is_music_playing():
+                music = is_music_playing()
+                if len(aub) >= 10:
+                    _vals = [v for t, v in aub if t >= time.time() - MWI]
+                    if _vals:
+                        _arr  = np.array(_vals, dtype=np.float32)
+                        _mean = float(_arr.mean())
+                        _cv   = float(_arr.std() / _mean) if _mean > 1e-9 else 999.0
+                        _fill = float((_arr > 0.02).sum()) / len(_arr)
+                        add_log(f"🔍 {zone_label} rms={_mean:.4f} cv={_cv:.2f} fill={_fill:.2f} music={music} mco={mco} OAS={OAS}")
+                if music:
                     mco += 1
                     add_log(f"🎵 {zone_label} 음악 감지 ({mco}/{MCF}회)")
                     if mco >= MCF:
@@ -324,7 +333,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             elif in_zone and not cooled:
                 remain = int(CDS - (time.time() - lat))
                 add_log(f"⏳ {zone_label} 쿨다운 {remain}초 남음")
-        if lip_n < 10 or aud_n < 10:
+        if aud_n < 10 or (lip_n < 10 and not oped_prompt):
             push_state("데이터 수집 중", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

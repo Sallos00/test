@@ -229,7 +229,7 @@ class _AudioRecorder:
 # 화면 녹화 스레드
 # ─────────────────────────────────────────────────────────────────────────────
 class _ScreenRecorder:
-    """팟플레이어 클라이언트 영역을 OpenCV로 캡처."""
+    """팟플레이어 클라이언트 영역을 mss로 캡처 (GPU 렌더링 지원)."""
     def __init__(self):
         self._running = False
         self._thread  = None
@@ -242,7 +242,7 @@ class _ScreenRecorder:
         if rect is None:
             raise RuntimeError("팟플레이어 창을 찾을 수 없습니다.")
         px, py, pw, ph = rect
-        self._px, self._py, self._pw, self._ph = px, py, pw, ph
+        self._monitor = {"left": px, "top": py, "width": pw, "height": ph}
         self._fps     = fps
         self._size    = (pw, ph)
         self._frames  = []
@@ -253,29 +253,26 @@ class _ScreenRecorder:
     def _loop(self):
         import numpy as np
         try:
-            from PIL import ImageGrab as _IG
+            import mss as _mss
+            import cv2 as _cv2
         except ImportError:
             self._running = False
             return
         interval = 1.0 / self._fps
-        while self._running:
-            t0 = time.time()
-            try:
-                img = _IG.grab(bbox=(
-                    self._px, self._py,
-                    self._px + self._pw,
-                    self._py + self._ph,
-                ))
-                frame = np.array(img)
-                # RGB → BGR (OpenCV 형식)
-                frame = frame[:, :, ::-1].copy()
-                self._frames.append(frame)
-            except Exception:
-                pass
-            elapsed = time.time() - t0
-            sleep_t = interval - elapsed
-            if sleep_t > 0:
-                time.sleep(sleep_t)
+        with _mss.mss() as sct:
+            while self._running:
+                t0 = time.time()
+                try:
+                    shot  = sct.grab(self._monitor)
+                    frame = np.array(shot)              # BGRA
+                    frame = _cv2.cvtColor(frame, _cv2.COLOR_BGRA2BGR)
+                    self._frames.append(frame)
+                except Exception:
+                    pass
+                elapsed = time.time() - t0
+                sleep_t = interval - elapsed
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
 
     def stop(self):
         self._running = False

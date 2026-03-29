@@ -4,7 +4,8 @@ import tkinter as tk
 from tkinter import filedialog
 from gui_record_backend import (
     _CV2_OK, _SF_OK, _PIL_OK,
-    _get_potplayer_rect, _show_overlay,
+    _get_potplayer_rect, _get_potplayer_video_hwnd, _show_overlay,
+    _hide_all_overlays, _show_all_overlays,
     _AudioRecorder, _ScreenRecorder, _save_mp4,
 )
 
@@ -377,6 +378,11 @@ class RecordCapturePopup:
                     pid = p.info["pid"]
                     break
 
+            if pid is None:
+                g.root.after(0, lambda: self._rec_status.config(
+                    text="⚠ 팟플레이어를 찾을 수 없습니다.", fg="#e0a03c"))
+                return
+
             # 오디오 + 화면 동시 시작
             self._audio_rec  = _AudioRecorder()
             self._screen_rec = _ScreenRecorder()
@@ -385,8 +391,7 @@ class RecordCapturePopup:
             except Exception as e:
                 self._rec_status.config(text=f"⚠ 화면 캡처 실패: {e}", fg="#e0a03c")
                 return
-            if pid:
-                self._audio_rec.start(pid)
+            self._audio_rec.start(pid)
 
             self._recording = True
             self._rec_btn.config(text="⏹ 녹화 정지", fg=g.ACCENT3)
@@ -449,27 +454,127 @@ class RecordCapturePopup:
             self._cap_status.config(text="⚠ Pillow 필요", fg="#e0a03c")
             return
         g = self.gui
+
+        ts       = time.strftime("%Y%m%d_%H%M%S")
+        shot_dir = self._ensure_subdir("Screenshot")
+        out_path = os.path.join(shot_dir, f"capture_{ts}.png")
+
+        # ── 1순위: WGC HWND 캡처 (오버레이 자동 제외) ────────────────────
+        if self._try_wgc_capture(out_path):
+            self._cap_status.config(
+                text=f"✅ 저장: Screenshot/{os.path.basename(out_path)}",
+                fg=g.ACCENT3)
+            _show_overlay(g.root, "📷 장면이 캡처되었습니다.", duration_ms=3000)
+            return
+
+        # ── 2순위: mss/ImageGrab fallback (오버레이 hide/show) ───────────
         rect = _get_potplayer_rect()
         if rect is None:
             self._cap_status.config(text="⚠ 팟플레이어 창 없음", fg="#e0a03c")
             return
-
         try:
             from PIL import ImageGrab
             px, py, pw, ph = rect
+            _hide_all_overlays()
             img = ImageGrab.grab(bbox=(px, py, px + pw, py + ph))
-
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            shot_dir = self._ensure_subdir("Screenshot")
-            out_path = os.path.join(shot_dir, f"capture_{ts}.png")
+            _show_all_overlays()
             img.save(out_path, "PNG")
-
             self._cap_status.config(
                 text=f"✅ 저장: Screenshot/{os.path.basename(out_path)}",
                 fg=g.ACCENT3)
             _show_overlay(g.root, "📷 장면이 캡처되었습니다.", duration_ms=3000)
         except Exception as e:
+            _show_all_overlays()
             self._cap_status.config(text=f"⚠ 캡처 실패: {e}", fg="#e0a03c")
+
+    def _try_wgc_capture(self, out_path: str) -> bool:
+        """
+        WGC로 팟플레이어 HWND를 한 프레임 캡처해 PNG로 저장.
+        성공하면 True, pywinrt 없거나 실패하면 False.
+        """
+        try:
+            from win32_utils import find_potplayer_hwnd
+            import numpy as np
+            import cv2 as _cv2
+
+            hwnd = find_potplayer_hwnd()
+            if hwnd is None:
+                return False
+            video_hwnd = _get_potplayer_video_hwnd(hwnd)
+            target = video_hwnd if video_hwnd else hwnd
+
+            # pywinrt 두 네임스페이스 모두 시도
+            GraphicsCaptureItem = Direct3D11CaptureFramePool = None
+            DirectXPixelFormat  = create_direct3d_device = None
+            BitmapBufferAccessMode = SoftwareBitmap = None
+            try:
+                from winsdk.windows.graphics.capture import (
+                    GraphicsCaptureItem, Direct3D11CaptureFramePool)
+                from winsdk.windows.graphics.directx import DirectXPixelFormat
+                from winsdk.windows.graphics.directx.direct3d11 import create_direct3d_device
+                from winsdk.windows.graphics.imaging import (
+                    BitmapBufferAccessMode, SoftwareBitmap)
+            except ImportError:
+                try:
+                    from winrt.windows.graphics.capture import (
+                        GraphicsCaptureItem, Direct3D11CaptureFramePool)
+                    from winrt.windows.graphics.directx import DirectXPixelFormat
+                    from winrt.windows.graphics.directx.direct3d11 import create_direct3d_device
+                    from winrt.windows.graphics.imaging import (
+                        BitmapBufferAccessMode, SoftwareBitmap)
+                except ImportError:
+                    return False
+
+            item = GraphicsCaptureItem.create_for_window(target)
+            if item is None:
+                return False
+
+            d3d      = create_direct3d_device()
+            BGRA8    = DirectXPixelFormat.B8_G8_R8_A8_UINT_NORMALIZED
+            item_size = item.size
+            pool     = Direct3D11CaptureFramePool.create(d3d, BGRA8, 1, item_size)
+            session  = pool.create_capture_session(item)
+            try:
+                session.is_cursor_capture_enabled = False
+            except Exception:
+                pass
+            session.start_capture()
+
+            import threading as _th
+            got = _th.Event()
+            frame_box = [None]
+
+            def _on_frame(sender, _):
+                f = sender.try_get_next_frame()
+                if f is not None:
+                    frame_box[0] = f
+                    got.set()
+
+            pool.frame_arrived += _on_frame
+            got.wait(timeout=2.0)
+            session.close()
+            pool.close()
+
+            f = frame_box[0]
+            if f is None:
+                return False
+
+            surface = f.surface
+            sb = SoftwareBitmap.create_copy_from_surface_async(surface).get()
+            buf   = sb.lock_buffer(BitmapBufferAccessMode.READ)
+            plane = buf.get_plane_description(0)
+            ref   = buf.create_reference()
+            raw   = bytes(ref)
+            h, w  = plane.height, plane.width
+            arr   = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)
+            bgr   = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+            rgb   = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB)
+            from PIL import Image
+            Image.fromarray(rgb).save(out_path, "PNG")
+            return True
+
+        except Exception:
+            return False
 
     # ── 닫기 ───────────────────────────────────────────────────────────────
     def _on_close(self):

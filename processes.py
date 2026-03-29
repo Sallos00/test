@@ -129,6 +129,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     mco = 0
     lat = 0.0
     pst   = False
+    lcd   = 0.0   # 마지막 쿨다운 로그 시각 (30초 throttle)
     pending_prompt = [None]   # GUI 확인 전까지 반복 전송할 oped_prompt
     def add_log(msg):
         import time as _t
@@ -248,18 +249,21 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     execute_skip()
                     mco = 0
                     lat = time.time()
+                    lcd = 0.0
                     pst   = False
                     pending_prompt[0] = None
                     add_log("⏭ 스킵 완료 → 쿨다운 3분")
                 elif cmd == "oped_no_skip":
                     mco = 0
                     lat = time.time()
+                    lcd = 0.0
                     pst   = False
                     pending_prompt[0] = None
                     add_log("✖ 스킵 건너뜀 → 쿨다운 3분")
                 elif cmd == "oped_reset":
                     mco = 0
                     lat = 0.0
+                    lcd = 0.0
                     pst   = False
                     pending_prompt[0] = None
                     add_log("↺ OP/ED 상태 초기화")
@@ -287,6 +291,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     aub.clear()
                     mco = 0
                     lat = 0.0
+                    lcd = 0.0
                     pst   = False
                     pending_prompt[0] = None
                     add_log("🔄 영상 변경 → 싱크 + OP/ED 상태 초기화")
@@ -329,6 +334,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                             if execute_skip():
                                 mco = 0
                                 lat = time.time()
+                                lcd = 0.0
                                 add_log(f"⏭ {zone_label} 자동스킵 완료 → 쿨다운 3분")
                         else:
                             if not pst:
@@ -339,8 +345,11 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     if mco > 0:
                         mco -= 1
             elif in_zone and not cooled:
-                remain = int(CDS - (time.time() - lat))
-                add_log(f"⏳ {zone_label} 쿨다운 {remain}초 남음")
+                _now_cd = time.time()
+                if _now_cd - lcd >= 30:
+                    lcd = _now_cd
+                    remain = int(CDS - (_now_cd - lat))
+                    add_log(f"⏳ {zone_label} 쿨다운 {remain}초 남음")
         _has_prompt = oped_prompt is not None or pending_prompt[0] is not None
         if aud_n < 10 or (lip_n < 10 and not _has_prompt):
             push_state("데이터 수집 중", 0, tms, lgl, pot_ok,

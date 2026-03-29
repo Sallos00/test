@@ -568,27 +568,17 @@ def _run_capture_session(pid: int, audio_queue: Queue,
         RECHECK    = 3.0
         last_check = time.time()
         cur_pid    = pid
-        WAIT_MS    = 100  # 100ms 대기
+        # ProcessLoopback + EVENTCALLBACK 조합에서 이벤트가 오지 않는 경우가 있음.
+        # 타임아웃(10ms) 후에도 GetNextPacketSize 로 직접 폴링하도록 한다.
+        WAIT_MS    = 10
 
-        while not stop_flag.value:
-            # PID 재확인
-            now = time.time()
-            if now - last_check >= RECHECK:
-                last_check = now
-                new_pid = _find_potplayer_pid()
-                if new_pid is None:
-                    return False, "팟플레이어 종료됨"
-                if new_pid != cur_pid:
-                    return False, f"PID 변경 ({cur_pid} → {new_pid}) — 재연결"
-
-            # 이벤트 대기
-            ret = _kernel32.WaitForSingleObject(h_event, WAIT_MS)
-            if ret != 0:  # WAIT_TIMEOUT or error
-                continue
-
-            # 패킷 수집
+        def _drain_packets():
+            """패킷 큐를 비울 때까지 읽어 RMS 를 audio_queue 에 넣는다."""
             while not stop_flag.value:
-                pkt = _get_next_packet_size(cap)
+                try:
+                    pkt = _get_next_packet_size(cap)
+                except OSError:
+                    break
                 if pkt == 0:
                     break
 
@@ -607,6 +597,21 @@ def _run_capture_session(pid: int, audio_queue: Queue,
                     queue_put(audio_queue, (time.time(), rms))
 
                 _release_buffer(cap, num_frames)
+
+        while not stop_flag.value:
+            # PID 재확인
+            now = time.time()
+            if now - last_check >= RECHECK:
+                last_check = now
+                new_pid = _find_potplayer_pid()
+                if new_pid is None:
+                    return False, "팟플레이어 종료됨"
+                if new_pid != cur_pid:
+                    return False, f"PID 변경 ({cur_pid} → {new_pid}) — 재연결"
+
+            # 이벤트 대기 (타임아웃 시에도 폴링 — ProcessLoopback 이벤트 미발생 대비)
+            _kernel32.WaitForSingleObject(h_event, WAIT_MS)
+            _drain_packets()
 
         return True, ""
 

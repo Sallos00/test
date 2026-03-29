@@ -306,7 +306,7 @@ def _audio_client_get_mix_format(client) -> "tuple[WAVEFORMATEX, ctypes.c_void_p
         ctypes.c_long, ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_void_p),
     )
-    fn = fn_type(_vtbl(client, 10))
+    fn = fn_type(_vtbl(client, 8))
     ptr = ctypes.c_void_p()
     _hcheck(fn(client, ctypes.byref(ptr)), "GetMixFormat")
     fmt = ctypes.cast(ptr, ctypes.POINTER(WAVEFORMATEX)).contents
@@ -361,7 +361,7 @@ def _audio_client_initialize(client, sr: int, ch: int):
         ctypes.c_void_p,   # pFormat
         ctypes.c_void_p,   # AudioSessionGuid
     )
-    fn = fn_type(_vtbl(client, 5))
+    fn = fn_type(_vtbl(client, 3))
     # ProcessLoopback 로 활성화된 클라이언트는 이미 루프백 캡처 모드이다.
     # AUDCLNT_STREAMFLAGS_LOOPBACK 를 추가로 넣으면 E_NOTIMPL(0x80004001) 이 반환된다.
     # OBS win-wasapi 도 ProcessOutput 경로에서는 EVENTCALLBACK 만 사용한다.
@@ -375,18 +375,18 @@ def _audio_client_initialize(client, sr: int, ch: int):
 def _audio_client_set_event(client, h_event):
     """IAudioClient::SetEventHandle — vtable[15]"""
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
-    fn = fn_type(_vtbl(client, 15))
+    fn = fn_type(_vtbl(client, 13))
     _hcheck(fn(client, h_event), "SetEventHandle")
 
 
 def _audio_client_start(client):
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
-    _hcheck(fn_type(_vtbl(client, 12))(client), "IAudioClient::Start")
+    _hcheck(fn_type(_vtbl(client, 10))(client), "IAudioClient::Start")
 
 
 def _audio_client_stop(client):
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
-    fn_type(_vtbl(client, 13))(client)
+    fn_type(_vtbl(client, 11))(client)
 
 
 def _get_capture_client(client) -> ctypes.c_void_p:
@@ -396,22 +396,22 @@ def _get_capture_client(client) -> ctypes.c_void_p:
         ctypes.c_byte * 16,
         ctypes.POINTER(ctypes.c_void_p),
     )
-    fn = fn_type(_vtbl(client, 16))
+    fn = fn_type(_vtbl(client, 14))
     cap = ctypes.c_void_p()
     _hcheck(fn(client, _IID_IAudioCaptureClient, ctypes.byref(cap)), "GetService(CaptureClient)")
     return cap
 
 
 def _get_next_packet_size(cap) -> int:
-    """IAudioCaptureClient::GetNextPacketSize — vtable[3]"""
+    """IAudioCaptureClient::GetNextPacketSize — vtable[5]"""
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint))
     n = ctypes.c_uint(0)
-    _hcheck(fn_type(_vtbl(cap, 3))(cap, ctypes.byref(n)), "GetNextPacketSize")
+    _hcheck(fn_type(_vtbl(cap, 5))(cap, ctypes.byref(n)), "GetNextPacketSize")
     return n.value
 
 
 def _get_buffer(cap):
-    """IAudioCaptureClient::GetBuffer — vtable[1]"""
+    """IAudioCaptureClient::GetBuffer — vtable[3]"""
     fn_type = ctypes.WINFUNCTYPE(
         ctypes.c_long, ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_void_p),
@@ -420,7 +420,7 @@ def _get_buffer(cap):
         ctypes.POINTER(ctypes.c_ulonglong),
         ctypes.POINTER(ctypes.c_ulonglong),
     )
-    fn = fn_type(_vtbl(cap, 1))
+    fn = fn_type(_vtbl(cap, 3))
     data = ctypes.c_void_p(); frames = ctypes.c_uint(); flags = ctypes.c_uint()
     dp = ctypes.c_ulonglong(); qp = ctypes.c_ulonglong()
     hr = fn(cap, ctypes.byref(data), ctypes.byref(frames),
@@ -430,9 +430,9 @@ def _get_buffer(cap):
 
 
 def _release_buffer(cap, n: int):
-    """IAudioCaptureClient::ReleaseBuffer — vtable[2]"""
+    """IAudioCaptureClient::ReleaseBuffer — vtable[4]"""
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint)
-    fn_type(_vtbl(cap, 2))(cap, n)
+    fn_type(_vtbl(cap, 4))(cap, n)
 
 
 def _com_release(obj):

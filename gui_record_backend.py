@@ -237,16 +237,11 @@ class _AudioRecorder:
                     AUDCLNT_BUFFERFLAGS_SILENT,
                 )
 
-                # 1. ProcessLoopback 클라이언트 활성화
-                #    (내부에서 별도 스레드로 ActivateAudioInterfaceAsync 호출 후 join)
                 client = _activate_process_loopback(pid)
-
-                # 2. Initialize (렌더 디바이스 MixFormat 사용)
                 sr, ch = _audio_client_initialize(client)
                 recorder._sr = sr
                 recorder._ch = ch
 
-                # 3. 이벤트 핸들 + CaptureClient
                 h_event = kernel32.CreateEventW(None, False, False, None)
                 _audio_client_set_event(client, h_event)
                 cap = _get_capture_client(client)
@@ -288,14 +283,13 @@ class _AudioRecorder:
                 if co_ok:
                     ole32.CoUninitialize()
 
-        # MTA 전용 스레드 — 이 스레드 안에서만 COM 포인터를 사용
         self._thread = threading.Thread(target=_session_mta, daemon=True)
         self._thread.start()
 
     def stop(self):
         self._running = False
         if self._thread:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=10)
         import numpy as np
         if self._frames:
             return np.concatenate(self._frames), self._sr, self._ch
@@ -304,43 +298,92 @@ class _AudioRecorder:
 
 class _ScreenRecorder:
     """
-    팟플레이어 창을 Windows Graphics Capture API(WGC)로 캡처.
-    WGC는 HWND 단위로 캡처하므로 다른 HWND인 tkinter 오버레이는
-    녹화본에 찍히지 않는다. (팟플레이어 화면에는 정상 표시됨)
+    OBS 방식: 녹화 시작 시 ffmpeg를 즉시 실행하고,
+    캡처한 프레임을 실시간으로 stdin 파이프에 전달한다.
+    → 메모리에 프레임을 쌓지 않으므로 장시간 녹화도 안정적.
 
     우선순위:
-      1. pywinrt  — WGC HWND 캡처 (오버레이 완전 제외)
-      2. mss      — 스크린 캡처 fallback (오버레이 hide/show 방식)
-
-    pywinrt 설치:  pip install pywinrt
+      1. pywinrt WGC — HWND 단위 캡처 (오버레이 완전 제외)
+      2. mss          — 스크린 캡처 fallback (오버레이 hide/show)
     """
     def __init__(self):
-        self._running = False
-        self._thread  = None
-        self._frames  = []
-        self._fps     = 30
-        self._size    = (1280, 720)
-        self._hwnd    = None
-        self._root    = None
+        self._running   = False
+        self._thread    = None
+        self._fps       = 30
+        self._size      = (1280, 720)
+        self._hwnd      = None
+        self._root      = None
+        self._ffmpeg_proc = None   # 실시간 인코딩용 ffmpeg 프로세스
+        self._out_path    = None
+        self._error       = None   # 녹화 중 발생한 오류
 
-    def start(self, fps: int = 30, root=None):
+    def start(self, fps: int = 30, root=None, out_path: str = None,
+              audio_wav_path: str = None):
+        """
+        녹화를 시작한다.
+        out_path       : 최종 MP4 저장 경로
+        audio_wav_path : 나중에 병합할 WAV 파일 경로 (None이면 무음)
+        """
         from win32_utils import find_potplayer_hwnd
         hwnd = find_potplayer_hwnd()
         if hwnd is None:
             raise RuntimeError("팟플레이어 창을 찾을 수 없습니다.")
         video_hwnd = _get_potplayer_video_hwnd(hwnd)
         self._hwnd = video_hwnd if video_hwnd else hwnd
-        self._root = root  # mss fallback의 after() 호출용
+        self._root = root
 
         rect = _get_potplayer_rect()
         if rect is None:
             raise RuntimeError("팟플레이어 창 영역을 구할 수 없습니다.")
         px, py, pw, ph = rect
-        self._fps     = fps
-        self._size    = (pw, ph)
-        self._frames  = []
-        self._running = True
-        self._thread  = threading.Thread(target=self._loop, daemon=True)
+        self._fps      = fps
+        self._size     = (pw, ph)
+        self._running  = True
+        self._out_path = out_path
+        self._error    = None
+
+        # ffmpeg를 즉시 기동 (OBS 방식: 캡처 즉시 인코딩)
+        ffmpeg_bin = _find_ffmpeg()
+        if not ffmpeg_bin:
+            raise RuntimeError(
+                "ffmpeg를 찾을 수 없습니다.\n"
+                "ffmpeg를 설치하고 PATH에 추가하거나,\n"
+                "프로그램 폴더에 ffmpeg.exe를 넣어주세요."
+            )
+
+        w, h = pw, ph
+        # 홀수 해상도는 yuv420p 인코딩 실패 → 짝수로 내림
+        w = w - (w % 2)
+        h = h - (h % 2)
+        self._size = (w, h)
+
+        import tempfile, subprocess
+        self._tmp_video = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
+
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{w}x{h}",
+            "-r", str(fps),
+            "-i", "pipe:0",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-an",                    # 오디오는 나중에 별도 병합
+            self._tmp_video,
+        ]
+        self._ffmpeg_proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+        self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     # ── 1순위: pywinrt WGC (HWND 기반 — 오버레이 미포함) ────────────────
@@ -351,56 +394,30 @@ class _ScreenRecorder:
         except ImportError:
             return False
         try:
-            # pywinrt 네임스페이스 import
             from winsdk.windows.graphics.capture import (
-                GraphicsCaptureItem,
-                Direct3D11CaptureFramePool,
-            )
+                GraphicsCaptureItem, Direct3D11CaptureFramePool)
             from winsdk.windows.graphics.directx import DirectXPixelFormat
-            from winsdk.windows.graphics.directx.direct3d11 import (
-                create_direct3d_device,
-            )
-            from winsdk.windows.graphics.imaging import (
-                BitmapBufferAccessMode,
-                SoftwareBitmap,
-            )
-            from winsdk.windows.ui import UIContext  # noqa — 사용 안 함, import 확인용
+            from winsdk.windows.graphics.directx.direct3d11 import create_direct3d_device
+            from winsdk.windows.graphics.imaging import BitmapBufferAccessMode, SoftwareBitmap
         except ImportError:
             try:
-                # 구버전 pywinrt 네임스페이스
                 from winrt.windows.graphics.capture import (
-                    GraphicsCaptureItem,
-                    Direct3D11CaptureFramePool,
-                )
+                    GraphicsCaptureItem, Direct3D11CaptureFramePool)
                 from winrt.windows.graphics.directx import DirectXPixelFormat
-                from winrt.windows.graphics.directx.direct3d11 import (
-                    create_direct3d_device,
-                )
-                from winrt.windows.graphics.imaging import (
-                    BitmapBufferAccessMode,
-                    SoftwareBitmap,
-                )
+                from winrt.windows.graphics.directx.direct3d11 import create_direct3d_device
+                from winrt.windows.graphics.imaging import BitmapBufferAccessMode, SoftwareBitmap
             except ImportError:
                 return False
 
         try:
-            import ctypes, ctypes.wintypes
-
-            # ── HWND → IGraphicsCaptureItem (win32 interop) ──────────────
-            # GraphicsCaptureItem.CreateForWindow 은 WinRT interop 함수.
-            # pywinrt 에서는 create_for_window(hwnd) 로 호출한다.
             item = GraphicsCaptureItem.create_for_window(self._hwnd)
             if item is None:
                 return False
 
-            d3d = create_direct3d_device()
-
-            BGRA8 = DirectXPixelFormat.B8_G8_R8_A8_UINT_NORMALIZED
-            item_size = item.size
-            pool = Direct3D11CaptureFramePool.create(
-                d3d, BGRA8, 2, item_size
-            )
-            session = pool.create_capture_session(item)
+            d3d      = create_direct3d_device()
+            BGRA8    = DirectXPixelFormat.B8_G8_R8_A8_UINT_NORMALIZED
+            pool     = Direct3D11CaptureFramePool.create(d3d, BGRA8, 2, item.size)
+            session  = pool.create_capture_session(item)
             try:
                 session.is_cursor_capture_enabled = False
             except Exception:
@@ -419,7 +436,9 @@ class _ScreenRecorder:
 
             pool.frame_arrived += _on_frame
 
+            w, h     = self._size
             interval = 1.0 / self._fps
+
             while self._running:
                 t0 = time.time()
                 frame_ready.wait(timeout=0.1)
@@ -429,19 +448,18 @@ class _ScreenRecorder:
                     continue
                 try:
                     surface = f.surface
-                    sb = SoftwareBitmap.create_copy_from_surface_async(
-                        surface
-                    ).get()
+                    sb  = SoftwareBitmap.create_copy_from_surface_async(surface).get()
                     buf = sb.lock_buffer(BitmapBufferAccessMode.READ)
                     plane = buf.get_plane_description(0)
                     ref   = buf.create_reference()
                     raw   = bytes(ref)
-                    h, w  = plane.height, plane.width
-                    arr   = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)
+                    fh, fw = plane.height, plane.width
+                    arr   = np.frombuffer(raw, dtype=np.uint8).reshape(fh, fw, 4)
                     bgr   = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
-                    if (w, h) != self._size:
-                        bgr = _cv2.resize(bgr, self._size)
-                    self._frames.append(bgr)
+                    if (fw, fh) != (w, h):
+                        bgr = _cv2.resize(bgr, (w, h))
+                    # 메모리에 쌓지 않고 즉시 ffmpeg로 전송
+                    self._write_frame(bgr)
                 except Exception:
                     pass
                 sl = interval - (time.time() - t0)
@@ -455,7 +473,7 @@ class _ScreenRecorder:
         except Exception:
             return False
 
-    # ── 2순위: mss fallback (hide/show 방식) ─────────────────────────────
+    # ── 2순위: mss fallback ───────────────────────────────────────────────
     def _mss_loop(self):
         import numpy as np
         import threading as _th
@@ -471,17 +489,15 @@ class _ScreenRecorder:
             self._running = False
             return
         px, py, pw, ph = rect
+        w, h     = self._size
         monitor  = {"left": px, "top": py, "width": pw, "height": ph}
         interval = 1.0 / self._fps
 
-        # tkinter는 메인 스레드에서만 호출 가능.
-        # hide_done 이벤트로 메인 스레드의 withdraw 완료를 기다린 뒤 grab.
         hide_done = _th.Event()
         show_done = _th.Event()
 
         def _do_hide():
             _hide_all_overlays()
-            # update_idletasks()로 withdraw가 실제 화면에 반영될 때까지 대기
             try:
                 self._root.update_idletasks()
             except Exception:
@@ -496,7 +512,7 @@ class _ScreenRecorder:
                 pass
             show_done.set()
 
-        root = self._root  # start()에서 저장
+        root = self._root
 
         with _mss.mss() as sct:
             while self._running:
@@ -504,9 +520,7 @@ class _ScreenRecorder:
                 try:
                     hide_done.clear()
                     root.after(0, _do_hide)
-                    hide_done.wait(timeout=0.1)    # update_idletasks 포함이므로 100ms
-
-                    # 추가 여유: OS가 창 숨김을 화면에 실제 반영하도록 잠깐 대기
+                    hide_done.wait(timeout=0.1)
                     time.sleep(0.02)
 
                     shot  = sct.grab(monitor)
@@ -517,7 +531,9 @@ class _ScreenRecorder:
 
                     frame = np.array(shot)
                     frame = _cv2.cvtColor(frame, _cv2.COLOR_BGRA2BGR)
-                    self._frames.append(frame)
+                    if (frame.shape[1], frame.shape[0]) != (w, h):
+                        frame = _cv2.resize(frame, (w, h))
+                    self._write_frame(frame)
                 except Exception:
                     try:
                         root.after(0, _do_show)
@@ -527,16 +543,68 @@ class _ScreenRecorder:
                 if sl > 0:
                     time.sleep(sl)
 
-    def _loop(self):
-        # WGC 시도 → 실패 시 mss fallback
-        if not self._try_wgc_loop():
-            self._mss_loop()
+    def _write_frame(self, bgr_frame):
+        """프레임을 ffmpeg stdin 파이프에 즉시 기록."""
+        if self._ffmpeg_proc and self._ffmpeg_proc.stdin:
+            try:
+                self._ffmpeg_proc.stdin.write(bgr_frame.tobytes())
+            except (BrokenPipeError, OSError):
+                self._running = False
 
-    def stop(self):
+    def _loop(self):
+        try:
+            if not self._try_wgc_loop():
+                self._mss_loop()
+        finally:
+            # 캡처 루프 종료 → ffmpeg stdin 닫기
+            if self._ffmpeg_proc and self._ffmpeg_proc.stdin:
+                try:
+                    self._ffmpeg_proc.stdin.close()
+                except Exception:
+                    pass
+
+    def stop(self) -> str:
+        """
+        녹화를 멈추고, ffmpeg가 완료될 때까지 기다린다.
+        반환값: 임시 영상 파일 경로 (tmp_video).
+        오류 시 RuntimeError 발생.
+        """
         self._running = False
         if self._thread:
-            self._thread.join(timeout=5)
-        return self._frames, self._fps, self._size
+            self._thread.join(timeout=15)
+
+        # ffmpeg가 남은 프레임을 마저 인코딩하도록 대기
+        if self._ffmpeg_proc:
+            try:
+                _, stderr_data = self._ffmpeg_proc.communicate(timeout=60)
+            except Exception:
+                stderr_data = b""
+                try:
+                    self._ffmpeg_proc.kill()
+                except Exception:
+                    pass
+
+            if self._ffmpeg_proc.returncode != 0:
+                # 에러 로그 저장
+                try:
+                    log = os.path.join(
+                        os.path.dirname(self._out_path),
+                        "ffmpeg_error.txt"
+                    )
+                    with open(log, "wb") as lf:
+                        lf.write(stderr_data)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"ffmpeg 인코딩 실패 (code={self._ffmpeg_proc.returncode})\n"
+                    f"로그: {os.path.dirname(self._out_path)}\\ffmpeg_error.txt"
+                )
+
+        tmp = getattr(self, "_tmp_video", None)
+        if not tmp or not os.path.isfile(tmp) or os.path.getsize(tmp) < 1024:
+            raise RuntimeError("녹화된 영상 파일이 없습니다. 캡처에 실패했을 수 있습니다.")
+
+        return tmp
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -545,16 +613,13 @@ class _ScreenRecorder:
 def _find_ffmpeg() -> str:
     """ffmpeg 실행 파일 경로 반환. 없으면 빈 문자열."""
     import shutil
-    # 1. PATH에서 찾기
     p = shutil.which("ffmpeg")
     if p:
         return p
-    # 2. 프로그램 동작 폴더 옆에 ffmpeg.exe 가 있는 경우 (번들 배포)
     here = os.path.dirname(os.path.abspath(__file__))
     local = os.path.join(here, "ffmpeg.exe")
     if os.path.isfile(local):
         return local
-    # 3. 일반적인 설치 위치
     for candidate in [
         r"C:\ffmpeg\bin\ffmpeg.exe",
         r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
@@ -565,140 +630,62 @@ def _find_ffmpeg() -> str:
     return ""
 
 
-def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
-    """ffmpeg로 H.264 비디오 + AAC 오디오 MP4 저장. ffmpeg 없으면 OpenCV fallback."""
+def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int,
+                 out_path: str):
+    """
+    이미 H.264로 인코딩된 tmp_video에 오디오를 병합해 out_path에 저장.
+    오디오가 없으면 tmp_video를 그냥 out_path로 이동.
+    """
     import subprocess, numpy as np, shutil, tempfile
 
-    if not video_frames:
-        raise RuntimeError("캡처된 프레임이 없습니다. 팟플레이어 창을 확인하세요.")
+    ffmpeg_bin = _find_ffmpeg()
+    has_audio  = (audio_arr is not None and len(audio_arr) > 0)
+
+    if not has_audio:
+        shutil.move(tmp_video, out_path)
+        return
 
     tmp_dir   = tempfile.gettempdir()
     tmp_audio = os.path.join(tmp_dir, "autosinc_tmp_audio.wav")
-    tmp_out   = os.path.join(tmp_dir, "autosinc_tmp_out.mp4")
+    tmp_out   = os.path.join(tmp_dir, "autosinc_merge_out.mp4")
 
-    w, h = size
+    # WAV 저장
+    import wave
+    audio_data = audio_arr.reshape(-1, audio_ch) if audio_ch > 1 else audio_arr.reshape(-1, 1)
+    pcm = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
+    with wave.open(tmp_audio, "wb") as wf:
+        wf.setnchannels(audio_ch)
+        wf.setsampwidth(2)
+        wf.setframerate(audio_sr)
+        wf.writeframes(pcm.tobytes())
 
-    # 1. 오디오 wav 저장
-    has_audio = False
-    if audio_arr is not None and len(audio_arr) > 0:
+    # ffmpeg로 비디오 + 오디오 병합 (비디오는 스트림 복사, 오디오만 AAC 인코딩)
+    cmd = [
+        ffmpeg_bin, "-y",
+        "-i", tmp_video,
+        "-i", tmp_audio,
+        "-c:v", "copy",         # 이미 H.264이므로 재인코딩 없이 복사
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-shortest",
+        "-movflags", "+faststart",
+        tmp_out,
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    if result.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
+        shutil.move(tmp_out, out_path)
+    else:
+        # 병합 실패 시 영상만이라도 저장
+        shutil.move(tmp_video, out_path)
         try:
-            import wave
-            audio_data = audio_arr.reshape(-1, audio_ch) if audio_ch > 1 else audio_arr.reshape(-1, 1)
-            pcm = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
-            with wave.open(tmp_audio, "wb") as wf:
-                wf.setnchannels(audio_ch)
-                wf.setsampwidth(2)
-                wf.setframerate(audio_sr)
-                wf.writeframes(pcm.tobytes())
-            has_audio = True
+            log = out_path + "_merge_error.txt"
+            with open(log, "wb") as lf:
+                lf.write(result.stderr)
         except Exception:
             pass
 
-    # 2. ffmpeg로 raw BGR pipe → H.264 인코딩
-    #    임시 AVI를 전혀 만들지 않고 프레임을 stdin 파이프로 직접 전달.
-    #    → OpenCV 코덱(MJPG 등) 의존성 완전 제거
-    merged     = False
-    ffmpeg_bin = _find_ffmpeg()
-
-    if ffmpeg_bin:
-        ffmpeg_audio = ["-an"]
-        if has_audio:
-            ffmpeg_audio = ["-i", tmp_audio, "-c:a", "aac", "-b:a", "192k"]
-
-        try:
-            cmd = (
-                [ffmpeg_bin, "-y",
-                 "-f", "rawvideo",
-                 "-vcodec", "rawvideo",
-                 "-pix_fmt", "bgr24",
-                 "-s", f"{w}x{h}",
-                 "-r", str(fps),
-                 "-i", "pipe:0",   # stdin에서 raw 프레임 수신
-                 ]
-                + (ffmpeg_audio if not has_audio else [])  # 오디오 없으면 -an
-                + (["-i", tmp_audio] if has_audio else [])
-                + [
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "18",
-                    "-pix_fmt", "yuv420p",
-                    "-movflags", "+faststart",
-                ]
-                + (["-c:a", "aac", "-b:a", "192k", "-shortest"] if has_audio else [])
-                + [tmp_out]
-            )
-            # 커맨드를 깔끔하게 재조립 (순서 보장)
-            cmd = [ffmpeg_bin, "-y",
-                   "-f", "rawvideo",
-                   "-vcodec", "rawvideo",
-                   "-pix_fmt", "bgr24",
-                   "-s", f"{w}x{h}",
-                   "-r", str(fps),
-                   "-i", "pipe:0",
-                   "-c:v", "libx264",
-                   "-preset", "fast",
-                   "-crf", "18",
-                   "-pix_fmt", "yuv420p",
-                   "-movflags", "+faststart",
-                   ]
-            if has_audio:
-                cmd += ["-i", tmp_audio, "-c:a", "aac", "-b:a", "192k", "-shortest"]
-            else:
-                cmd += ["-an"]
-            cmd += [tmp_out]
-
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            for frame in video_frames:
-                fh, fw = frame.shape[:2]
-                if (fw, fh) != (w, h):
-                    frame = cv2.resize(frame, (w, h))
-                proc.stdin.write(frame.tobytes())
-            proc.stdin.close()
-            _, stderr_data = proc.communicate()
-
-            if proc.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
-                shutil.move(tmp_out, out_path)
-                merged = True
-            else:
-                # 디버깅용 에러 로그
-                try:
-                    with open(out_path + "_ffmpeg_error.txt", "wb") as lf:
-                        lf.write(stderr_data)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # 3. ffmpeg 없는 환경 fallback: OpenCV로 직접 MP4 저장
-    if not merged:
-        saved = False
-        for fourcc_str in ("avc1", "mp4v", "XVID"):
-            fourcc_mp4 = cv2.VideoWriter_fourcc(*fourcc_str)
-            vw2 = cv2.VideoWriter(out_path, fourcc_mp4, fps, (w, h))
-            if vw2.isOpened():
-                for frame in video_frames:
-                    fh, fw = frame.shape[:2]
-                    if (fw, fh) != (w, h):
-                        frame = cv2.resize(frame, (w, h))
-                    vw2.write(frame)
-                vw2.release()
-                if os.path.isfile(out_path) and os.path.getsize(out_path) > 1024:
-                    saved = True
-                    break
-            else:
-                vw2.release()
-        if not saved:
-            raise RuntimeError(
-                "ffmpeg도 없고 OpenCV 코덱도 사용 불가합니다.\n"
-                "ffmpeg를 설치하거나 PATH에 추가해 주세요."
-            )
-
-    for p in [tmp_audio, tmp_out]:
+    for p in [tmp_audio, tmp_out, tmp_video]:
         try:
             os.remove(p)
         except Exception:

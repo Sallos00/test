@@ -423,7 +423,7 @@ class LipSyncGUIBase:
 
                 "pip_on":         getattr(self, "_pip_on", False),
 
-                "record_save_dir": getattr(self, "_record_save_dir", ""),
+                "record_save_dir": getattr(self, "_record_save_dir", existing.get("record_save_dir", "")),
 
             })
 

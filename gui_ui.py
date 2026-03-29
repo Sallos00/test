@@ -832,9 +832,12 @@ class LipSyncGUIUI:
 
             txt = self._log_popup_txt
 
-            # 사용자가 이미 아래쪽을 보고 있을 때만 자동 하단 이동
+            # 맨 아래를 보고 있을 때만 자동 스크롤, 아니면 현재 첫 줄 고정
             y1, y2 = txt.yview()
             at_bottom = y2 >= 0.999
+            # 첫 번째로 보이는 줄 번호 계산 (비율 → 라인 인덱스)
+            total_before = int(txt.index("end-1c").split(".")[0])
+            first_visible_line = max(1, round(y1 * total_before)) if not at_bottom else None
 
             txt.delete("1.0", "end")
 
@@ -885,8 +888,8 @@ class LipSyncGUIUI:
 
             if at_bottom:
                 txt.see("end")
-            else:
-                txt.yview_moveto(y1)
+            elif first_visible_line is not None:
+                txt.see(f"{first_visible_line}.0")
 
         except Exception:
 

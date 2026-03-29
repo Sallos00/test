@@ -280,15 +280,12 @@ class RecordCapturePopup:
         if path:
             self._save_dir = path
             self._save_dir_var.set(path)
+            # gui_base._save_settings()이 _record_save_dir 속성을 읽으므로 여기서 세팅
+            self.gui._record_save_dir = path
             self.gui._save_settings()
             # 버튼 활성 상태 갱신
             self._update_rec_btn_state()
             self._update_cap_btn_state()
-            # 설정 키에 저장
-            try:
-                self.gui._settings[self.SETTING_KEY] = path
-            except Exception:
-                pass
 
     def _open_dir(self):
         d = self._save_dir
@@ -436,12 +433,21 @@ class RecordCapturePopup:
                 video_dir = self._ensure_subdir("Video")
                 out_path  = os.path.join(video_dir, f"record_{ts}.mp4")
 
+                from gui_record_backend import _find_ffmpeg
+                ffmpeg_ok = bool(_find_ffmpeg())
+
                 _save_mp4(video_frames, fps, size,
                           audio_arr, audio_sr, audio_ch,
                           out_path)
-                g.root.after(0, lambda: self._rec_status.config(
-                    text=f"✅ 저장 완료: Video/{os.path.basename(out_path)}",
-                    fg=g.ACCENT3))
+
+                if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                    suffix = "" if ffmpeg_ok else " (ffmpeg 없음: 화질 낮을 수 있음)"
+                    g.root.after(0, lambda: self._rec_status.config(
+                        text=f"✅ 저장 완료: Video/{os.path.basename(out_path)}{suffix}",
+                        fg=g.ACCENT3))
+                else:
+                    g.root.after(0, lambda: self._rec_status.config(
+                        text="⚠ 저장 실패: 파일이 생성되지 않았습니다.", fg="#e0a03c"))
             except Exception as e:
                 g.root.after(0, lambda: self._rec_status.config(
                     text=f"⚠ 저장 실패: {e}", fg="#e0a03c"))

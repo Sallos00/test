@@ -363,6 +363,9 @@ class LipSyncGUIUI:
         tk.Button(frame, text="⚙ 설정",
                   command=lambda: pick(self._open_settings), **ITEM).pack(fill="x")
         tk.Frame(frame, bg=self.BORDER, height=1).pack(fill="x")
+        tk.Button(frame, text="🎬 녹화 및 캡처",
+                  command=lambda: pick(self._open_record_capture), **ITEM).pack(fill="x")
+        tk.Frame(frame, bg=self.BORDER, height=1).pack(fill="x")
         tk.Button(frame, text="📋 로그 보기",
                   command=lambda: pick(self._open_log_popup), **ITEM).pack(fill="x")
         frame.update_idletasks()
@@ -671,3 +674,10 @@ class LipSyncGUIUI:
                   relief="flat", cursor="hand2",
                   padx=round(16*r), pady=round(6*r),
                   command=popup.destroy).pack(side="left")
+
+    def _open_record_capture(self):
+        """녹화 및 캡처 팝업 열기."""
+        if not hasattr(self, "_record_popup_inst") or self._record_popup_inst is None:
+            from gui_record import RecordCapturePopup
+            self._record_popup_inst = RecordCapturePopup(self)
+        self._record_popup_inst.open()

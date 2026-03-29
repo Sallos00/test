@@ -1,15 +1,16 @@
 """
-audio_capture.py — Windows WASAPI ProcessLoopback 직접 구현 (ctypes + COM)
+audio_capture.py — Windows WASAPI ProcessLoopback (OBS 방식 동일 구현)
 
-pyaudiowpatch 의 get_process_loopback_device() 에 의존하지 않고,
-Windows 10 20H1(빌드 19041)+ 의 IAudioClient3 ProcessLoopback 을 직접 사용한다.
+OBS win-wasapi 플러그인과 동일한 흐름:
+  ActivateAudioInterfaceAsync(
+      VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+      IAudioClient,
+      AUDIOCLIENT_ACTIVATION_PARAMS { TargetProcessId = PID }
+  )
+  → IAudioClient::Initialize(AUDCLNT_STREAMFLAGS_LOOPBACK)
+  → IAudioCaptureClient::GetBuffer() 루프
 
-흐름:
-  CoCreateInstance(MMDeviceEnumerator)
-    → GetDefaultAudioEndpoint(eRender)
-      → Activate(IAudioClient3)
-        → InitializeSharedAudioStream(AUDCLNT_STREAMFLAGS_LOOPBACK_PROCESSLOOPBACK, PID)
-          → IAudioCaptureClient.GetBuffer() 루프
+CoCreateInstance / IAudioClient3 / SetClientProperties 는 사용하지 않는다.
 """
 
 import ctypes
@@ -34,47 +35,43 @@ _WIN_BUILD                = _windows_build()
 _SUPPORT_PROCESS_LOOPBACK = (_WIN_BUILD >= 19041)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COM / WASAPI 상수
+# DLL / 상수
 # ─────────────────────────────────────────────────────────────────────────────
-CLSCTX_ALL                             = 0x17
-COINIT_MULTITHREADED                   = 0x0
-COINIT_APARTMENTTHREADED               = 0x2
+_ole32    = ctypes.windll.ole32
+_kernel32 = ctypes.windll.kernel32
 
-AUDCLNT_STREAMFLAGS_LOOPBACK           = 0x00020000
-AUDCLNT_STREAMFLAGS_LOOPBACK_PROCESSLOOPBACK = 0x01000000
-AUDCLNT_SHAREMODE_SHARED               = 0
+AUDCLNT_STREAMFLAGS_LOOPBACK     = 0x00020000
+AUDCLNT_STREAMFLAGS_EVENTCALLBACK= 0x00040000
+AUDCLNT_SHAREMODE_SHARED         = 0
+AUDCLNT_BUFFERFLAGS_SILENT       = 0x2
+AUDCLNT_S_BUFFER_EMPTY           = 0x08890001
 
-WAVE_FORMAT_IEEE_FLOAT                 = 0x0003
-WAVE_FORMAT_EXTENSIBLE                 = 0xFFFE
-SPEAKER_FRONT_LEFT                     = 0x1
-SPEAKER_FRONT_RIGHT                    = 0x2
+# AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
+AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
+# PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0 (OBS 기본값)
+PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0
 
-AUDCLNT_S_BUFFER_EMPTY                 = 0x08890001
+# VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK (고정 문자열 GUID)
+VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK = "VAD\\Process_Loopback"
 
-eRender                                = 0
-eConsole                               = 0
-
-# CLSID / IID (바이트열)
-CLSID_MMDeviceEnumerator = ctypes.c_byte * 16
-_CLSID_MMDeviceEnumerator = (ctypes.c_byte * 16)(
-    0x86, 0x2F, 0xE5, 0xBC, 0xD8, 0xAF, 0x67, 0x4D,
-    0xB5, 0x11, 0x8B, 0x6D, 0x75, 0xC2, 0x41, 0x00,
+# IID_IAudioClient
+_IID_IAudioClient = (ctypes.c_byte * 16)(
+    0x4C, 0xAD, 0x9B, 0x1C,
+    0xFA, 0xDB, 0x32, 0x4C,
+    0xB1, 0x78, 0xC2, 0xF5,
+    0x68, 0xA7, 0x03, 0xB2,
 )
-_IID_IMMDeviceEnumerator = (ctypes.c_byte * 16)(
-    0xA9, 0x5E, 0x64, 0xF4, 0xD2, 0x8D, 0xF9, 0x4E,
-    0xAF, 0xED, 0x08, 0x00, 0x20, 0x0C, 0x9A, 0x66,
-)
-_IID_IAudioClient3 = (ctypes.c_byte * 16)(
-    0x7D, 0xB4, 0x2E, 0x7B, 0x7F, 0xAE, 0x93, 0x4A,
-    0xAA, 0x01, 0x8B, 0x3E, 0xAD, 0xEE, 0x51, 0x90,
-)
+
+# IID_IAudioCaptureClient
 _IID_IAudioCaptureClient = (ctypes.c_byte * 16)(
-    0xC8, 0xAD, 0xBD, 0xC5, 0x5F, 0x35, 0xD9, 0x4E,
-    0x97, 0x24, 0x29, 0x11, 0x23, 0x3D, 0x97, 0x74,
+    0xC8, 0xAD, 0xBD, 0xC5,
+    0x5F, 0x35, 0xD9, 0x4E,
+    0x97, 0x24, 0x29, 0x11,
+    0x23, 0x3D, 0x97, 0x74,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVEFORMATEX / WAVEFORMATEXTENSIBLE
+# WAVEFORMATEX
 # ─────────────────────────────────────────────────────────────────────────────
 class WAVEFORMATEX(ctypes.Structure):
     _fields_ = [
@@ -87,271 +84,335 @@ class WAVEFORMATEX(ctypes.Structure):
         ("cbSize",          ctypes.c_ushort),
     ]
 
-class WAVEFORMATEXTENSIBLE(ctypes.Structure):
+# ─────────────────────────────────────────────────────────────────────────────
+# AUDIOCLIENT_ACTIVATION_PARAMS
+# ─────────────────────────────────────────────────────────────────────────────
+class PROCESS_LOOPBACK_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("TargetProcessId",    ctypes.c_ulong),
+        ("ProcessLoopbackMode",ctypes.c_uint),
+    ]
+
+class AUDIOCLIENT_ACTIVATION_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("ActivationType",       ctypes.c_uint),
+        ("ProcessLoopbackParams",PROCESS_LOOPBACK_PARAMS),
+    ]
+
+# PROPVARIANT (VT_BLOB = 0x41)
+VT_BLOB = 0x41
+class BLOB(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("pBlobData", ctypes.c_void_p)]
+
+class PROPVARIANT(ctypes.Structure):
     class _U(ctypes.Union):
-        _fields_ = [("wValidBitsPerSample", ctypes.c_ushort),
-                    ("wSamplesPerBlock",     ctypes.c_ushort),
-                    ("wReserved",            ctypes.c_ushort)]
+        _fields_ = [("blob", BLOB), ("raw", ctypes.c_byte * 16)]
     _fields_ = [
-        ("Format",          WAVEFORMATEX),
-        ("Samples",         _U),
-        ("dwChannelMask",   ctypes.c_uint),
-        ("SubFormat",       ctypes.c_byte * 16),
+        ("vt",       ctypes.c_ushort),
+        ("reserved1",ctypes.c_ushort),
+        ("reserved2",ctypes.c_ushort),
+        ("reserved3",ctypes.c_ushort),
+        ("u",        _U),
     ]
 
-# IEEE float GUID: {00000003-0000-0010-8000-00aa00389b71}
-_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = (ctypes.c_byte * 16)(
-    0x03, 0x00, 0x00, 0x00,
-    0x00, 0x00,
-    0x10, 0x00,
-    0x80, 0x00,
-    0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
-)
-
 # ─────────────────────────────────────────────────────────────────────────────
-# AudioClientProperties (ProcessLoopback 용)
+# IActivateAudioInterfaceCompletionHandler (콜백 COM 인터페이스)
+# Python 에서는 ctypes COM 콜백 대신 이벤트로 동기 대기한다.
 # ─────────────────────────────────────────────────────────────────────────────
-class AudioClientProperties(ctypes.Structure):
-    _fields_ = [
-        ("cbSize",          ctypes.c_uint),
-        ("bIsOffload",      ctypes.c_int),   # BOOL
-        ("eCategory",       ctypes.c_int),   # AUDIO_STREAM_CATEGORY (0=Other)
-        ("Options",         ctypes.c_uint),  # AUDCLNT_STREAMOPTIONS
-    ]
+# vtable 헬퍼
+def _vtbl(obj, index):
+    vt = ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))[0]
+    return ctypes.cast(vt, ctypes.POINTER(ctypes.c_void_p))[index]
 
-AUDCLNT_STREAMOPTIONS_NONE             = 0x0
-AUDCLNT_STREAMOPTIONS_MATCH_FORMAT     = 0x1
-AUDCLNT_STREAMOPTIONS_LOOPBACK         = 0x4   # ProcessLoopback 활성화 옵션
-
-# ─────────────────────────────────────────────────────────────────────────────
-# COM 인터페이스 vtable 래퍼 (필요한 메서드만)
-# ─────────────────────────────────────────────────────────────────────────────
-_ole32   = ctypes.windll.ole32
-_kernel32= ctypes.windll.kernel32
-
-def _com_vtbl(obj, index):
-    """COM 객체의 vtable에서 index번째 함수 포인터를 반환."""
-    vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))
-    fn_ptr = ctypes.cast(vtbl[0], ctypes.POINTER(ctypes.c_void_p))[index]
-    return fn_ptr
-
-def _hresult_check(hr, label=""):
+def _hcheck(hr, label=""):
     if hr < 0:
         raise OSError(f"{label} HRESULT=0x{hr & 0xFFFFFFFF:08X}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 고수준 래퍼 함수들
+# ActivateAudioInterfaceAsync 동기 래퍼
+# OBS 는 WRL ComPtr + completion handler 를 씀.
+# Python 에서는 Mmdevapi.dll 의 함수를 직접 로드하고,
+# completion handler 를 IUnknown + vtable 로 직접 구현한다.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _co_initialize():
+# IActivateAudioInterfaceCompletionHandler IID
+_IID_IActivateAudioInterfaceCompletionHandler = (ctypes.c_byte * 16)(
+    0x41, 0xD9, 0x49, 0x94,
+    0x97, 0xAA, 0x9A, 0x40,
+    0xAB, 0x02, 0xE0, 0xD1,
+    0x71, 0x10, 0xA9, 0xC4,
+)
+
+# IActivateAudioInterfaceAsyncOperation IID
+_IID_IActivateAudioInterfaceAsyncOperation = (ctypes.c_byte * 16)(
+    0x72, 0xA7, 0x2B, 0x72,
+    0x56, 0x53, 0xBD, 0x4B,
+    0x86, 0x08, 0x9F, 0xD5, 0x8F, 0x9E, 0x21, 0x77,
+)
+
+# 콜백 함수 타입
+_ACTIVATE_COMPLETED_FN = ctypes.WINFUNCTYPE(
+    ctypes.c_long,
+    ctypes.c_void_p,   # this (IActivateAudioInterfaceCompletionHandler*)
+    ctypes.c_void_p,   # pActivateOperation
+)
+_ADDREF_FN   = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_RELEASE_FN  = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_QI_FN       = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p,
+    ctypes.c_byte * 16, ctypes.POINTER(ctypes.c_void_p)
+)
+
+class _CompletionHandlerImpl:
     """
-    CoInitializeEx 를 시도한다.
-    RPC_E_CHANGED_MODE(0x80010106): 이미 다른 모드로 초기화된 스레드 → 무시하고 진행.
-    ctypes c_long 은 부호 있는 정수이므로 음수 값으로 비교한다.
+    IActivateAudioInterfaceCompletionHandler 를 순수 ctypes vtable 로 구현.
+    ActivateCompleted 가 호출되면 Win32 이벤트를 신호.
     """
-    _ole32.CoInitializeEx.restype = ctypes.c_long
-    hr = _ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
-    if hr >= 0:
-        return  # S_OK(0) or S_FALSE(1)
-    # 0x80010106 을 signed int32 로 해석하면 -2147417850
-    if hr == ctypes.c_long(0x80010106).value:
-        return  # 이미 초기화돼 있음 — COM 준비된 상태이므로 그냥 진행
-    _hresult_check(hr, "CoInitializeEx")
+    def __init__(self):
+        self.event   = _kernel32.CreateEventW(None, True, False, None)
+        self.hr_act  = ctypes.c_long(0)
+        self.op_ptr  = ctypes.c_void_p(None)
 
-def _co_uninitialize():
-    _ole32.CoUninitialize()
+        # vtable 함수들
+        def _qi(this, riid, ppv):
+            ppv_ptr = ctypes.cast(ppv, ctypes.POINTER(ctypes.c_void_p))
+            ppv_ptr[0] = this
+            return 0
+        def _addref(this):  return 1
+        def _release(this): return 1
+        def _activate_completed(this, pOp):
+            self.op_ptr.value = pOp
+            # GetActivateResult 호출
+            fn_type = ctypes.WINFUNCTYPE(
+                ctypes.c_long,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_long),
+                ctypes.POINTER(ctypes.c_void_p),
+            )
+            # IActivateAudioInterfaceAsyncOperation::GetActivateResult = vtable[3]
+            fn = fn_type(_vtbl(ctypes.c_void_p(pOp), 3))
+            inner = ctypes.c_void_p()
+            hr = fn(pOp, ctypes.byref(self.hr_act), ctypes.byref(inner))
+            self.audio_client = inner
+            _kernel32.SetEvent(self.event)
+            return 0
 
-def _create_device_enumerator():
-    """IMMDeviceEnumerator COM 객체 생성."""
-    obj = ctypes.c_void_p()
-    hr = _ole32.CoCreateInstance(
-        _CLSID_MMDeviceEnumerator,
-        None,
-        CLSCTX_ALL,
-        _IID_IMMDeviceEnumerator,
-        ctypes.byref(obj),
-    )
-    _hresult_check(hr, "CoCreateInstance(MMDeviceEnumerator)")
-    return obj
+        self._qi_fn       = _QI_FN(_qi)
+        self._addref_fn   = _ADDREF_FN(_addref)
+        self._release_fn  = _RELEASE_FN(_release)
+        self._completed_fn= _ACTIVATE_COMPLETED_FN(_activate_completed)
 
-def _get_default_render_device(enumerator):
-    """기본 렌더(출력) 엔드포인트 IMMDevice 획득."""
-    # IMMDeviceEnumerator::GetDefaultAudioEndpoint — vtable[4]
-    fn_type = ctypes.WINFUNCTYPE(
+        # vtable 배열: QueryInterface, AddRef, Release, ActivateCompleted
+        self._vtable = (ctypes.c_void_p * 4)(
+            ctypes.cast(self._qi_fn,        ctypes.c_void_p).value,
+            ctypes.cast(self._addref_fn,    ctypes.c_void_p).value,
+            ctypes.cast(self._release_fn,   ctypes.c_void_p).value,
+            ctypes.cast(self._completed_fn, ctypes.c_void_p).value,
+        )
+        self._vtable_ptr = ctypes.cast(self._vtable, ctypes.c_void_p)
+        # COM 객체 = vtable 포인터를 가리키는 포인터
+        self._obj_data   = ctypes.c_void_p(self._vtable_ptr.value)
+        self.com_ptr     = ctypes.addressof(self._obj_data)
+        self.audio_client= ctypes.c_void_p()
+
+    def wait_and_get_client(self, timeout_ms=5000):
+        ret = _kernel32.WaitForSingleObject(self.event, timeout_ms)
+        if ret != 0:
+            raise OSError("ActivateAudioInterfaceAsync timeout")
+        _hcheck(self.hr_act.value, "ActivateCompleted inner")
+        return self.audio_client
+
+    def close(self):
+        if self.event:
+            _kernel32.CloseHandle(self.event)
+            self.event = None
+
+
+def _activate_process_loopback(pid: int) -> ctypes.c_void_p:
+    """
+    OBS InitClient(ProcessOutput) 동일 흐름:
+      ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, ...)
+    반환: IAudioClient COM 포인터
+    """
+    # Mmdevapi.dll 에서 ActivateAudioInterfaceAsync 로드
+    mmdevapi = ctypes.windll.LoadLibrary("Mmdevapi.dll")
+    fn_activate = ctypes.WINFUNCTYPE(
         ctypes.c_long,
-        ctypes.c_void_p,  # this
-        ctypes.c_uint,    # dataFlow  (eRender=0)
-        ctypes.c_uint,    # role      (eConsole=0)
-        ctypes.POINTER(ctypes.c_void_p),  # ppDevice
-    )
-    fn = fn_type(_com_vtbl(enumerator, 4))
-    device = ctypes.c_void_p()
-    hr = fn(enumerator, eRender, eConsole, ctypes.byref(device))
-    _hresult_check(hr, "GetDefaultAudioEndpoint")
-    return device
+        ctypes.c_wchar_p,   # deviceInterfacePath
+        ctypes.c_byte * 16, # riid
+        ctypes.POINTER(PROPVARIANT),  # activationParams
+        ctypes.c_void_p,    # completionHandler (IActivateAudioInterfaceCompletionHandler*)
+        ctypes.POINTER(ctypes.c_void_p),  # activationOperation
+    )(("ActivateAudioInterfaceAsync", mmdevapi))
 
-def _activate_audio_client3(device):
-    """IMMDevice::Activate → IAudioClient3."""
-    # IMMDevice::Activate — vtable[3]
-    fn_type = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_void_p,   # this
-        ctypes.c_byte * 16,# riid
-        ctypes.c_uint,     # dwClsCtx
-        ctypes.c_void_p,   # pActivationParams (NULL)
-        ctypes.POINTER(ctypes.c_void_p),  # ppInterface
-    )
-    fn = fn_type(_com_vtbl(device, 3))
-    client = ctypes.c_void_p()
-    hr = fn(device, _IID_IAudioClient3, CLSCTX_ALL, None, ctypes.byref(client))
-    _hresult_check(hr, "IMMDevice::Activate(IAudioClient3)")
+    # AUDIOCLIENT_ACTIVATION_PARAMS 설정
+    act_params = AUDIOCLIENT_ACTIVATION_PARAMS()
+    act_params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
+    act_params.ProcessLoopbackParams.TargetProcessId     = pid
+    act_params.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+
+    # PROPVARIANT{VT_BLOB}
+    pv = PROPVARIANT()
+    pv.vt = VT_BLOB
+    pv.u.blob.cbSize    = ctypes.sizeof(act_params)
+    pv.u.blob.pBlobData = ctypes.addressof(act_params)
+
+    # completion handler
+    handler = _CompletionHandlerImpl()
+    async_op = ctypes.c_void_p()
+
+    try:
+        hr = fn_activate(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            _IID_IAudioClient,
+            ctypes.byref(pv),
+            ctypes.c_void_p(handler.com_ptr),
+            ctypes.byref(async_op),
+        )
+        _hcheck(hr, "ActivateAudioInterfaceAsync")
+        client = handler.wait_and_get_client(timeout_ms=5000)
+    finally:
+        handler.close()
+
     return client
 
-def _set_client_properties(client, pid: int):
-    """
-    IAudioClient3::SetClientProperties 로 ProcessLoopback 옵션 설정.
-    vtable 인덱스는 IAudioClient3 기준 (IAudioClient 상속).
-    IAudioClient  메서드 수: Initialize(5) GetBufferSize(6) GetStreamLatency(7)
-                             GetCurrentPadding(8) IsFormatSupported(9)
-                             GetMixFormat(10) GetDevicePeriod(11) Start(12)
-                             Stop(13) Reset(14) SetEventHandle(15) GetService(16)
-    IAudioClient2 추가: IsOffloadCapable(17) SetClientProperties(18)
-                        GetBufferSizeLimits(19)
-    IAudioClient3 추가: GetSharedModeEnginePeriod(20)
-                        GetCurrentSharedModeEnginePeriod(21)
-                        InitializeSharedAudioStream(22)
-    SetClientProperties = vtable[18]
-    """
-    props = AudioClientProperties()
-    props.cbSize    = ctypes.sizeof(AudioClientProperties)
-    props.bIsOffload= 0
-    props.eCategory = 0   # AudioCategory_Other
-    props.Options   = AUDCLNT_STREAMOPTIONS_LOOPBACK  # ProcessLoopback 활성화
 
+def _audio_client_get_mix_format(client) -> "tuple[WAVEFORMATEX, ctypes.c_void_p]":
+    """IAudioClient::GetMixFormat — vtable[10] (IUnknown 3 + IAudioClient 메서드)"""
     fn_type = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_void_p,                     # this
-        ctypes.POINTER(AudioClientProperties),
-    )
-    fn = fn_type(_com_vtbl(client, 18))
-    hr = fn(client, ctypes.byref(props))
-    _hresult_check(hr, "SetClientProperties")
-
-def _get_mix_format(client) -> WAVEFORMATEX:
-    """IAudioClient::GetMixFormat — 엔진 내부 포맷 조회."""
-    fn_type = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_void_p,
+        ctypes.c_long, ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_void_p),
     )
-    fn = fn_type(_com_vtbl(client, 10))
-    fmt_ptr = ctypes.c_void_p()
-    hr = fn(client, ctypes.byref(fmt_ptr))
-    _hresult_check(hr, "GetMixFormat")
-    # 반환된 포인터를 WAVEFORMATEX 로 해석
-    fmt = ctypes.cast(fmt_ptr, ctypes.POINTER(WAVEFORMATEX)).contents
-    return fmt, fmt_ptr
+    fn = fn_type(_vtbl(client, 10))
+    ptr = ctypes.c_void_p()
+    _hcheck(fn(client, ctypes.byref(ptr)), "GetMixFormat")
+    fmt = ctypes.cast(ptr, ctypes.POINTER(WAVEFORMATEX)).contents
+    return fmt, ptr
 
-def _initialize_shared_audio_stream(client, flags: int, period_frames: int,
-                                     fmt_ptr, pid: int):
+
+def _audio_client_initialize(client, sr: int, ch: int):
     """
-    IAudioClient3::InitializeSharedAudioStream — vtable[22]
-    AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_LOOPBACK_PROCESSLOOPBACK
+    IAudioClient::Initialize — vtable[5]
+    AUDCLNT_SHAREMODE_SHARED, LOOPBACK | EVENTCALLBACK, 5초 버퍼
+    포맷은 float32 로 직접 지정 (OBS 방식).
     """
+    WAVE_FORMAT_EXTENSIBLE = 0xFFFE
+    WAVE_FORMAT_IEEE_FLOAT = 0x0003
+
+    class WAVEFORMATEXTENSIBLE(ctypes.Structure):
+        class _S(ctypes.Union):
+            _fields_ = [("wValidBitsPerSample", ctypes.c_ushort)]
+        _fields_ = [
+            ("Format",        WAVEFORMATEX),
+            ("Samples",       _S),
+            ("dwChannelMask", ctypes.c_uint),
+            ("SubFormat",     ctypes.c_byte * 16),
+        ]
+    # KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+    _SUBTYPE_FLOAT = (ctypes.c_byte * 16)(
+        0x03,0x00,0x00,0x00, 0x00,0x00, 0x10,0x00,
+        0x80,0x00, 0x00,0xAA,0x00,0x38,0x9B,0x71,
+    )
+    wfe = WAVEFORMATEXTENSIBLE()
+    wfe.Format.wFormatTag      = WAVE_FORMAT_EXTENSIBLE
+    wfe.Format.nChannels       = ch
+    wfe.Format.nSamplesPerSec  = sr
+    wfe.Format.wBitsPerSample  = 32
+    wfe.Format.nBlockAlign     = ch * 4
+    wfe.Format.nAvgBytesPerSec = sr * ch * 4
+    wfe.Format.cbSize          = ctypes.sizeof(WAVEFORMATEXTENSIBLE) - ctypes.sizeof(WAVEFORMATEX)
+    wfe.Samples.wValidBitsPerSample = 32
+    # 스테레오 채널 마스크
+    wfe.dwChannelMask = 0x3 if ch == 2 else (0x1 if ch == 1 else 0)
+    wfe.SubFormat     = _SUBTYPE_FLOAT
+
+    BUFFER_100NS = 5 * 10_000_000  # 5초
+
     fn_type = ctypes.WINFUNCTYPE(
         ctypes.c_long,
         ctypes.c_void_p,   # this
+        ctypes.c_uint,     # ShareMode
         ctypes.c_uint,     # StreamFlags
-        ctypes.c_uint,     # PeriodInFrames
-        ctypes.c_void_p,   # pFormat (WAVEFORMATEX*)
-        ctypes.c_void_p,   # AudioSessionGuid (NULL)
+        ctypes.c_longlong, # hnsBufferDuration
+        ctypes.c_longlong, # hnsPeriodicity
+        ctypes.c_void_p,   # pFormat
+        ctypes.c_void_p,   # AudioSessionGuid
     )
-    fn = fn_type(_com_vtbl(client, 22))
-    hr = fn(client, flags, period_frames, fmt_ptr, None)
-    _hresult_check(hr, "InitializeSharedAudioStream")
+    fn = fn_type(_vtbl(client, 5))
+    flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+    hr = fn(client, AUDCLNT_SHAREMODE_SHARED, flags,
+            BUFFER_100NS, 0, ctypes.addressof(wfe), None)
+    _hcheck(hr, "IAudioClient::Initialize")
+    return wfe  # 포맷 유지 (GC 방지)
 
-def _get_capture_client(client):
-    """IAudioClient::GetService(IID_IAudioCaptureClient)."""
-    fn_type = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_void_p,
-        ctypes.c_byte * 16,
-        ctypes.POINTER(ctypes.c_void_p),
-    )
-    fn = fn_type(_com_vtbl(client, 16))
-    cap = ctypes.c_void_p()
-    hr = fn(client, _IID_IAudioCaptureClient, ctypes.byref(cap))
-    _hresult_check(hr, "GetService(IAudioCaptureClient)")
-    return cap
+
+def _audio_client_set_event(client, h_event):
+    """IAudioClient::SetEventHandle — vtable[15]"""
+    fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+    fn = fn_type(_vtbl(client, 15))
+    _hcheck(fn(client, h_event), "SetEventHandle")
+
 
 def _audio_client_start(client):
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
-    fn = fn_type(_com_vtbl(client, 12))
-    _hresult_check(fn(client), "IAudioClient::Start")
+    _hcheck(fn_type(_vtbl(client, 12))(client), "IAudioClient::Start")
+
 
 def _audio_client_stop(client):
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
-    fn = fn_type(_com_vtbl(client, 13))
-    fn(client)
+    fn_type(_vtbl(client, 13))(client)
 
-def _get_next_packet_size(capture_client) -> int:
+
+def _get_capture_client(client) -> ctypes.c_void_p:
+    """IAudioClient::GetService(IID_IAudioCaptureClient) — vtable[16]"""
+    fn_type = ctypes.WINFUNCTYPE(
+        ctypes.c_long, ctypes.c_void_p,
+        ctypes.c_byte * 16,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    fn = fn_type(_vtbl(client, 16))
+    cap = ctypes.c_void_p()
+    _hcheck(fn(client, _IID_IAudioCaptureClient, ctypes.byref(cap)), "GetService(CaptureClient)")
+    return cap
+
+
+def _get_next_packet_size(cap) -> int:
     """IAudioCaptureClient::GetNextPacketSize — vtable[3]"""
-    fn_type = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_uint),
-    )
-    fn = fn_type(_com_vtbl(capture_client, 3))
-    frames = ctypes.c_uint(0)
-    hr = fn(capture_client, ctypes.byref(frames))
-    _hresult_check(hr, "GetNextPacketSize")
-    return frames.value
+    fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint))
+    n = ctypes.c_uint(0)
+    _hcheck(fn_type(_vtbl(cap, 3))(cap, ctypes.byref(n)), "GetNextPacketSize")
+    return n.value
 
-def _get_buffer(capture_client):
-    """
-    IAudioCaptureClient::GetBuffer — vtable[1]
-    반환: (data_ptr, num_frames, flags, device_position, qpc_position)
-    """
+
+def _get_buffer(cap):
+    """IAudioCaptureClient::GetBuffer — vtable[1]"""
     fn_type = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_void_p,                      # this
-        ctypes.POINTER(ctypes.c_void_p),       # ppData
-        ctypes.POINTER(ctypes.c_uint),         # pNumFramesToRead
-        ctypes.POINTER(ctypes.c_uint),         # pdwFlags
-        ctypes.POINTER(ctypes.c_ulonglong),    # pu64DevicePosition (opt)
-        ctypes.POINTER(ctypes.c_ulonglong),    # pu64QPCPosition    (opt)
+        ctypes.c_long, ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_ulonglong),
+        ctypes.POINTER(ctypes.c_ulonglong),
     )
-    fn = fn_type(_com_vtbl(capture_client, 1))
-    data    = ctypes.c_void_p()
-    frames  = ctypes.c_uint(0)
-    flags   = ctypes.c_uint(0)
-    dev_pos = ctypes.c_ulonglong(0)
-    qpc_pos = ctypes.c_ulonglong(0)
-    hr = fn(capture_client,
-            ctypes.byref(data), ctypes.byref(frames),
-            ctypes.byref(flags), ctypes.byref(dev_pos), ctypes.byref(qpc_pos))
-    _hresult_check(hr, "GetBuffer")
+    fn = fn_type(_vtbl(cap, 1))
+    data = ctypes.c_void_p(); frames = ctypes.c_uint(); flags = ctypes.c_uint()
+    dp = ctypes.c_ulonglong(); qp = ctypes.c_ulonglong()
+    hr = fn(cap, ctypes.byref(data), ctypes.byref(frames),
+            ctypes.byref(flags), ctypes.byref(dp), ctypes.byref(qp))
+    _hcheck(hr, "GetBuffer")
     return data, frames.value, flags.value
 
-def _release_buffer(capture_client, num_frames: int):
+
+def _release_buffer(cap, n: int):
     """IAudioCaptureClient::ReleaseBuffer — vtable[2]"""
-    fn_type = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_void_p,
-        ctypes.c_uint,
-    )
-    fn = fn_type(_com_vtbl(capture_client, 2))
-    fn(capture_client, num_frames)
+    fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint)
+    fn_type(_vtbl(cap, 2))(cap, n)
+
 
 def _com_release(obj):
     if obj and obj.value:
         fn_type = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
-        fn = fn_type(_com_vtbl(obj, 2))  # IUnknown::Release = vtable[2]
-        fn(obj)
-
-def _co_task_mem_free(ptr):
-    if ptr and ptr.value:
-        _ole32.CoTaskMemFree(ptr)
+        fn_type(_vtbl(obj, 2))(obj)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 팟플레이어 PID 탐색
@@ -392,57 +453,39 @@ def _apply_filter(arr, sos, sosfilt):
     return arr
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ProcessLoopback 세션 1회 실행
+# 캡처 세션 1회 실행
 # ─────────────────────────────────────────────────────────────────────────────
-AUDCLNT_BUFFERFLAGS_SILENT = 0x2
-
 def _run_capture_session(pid: int, audio_queue: Queue,
                           stop_flag: Value, send_log) -> "tuple[bool, str]":
-    """
-    팟플레이어 PID 에 대해 ProcessLoopback 캡처를 열고
-    stop_flag 가 설정될 때까지 RMS 값을 audio_queue 에 넣는다.
-    반환: (정상종료여부, 실패이유)
-    """
-    enumerator    = None
-    device        = None
-    client        = None
-    capture_client= None
-    fmt_ptr       = None
+    client  = None
+    cap     = None
+    h_event = None
+    wfe_ref = None  # GC 방지
 
     try:
-        _co_initialize()
+        # 1. ProcessLoopback IAudioClient 활성화 (OBS 동일 방식)
+        client = _activate_process_loopback(pid)
 
-        enumerator = _create_device_enumerator()
-        device     = _get_default_render_device(enumerator)
-        client     = _activate_audio_client3(device)
+        # 2. 포맷 결정: float32, 스테레오, 48000Hz 고정 (OBS 기본값)
+        sr = 48000
+        ch = 2
+        wfe_ref = _audio_client_initialize(client, sr, ch)
 
-        # ProcessLoopback 옵션 설정
-        _set_client_properties(client, pid)
+        # 3. 이벤트 핸들 생성 & 등록
+        h_event = _kernel32.CreateEventW(None, False, False, None)
+        _audio_client_set_event(client, h_event)
 
-        # 엔진 믹스 포맷 조회
-        fmt, fmt_ptr = _get_mix_format(client)
-        sr = fmt.nSamplesPerSec
-        ch = fmt.nChannels
-
-        # 스트림 초기화
-        flags = (AUDCLNT_STREAMFLAGS_LOOPBACK |
-                 AUDCLNT_STREAMFLAGS_LOOPBACK_PROCESSLOOPBACK)
-        # PeriodInFrames: 10ms
-        period_frames = sr // 100
-
-        _initialize_shared_audio_stream(client, flags, period_frames, fmt_ptr, pid)
-
-        # IAudioCaptureClient 획득
-        capture_client = _get_capture_client(client)
+        # 4. CaptureClient 획득 & 시작
+        cap = _get_capture_client(client)
+        _audio_client_start(client)
 
         sos, sosfilt = _make_bandpass(sr)
         send_log(f"🎙 [ProcessLoopback/WinAPI] PID={pid} sr={sr} ch={ch}")
 
-        _audio_client_start(client)
-
         RECHECK    = 3.0
         last_check = time.time()
         cur_pid    = pid
+        WAIT_MS    = 100  # 100ms 대기
 
         while not stop_flag.value:
             # PID 재확인
@@ -455,51 +498,46 @@ def _run_capture_session(pid: int, audio_queue: Queue,
                 if new_pid != cur_pid:
                     return False, f"PID 변경 ({cur_pid} → {new_pid}) — 재연결"
 
-            # 패킷 루프
-            packet_frames = _get_next_packet_size(capture_client)
-            if packet_frames == 0:
-                time.sleep(0.005)
+            # 이벤트 대기
+            ret = _kernel32.WaitForSingleObject(h_event, WAIT_MS)
+            if ret != 0:  # WAIT_TIMEOUT or error
                 continue
 
-            data, num_frames, flg = _get_buffer(capture_client)
+            # 패킷 수집
+            while not stop_flag.value:
+                pkt = _get_next_packet_size(cap)
+                if pkt == 0:
+                    break
 
-            if num_frames > 0:
-                if flg & AUDCLNT_BUFFERFLAGS_SILENT:
-                    rms = 0.0
-                else:
-                    # float32 샘플로 해석
-                    buf = (ctypes.c_float * (num_frames * ch)).from_address(data.value)
-                    arr = np.frombuffer(buf, dtype=np.float32).copy()
-                    if ch > 1:
-                        arr = arr.reshape(-1, ch).mean(axis=1)
-                    arr = _apply_filter(arr, sos, sosfilt)
-                    rms = float(np.sqrt(np.mean(arr ** 2)))
+                data, num_frames, flg = _get_buffer(cap)
 
-                queue_put(audio_queue, (time.time(), rms))
+                if num_frames > 0:
+                    if flg & AUDCLNT_BUFFERFLAGS_SILENT:
+                        rms = 0.0
+                    else:
+                        buf = (ctypes.c_float * (num_frames * ch)).from_address(data.value)
+                        arr = np.frombuffer(buf, dtype=np.float32).copy()
+                        if ch > 1:
+                            arr = arr.reshape(-1, ch).mean(axis=1)
+                        arr = _apply_filter(arr, sos, sosfilt)
+                        rms = float(np.sqrt(np.mean(arr ** 2)))
+                    queue_put(audio_queue, (time.time(), rms))
 
-            _release_buffer(capture_client, num_frames)
+                _release_buffer(cap, num_frames)
 
         return True, ""
 
     except OSError as e:
         return False, str(e)
     finally:
-        if capture_client:
+        if cap:
             try: _audio_client_stop(client)
             except Exception: pass
-            _com_release(capture_client)
+            _com_release(cap)
         if client:
             _com_release(client)
-        if device:
-            _com_release(device)
-        if enumerator:
-            _com_release(enumerator)
-        if fmt_ptr and fmt_ptr.value:
-            _co_task_mem_free(fmt_ptr)
-        try:
-            _co_uninitialize()
-        except Exception:
-            pass
+        if h_event:
+            _kernel32.CloseHandle(h_event)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 진입점

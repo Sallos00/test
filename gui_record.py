@@ -6,7 +6,7 @@ from gui_record_backend import (
     _CV2_OK, _SF_OK, _PIL_OK,
     _get_potplayer_rect, _get_potplayer_video_hwnd, _show_overlay,
     _hide_all_overlays, _show_all_overlays,
-    _AudioRecorder, _ScreenRecorder, _save_mp4,
+    _AudioRecorder, _ScreenRecorder, _merge_audio, _find_ffmpeg,
 )
 
 class RecordCapturePopup:
@@ -345,8 +345,10 @@ class RecordCapturePopup:
         if not _CV2_OK:
             self._rec_status.config(text="⚠ opencv-python 필요", fg="#e0a03c")
             return
-        if not _PIL_OK:
-            self._rec_status.config(text="⚠ Pillow 필요", fg="#e0a03c")
+        if not _find_ffmpeg():
+            self._rec_status.config(
+                text="⚠ ffmpeg를 찾을 수 없습니다. PATH에 추가하거나 프로그램 폴더에 ffmpeg.exe를 넣어주세요.",
+                fg="#e0a03c")
             return
 
         g = self.gui
@@ -358,7 +360,8 @@ class RecordCapturePopup:
             # 구간 녹화: 시작 시각 대기
             if use_range and start_sec is not None:
                 from win32_utils import find_potplayer_hwnd, get_playback_info
-                self._rec_status.config(text=f"⏳ {start_sec//60:02d}:{start_sec%60:02d} 대기 중...")
+                g.root.after(0, lambda: self._rec_status.config(
+                    text=f"⏳ {start_sec//60:02d}:{start_sec%60:02d} 대기 중...", fg=g.TEXT_MID))
                 while True:
                     hwnd = find_potplayer_hwnd()
                     if hwnd:
@@ -380,21 +383,29 @@ class RecordCapturePopup:
                     text="⚠ 팟플레이어를 찾을 수 없습니다.", fg="#e0a03c"))
                 return
 
-            # 오디오 + 화면 동시 시작
-            self._audio_rec  = _AudioRecorder()
+            # 저장 경로 미리 결정
+            ts        = time.strftime("%Y%m%d_%H%M%S")
+            video_dir = self._ensure_subdir("Video")
+            out_path  = os.path.join(video_dir, f"record_{ts}.mp4")
+
+            # 화면 녹화 시작 (ffmpeg를 즉시 기동해 실시간 인코딩)
             self._screen_rec = _ScreenRecorder()
             try:
-                self._screen_rec.start(fps=30, root=g.root)
+                self._screen_rec.start(fps=30, root=g.root, out_path=out_path)
             except Exception as e:
-                self._rec_status.config(text=f"⚠ 화면 캡처 실패: {e}", fg="#e0a03c")
+                g.root.after(0, lambda: self._rec_status.config(
+                    text=f"⚠ 화면 캡처 실패: {e}", fg="#e0a03c"))
                 return
+
+            # 오디오 캡처 시작
+            self._audio_rec = _AudioRecorder()
             self._audio_rec.start(pid)
 
-            self._recording = True
-            self._rec_btn.config(text="⏹ 녹화 정지", fg=g.ACCENT3)
-            self._rec_status.config(text="🔴 녹화 중...", fg=g.ACCENT2)
+            self._recording  = True
+            self._out_path   = out_path
+            g.root.after(0, lambda: self._rec_btn.config(text="⏹ 녹화 정지", fg=g.ACCENT3))
+            g.root.after(0, lambda: self._rec_status.config(text="🔴 녹화 중...", fg=g.ACCENT2))
             _show_overlay(g.root, "🔴 녹화중", duration_ms=99999999)
-            self._overlay_shown = True
 
             # 구간 녹화: 종료 시각 대기
             if use_range and end_sec is not None:
@@ -418,41 +429,47 @@ class RecordCapturePopup:
         g = self.gui
         self._recording = False
 
-        self._rec_btn.config(text="⏺ 녹화 시작", fg=g.ACCENT2)
-        self._rec_status.config(text="💾 저장 중...", fg=g.TEXT_MID)
-
-        # 닫혀있지 않은 오버레이 닫기 (새 오버레이로 대체됨)
+        g.root.after(0, lambda: self._rec_btn.config(text="⏺ 녹화 시작", fg=g.ACCENT2))
+        g.root.after(0, lambda: self._rec_status.config(text="⏳ 인코딩 완료 대기 중...", fg=g.TEXT_MID))
         _show_overlay(g.root, "✅ 녹화가 종료되었습니다.", duration_ms=3000)
 
-        def _save():
+        def _finish():
+            import traceback, tempfile
             try:
-                video_frames, fps, size = self._screen_rec.stop()
+                # 1. 화면 캡처 중단 → ffmpeg가 파이프를 닫고 인코딩 완료할 때까지 대기
+                g.root.after(0, lambda: self._rec_status.config(
+                    text="⏳ 영상 인코딩 완료 대기 중...", fg=g.TEXT_MID))
+                tmp_video = self._screen_rec.stop()   # ffmpeg communicate() 완료까지 블로킹
+
+                # 2. 오디오 수집 중단
+                g.root.after(0, lambda: self._rec_status.config(
+                    text="⏳ 오디오 병합 중...", fg=g.TEXT_MID))
                 audio_arr, audio_sr, audio_ch = self._audio_rec.stop()
 
-                ts = time.strftime("%Y%m%d_%H%M%S")
-                video_dir = self._ensure_subdir("Video")
-                out_path  = os.path.join(video_dir, f"record_{ts}.mp4")
+                # 3. 오디오를 완성된 MP4에 병합
+                out_path = self._out_path
+                _merge_audio(tmp_video, audio_arr, audio_sr, audio_ch, out_path)
 
-                from gui_record_backend import _find_ffmpeg
-                ffmpeg_ok = bool(_find_ffmpeg())
-
-                _save_mp4(video_frames, fps, size,
-                          audio_arr, audio_sr, audio_ch,
-                          out_path)
-
-                if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
-                    suffix = "" if ffmpeg_ok else " (ffmpeg 없음: 화질 낮을 수 있음)"
-                    g.root.after(0, lambda: self._rec_status.config(
-                        text=f"✅ 저장 완료: Video/{os.path.basename(out_path)}{suffix}",
-                        fg=g.ACCENT3))
+                if os.path.isfile(out_path) and os.path.getsize(out_path) > 1024:
+                    msg = f"✅ 저장 완료: Video/{os.path.basename(out_path)}"
+                    g.root.after(0, lambda m=msg: self._rec_status.config(text=m, fg=g.ACCENT3))
                 else:
                     g.root.after(0, lambda: self._rec_status.config(
-                        text="⚠ 저장 실패: 파일이 생성되지 않았습니다.", fg="#e0a03c"))
-            except Exception as e:
-                g.root.after(0, lambda: self._rec_status.config(
-                    text=f"⚠ 저장 실패: {e}", fg="#e0a03c"))
+                        text="⚠ 저장 실패: 파일이 비어있습니다.", fg="#e0a03c"))
 
-        threading.Thread(target=_save, daemon=True).start()
+            except Exception as e:
+                tb = traceback.format_exc()
+                try:
+                    log_path = os.path.join(tempfile.gettempdir(), "autosinc_record_error.txt")
+                    with open(log_path, "w", encoding="utf-8") as lf:
+                        lf.write(tb)
+                except Exception:
+                    pass
+                short = str(e)[:80]
+                msg = f"⚠ 저장 실패: {short}"
+                g.root.after(0, lambda m=msg: self._rec_status.config(text=m, fg="#e0a03c"))
+
+        threading.Thread(target=_finish, daemon=True).start()
 
     # ── 화면 캡처 ──────────────────────────────────────────────────────────
     def _do_capture(self):

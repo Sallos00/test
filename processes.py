@@ -129,6 +129,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     mco = 0
     lat = 0.0
     pst   = False
+    pending_prompt = [None]   # GUI 확인 전까지 반복 전송할 oped_prompt
     def add_log(msg):
         import time as _t
         lgl.append(f"[{_t.strftime('%H:%M:%S')}] {msg}")
@@ -194,12 +195,15 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         if snap is None or len(snap) != len(logs) or (logs and snap[-1] != logs[-1]):
             snap = list(logs)
             _last_log_snapshot[0] = snap
+        # oped_prompt 가 새로 세팅되면 pending 에 저장, 없으면 pending 을 계속 전송
+        if oped_prompt is not None:
+            pending_prompt[0] = oped_prompt
         queue_put(state_queue, dict(
             status=status, offset_ms=offset, correction_ms=correction,
             log_lines=snap, potplayer_ok=pot_ok,
             lip_samples=lip_n, audio_samples=aud_n,
             notify=notify,
-            oped_prompt=oped_prompt,
+            oped_prompt=pending_prompt[0],
         ))
     def execute_skip():
         """shared_pos 기준으로 OSS 초 앞으로 이동."""
@@ -245,16 +249,19 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     mco = 0
                     lat = time.time()
                     pst   = False
+                    pending_prompt[0] = None
                     add_log("⏭ 스킵 완료 → 쿨다운 3분")
                 elif cmd == "oped_no_skip":
                     mco = 0
                     lat = time.time()
                     pst   = False
+                    pending_prompt[0] = None
                     add_log("✖ 스킵 건너뜀 → 쿨다운 3분")
                 elif cmd == "oped_reset":
                     mco = 0
                     lat = 0.0
                     pst   = False
+                    pending_prompt[0] = None
                     add_log("↺ OP/ED 상태 초기화")
                 elif cmd == "stop":
                     stop_flag.value = True
@@ -281,6 +288,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     mco = 0
                     lat = 0.0
                     pst   = False
+                    pending_prompt[0] = None
                     add_log("🔄 영상 변경 → 싱크 + OP/ED 상태 초기화")
                 pvt = cur_title
             except Exception:

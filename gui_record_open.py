@@ -5,7 +5,7 @@ import tkinter as tk
 class LipSyncGUIRecordOpen:
 
     def _open_record_capture(self):
-        save_dir = self._load_setting("record_save_dir", "")
+        save_dir = getattr(self, "_record_save_dir", None) or self._load_setting("record_save_dir", "")
 
         r     = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw    = round(340 * r)
@@ -81,6 +81,7 @@ class LipSyncGUIRecordOpen:
                 except Exception:
                     pass
                 s = "normal" if os.path.isdir(path) else "disabled"
+                self._record_save_dir = path  # _save_settings와 동기화
                 rec_btn.config(state=s)
                 cap_btn.config(state=s)
 

@@ -569,22 +569,16 @@ def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
     """ffmpeg로 H.264 비디오 + AAC 오디오 MP4 저장. ffmpeg 없으면 OpenCV fallback."""
     import subprocess, numpy as np, shutil, tempfile
 
-    # 한글/특수문자 경로 문제를 피하기 위해 임시 파일은 TEMP 폴더에 생성
+    if not video_frames:
+        raise RuntimeError("캡처된 프레임이 없습니다. 팟플레이어 창을 확인하세요.")
+
     tmp_dir   = tempfile.gettempdir()
-    tmp_video = os.path.join(tmp_dir, "autosinc_tmp_video.avi")
     tmp_audio = os.path.join(tmp_dir, "autosinc_tmp_audio.wav")
+    tmp_out   = os.path.join(tmp_dir, "autosinc_tmp_out.mp4")
 
-    # 1. 비디오 임시 저장 (MJPG AVI — ffmpeg 입력용)
-    fourcc_avi = cv2.VideoWriter_fourcc(*"MJPG")
-    vw = cv2.VideoWriter(tmp_video, fourcc_avi, fps, size)
-    for f in video_frames:
-        h, w = f.shape[:2]
-        if (w, h) != size:
-            f = cv2.resize(f, size)
-        vw.write(f)
-    vw.release()
+    w, h = size
 
-    # 2. 오디오 wav 저장
+    # 1. 오디오 wav 저장
     has_audio = False
     if audio_arr is not None and len(audio_arr) > 0:
         try:
@@ -600,27 +594,29 @@ def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
         except Exception:
             pass
 
-    # 3. ffmpeg로 H.264 + AAC 인코딩
-    #    -c:v libx264      → 범용 H.264
-    #    -pix_fmt yuv420p  → Windows Media Player / QuickTime 호환
-    #    -movflags +faststart → moov 박스 앞배치 (빠른 열기)
-    merged    = False
+    # 2. ffmpeg로 raw BGR pipe → H.264 인코딩
+    #    임시 AVI를 전혀 만들지 않고 프레임을 stdin 파이프로 직접 전달.
+    #    → OpenCV 코덱(MJPG 등) 의존성 완전 제거
+    merged     = False
     ffmpeg_bin = _find_ffmpeg()
 
     if ffmpeg_bin:
-        ffmpeg_inputs = ["-i", tmp_video]
-        ffmpeg_audio  = ["-an"]
+        ffmpeg_audio = ["-an"]
         if has_audio:
-            ffmpeg_inputs += ["-i", tmp_audio]
-            ffmpeg_audio   = ["-c:a", "aac", "-b:a", "192k"]
+            ffmpeg_audio = ["-i", tmp_audio, "-c:a", "aac", "-b:a", "192k"]
 
-        # out_path에 한글이 있어도 ffmpeg가 처리할 수 있도록
-        # 임시 출력 파일을 TEMP에 먼저 쓴 뒤 shutil.move로 이동
-        tmp_out = os.path.join(tmp_dir, "autosinc_tmp_out.mp4")
         try:
             cmd = (
-                [ffmpeg_bin, "-y"]
-                + ffmpeg_inputs
+                [ffmpeg_bin, "-y",
+                 "-f", "rawvideo",
+                 "-vcodec", "rawvideo",
+                 "-pix_fmt", "bgr24",
+                 "-s", f"{w}x{h}",
+                 "-r", str(fps),
+                 "-i", "pipe:0",   # stdin에서 raw 프레임 수신
+                 ]
+                + (ffmpeg_audio if not has_audio else [])  # 오디오 없으면 -an
+                + (["-i", tmp_audio] if has_audio else [])
                 + [
                     "-c:v", "libx264",
                     "-preset", "fast",
@@ -628,47 +624,81 @@ def _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out_path):
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
-                + ffmpeg_audio
-                + (["-shortest"] if has_audio else [])
+                + (["-c:a", "aac", "-b:a", "192k", "-shortest"] if has_audio else [])
                 + [tmp_out]
             )
-            result = subprocess.run(
+            # 커맨드를 깔끔하게 재조립 (순서 보장)
+            cmd = [ffmpeg_bin, "-y",
+                   "-f", "rawvideo",
+                   "-vcodec", "rawvideo",
+                   "-pix_fmt", "bgr24",
+                   "-s", f"{w}x{h}",
+                   "-r", str(fps),
+                   "-i", "pipe:0",
+                   "-c:v", "libx264",
+                   "-preset", "fast",
+                   "-crf", "18",
+                   "-pix_fmt", "yuv420p",
+                   "-movflags", "+faststart",
+                   ]
+            if has_audio:
+                cmd += ["-i", tmp_audio, "-c:a", "aac", "-b:a", "192k", "-shortest"]
+            else:
+                cmd += ["-an"]
+            cmd += [tmp_out]
+
+            proc = subprocess.Popen(
                 cmd,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            if result.returncode == 0 and os.path.isfile(tmp_out):
+            for frame in video_frames:
+                fh, fw = frame.shape[:2]
+                if (fw, fh) != (w, h):
+                    frame = cv2.resize(frame, (w, h))
+                proc.stdin.write(frame.tobytes())
+            proc.stdin.close()
+            _, stderr_data = proc.communicate()
+
+            if proc.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
                 shutil.move(tmp_out, out_path)
                 merged = True
             else:
-                # 디버깅용: 에러 로그를 out_path 옆에 남김
+                # 디버깅용 에러 로그
                 try:
-                    log_path = out_path + "_ffmpeg_error.txt"
-                    with open(log_path, "wb") as lf:
-                        lf.write(result.stderr)
+                    with open(out_path + "_ffmpeg_error.txt", "wb") as lf:
+                        lf.write(stderr_data)
                 except Exception:
                     pass
         except Exception:
             pass
 
-    # 4. ffmpeg 없는 환경 fallback: OpenCV로 직접 MP4 저장
+    # 3. ffmpeg 없는 환경 fallback: OpenCV로 직접 MP4 저장
     if not merged:
-        # avc1(H.264) 시도 → 안 되면 mp4v
-        for fourcc_str in ("avc1", "mp4v"):
+        saved = False
+        for fourcc_str in ("avc1", "mp4v", "XVID"):
             fourcc_mp4 = cv2.VideoWriter_fourcc(*fourcc_str)
-            vw2 = cv2.VideoWriter(out_path, fourcc_mp4, fps, size)
+            vw2 = cv2.VideoWriter(out_path, fourcc_mp4, fps, (w, h))
             if vw2.isOpened():
-                for f in video_frames:
-                    h, w = f.shape[:2]
-                    if (w, h) != size:
-                        f = cv2.resize(f, size)
-                    vw2.write(f)
+                for frame in video_frames:
+                    fh, fw = frame.shape[:2]
+                    if (fw, fh) != (w, h):
+                        frame = cv2.resize(frame, (w, h))
+                    vw2.write(frame)
                 vw2.release()
-                merged = True
-                break
-            vw2.release()
+                if os.path.isfile(out_path) and os.path.getsize(out_path) > 1024:
+                    saved = True
+                    break
+            else:
+                vw2.release()
+        if not saved:
+            raise RuntimeError(
+                "ffmpeg도 없고 OpenCV 코덱도 사용 불가합니다.\n"
+                "ffmpeg를 설치하거나 PATH에 추가해 주세요."
+            )
 
-    for p in [tmp_video, tmp_audio]:
+    for p in [tmp_audio, tmp_out]:
         try:
             os.remove(p)
         except Exception:

@@ -347,6 +347,21 @@ class RecordCapturePopup:
 
     # ── 팝업 열기 ──────────────────────────────────────────────────────────
     def open(self):
+        try:
+            self._open_impl()
+        except Exception as e:
+            import traceback, collections
+            msg = f"❌ 녹화/캡처 팝업 오류: {e}
+{traceback.format_exc()}"
+            print(msg)
+            try:
+                if not hasattr(self.gui, '_log_lines'):
+                    self.gui._log_lines = collections.deque(maxlen=100)
+                self.gui._log_lines.append(msg)
+            except Exception:
+                pass
+
+    def _open_impl(self):
         if self._popup and self._popup.winfo_exists():
             self._popup.lift()
             return

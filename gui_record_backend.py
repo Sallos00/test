@@ -551,7 +551,7 @@ class _ScreenRecorder:
             raise RuntimeError("ffmpeg를 찾을 수 없습니다.")
         _log(f"ffmpeg: {ffmpeg_bin}")
 
-        self._tmp_video  = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
+        self._tmp_video  = out_path if out_path else os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
         _log_dir = os.path.dirname(out_path) if out_path else tempfile.gettempdir()
         self._ffmpeg_log = os.path.join(_log_dir, "autosinc_ffmpeg.log")
 
@@ -672,8 +672,12 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
     has_audio  = audio_arr is not None and len(audio_arr) > 0
 
     if not has_audio or not ffmpeg_bin:
-        _log(f"오디오 없이 이동 (has_audio={has_audio})")
-        shutil.move(tmp_video, out_path)
+        _log(f"오디오 없음 - 영상 경로: {tmp_video}")
+        if tmp_video != out_path:
+            shutil.move(tmp_video, out_path)
+            _log(f"이동 완료: {out_path}")
+        else:
+            _log(f"이미 최종 경로에 저장됨: {out_path}")
         return
 
     tmp_audio = os.path.join(tempfile.gettempdir(), "autosinc_tmp_audio.wav")
@@ -708,10 +712,12 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
         _log(f"최종 저장: {out_path}")
     else:
         _log("병합 실패 → 영상만 저장")
-        shutil.move(tmp_video, out_path)
+        if tmp_video != out_path:
+            shutil.move(tmp_video, out_path)
         try: shutil.copy(merge_log, out_path + "_merge_error.log")
         except: pass
 
-    for p in [tmp_audio, tmp_out, tmp_video, merge_log]:
+    for p in [tmp_audio, tmp_out, merge_log]:
         try: os.remove(p)
         except: pass
+    # tmp_video == out_path이므로 별도 삭제 불필요

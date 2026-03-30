@@ -131,7 +131,7 @@ class LipSyncGUIRecordOpen:
         start_time_var = tk.StringVar(value="00:00")
         end_time_var   = tk.StringVar(value="00:00")
 
-        tk.Checkbutton(record_page, text="구간 녹화", variable=range_var,
+        range_chk = tk.Checkbutton(record_page, text="구간 녹화", variable=range_var,
                        font=("Consolas", F_MONO),
                        bg=self.BG2, fg=self.TEXT, selectcolor=self.BG3,
                        activebackground=self.BG2, activeforeground=self.TEXT,
@@ -139,7 +139,8 @@ class LipSyncGUIRecordOpen:
                        command=lambda: (
                            start_entry.config(state="normal" if range_var.get() else "disabled"),
                            end_entry.config(state="normal" if range_var.get() else "disabled"),
-                       )).pack(anchor="w", pady=(0, round(4*r)))
+                       ))
+        range_chk.pack(anchor="w", pady=(0, round(4*r)))
 
         range_row = tk.Frame(record_page, bg=self.BG2)
         range_row.pack(anchor="w", pady=(0, round(8*r)))
@@ -245,6 +246,7 @@ class LipSyncGUIRecordOpen:
             state["recording"] = False
             rec_btn.config(text="⏺ 녹화 시작", fg=self.ACCENT2)
             close_recording_overlay()
+            unlock_range_widgets()
 
             def _save():
                 import time as _t, threading as _th
@@ -293,6 +295,17 @@ class LipSyncGUIRecordOpen:
 
             threading.Thread(target=_save, daemon=True).start()
 
+        def lock_range_widgets():
+            range_chk.config(state="disabled")
+            start_entry.config(state="disabled")
+            end_entry.config(state="disabled")
+
+        def unlock_range_widgets():
+            range_chk.config(state="normal")
+            entry_state = "normal" if range_var.get() else "disabled"
+            start_entry.config(state=entry_state)
+            end_entry.config(state=entry_state)
+
         def start_record():
             from gui_record_backend import _CV2_OK, _PIL_OK, _AudioRecorder, _ScreenRecorder
             if not _CV2_OK:
@@ -321,23 +334,38 @@ class LipSyncGUIRecordOpen:
                     if "potplayer" in p.info["name"].lower():
                         pid = p.info["pid"]; break
 
-                state["audio_rec"]  = _AudioRecorder()
-                state["screen_rec"] = _ScreenRecorder()
                 import time as _t2
                 _out_path = os.path.join(ensure_subdir("Video"), f"record_{_t2.strftime('%Y%m%d_%H%M%S')}.mp4")
                 state["out_path"] = _out_path
+
+                # 오디오 먼저 시작 → WASAPI 초기화 대기 → 화면 녹화 시작 (싱크 보정)
+                state["audio_rec"] = _AudioRecorder()
+                if pid:
+                    state["audio_rec"].start(pid)
+                    # 오디오 스레드 alive 확인 후 버퍼 안정화 대기
+                    _deadline = _t2.time() + 0.3
+                    while _t2.time() < _deadline:
+                        if state["audio_rec"]._running and \
+                           state["audio_rec"]._thread and \
+                           state["audio_rec"]._thread.is_alive():
+                            break
+                        _t2.sleep(0.01)
+                    _t2.sleep(0.05)  # WASAPI 첫 패킷 안정화 여유
+
+                state["screen_rec"] = _ScreenRecorder()
                 try:
                     state["screen_rec"].start(fps=30, out_path=_out_path)
                 except Exception as e:
+                    state["audio_rec"].stop()
                     self.root.after(0, lambda: rec_status.config(
                         text="⚠ 화면 캡처 실패: " + str(e), fg="#e0a03c"))
+                    self.root.after(0, unlock_range_widgets)
                     return
-                if pid:
-                    state["audio_rec"].start(pid)
 
                 state["recording"] = True
                 self.root.after(0, lambda: rec_btn.config(text="⏹ 녹화 정지", fg=self.ACCENT3))
                 self.root.after(0, lambda: rec_status.config(text="🔴 녹화 중...", fg=self.ACCENT2))
+                self.root.after(0, lock_range_widgets)
                 self.root.after(0, show_recording_overlay)
 
                 if use_range and end_sec is not None:

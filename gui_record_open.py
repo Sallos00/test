@@ -338,19 +338,13 @@ class LipSyncGUIRecordOpen:
                 _out_path = os.path.join(ensure_subdir("Video"), f"record_{_t2.strftime('%Y%m%d_%H%M%S')}.mp4")
                 state["out_path"] = _out_path
 
-                # 오디오 먼저 시작 → WASAPI 초기화 대기 → 화면 녹화 시작 (싱크 보정)
+                # 오디오 먼저 시작 → 첫 패킷 실제 수신까지 대기 → 화면 녹화 시작 (싱크 보정)
                 state["audio_rec"] = _AudioRecorder()
                 if pid:
                     state["audio_rec"].start(pid)
-                    # 오디오 스레드 alive 확인 후 버퍼 안정화 대기
-                    _deadline = _t2.time() + 0.3
-                    while _t2.time() < _deadline:
-                        if state["audio_rec"]._running and \
-                           state["audio_rec"]._thread and \
-                           state["audio_rec"]._thread.is_alive():
-                            break
-                        _t2.sleep(0.01)
-                    _t2.sleep(0.05)  # WASAPI 첫 패킷 안정화 여유
+                    # 첫 오디오 패킷이 실제로 도착할 때까지 대기 (최대 2초)
+                    arrived = state["audio_rec"].first_frame_event.wait(timeout=2.0)
+                    _log(f"오디오 첫 패킷 {'수신' if arrived else '타임아웃 → 강행'}")
 
                 state["screen_rec"] = _ScreenRecorder()
                 try:

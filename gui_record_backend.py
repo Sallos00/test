@@ -198,12 +198,14 @@ def _wgc_capture_hwnd(hwnd, width, height, fps, running_flag, write_frame_cb):
         _use_winrt = False
 
     if not _use_winrt:
-        # Windows 내장 WinRT COM IGraphicsCaptureItemInterop 경로
+        # COM 경로 시도, 실패 시 PrintWindow로 직접 폴백
         try:
             _capture_via_com(hwnd, width, height, fps, running_flag, write_frame_cb)
             return
         except Exception as e:
-            raise RuntimeError(f"WGC COM 초기화 실패: {e}")
+            _log(f"WGC COM 실패 → PrintWindow 직접 폴백: {e}")
+            _printwindow_loop(hwnd, width, height, fps, running_flag, write_frame_cb)
+            return
 
     # winrt 패키지 경로
     item = wgc.GraphicsCaptureItem.create_for_window(hwnd)
@@ -288,8 +290,14 @@ def _capture_via_com(hwnd, width, height, fps, running_flag, write_frame_cb):
     D3D11_CPU_ACCESS_READ = 0x20000
     D3D11_MAP_READ = 1
 
-    # COM 초기화
-    comtypes.CoInitializeEx(0)  # STA
+    # COM 초기화 — 이미 초기화된 스레드면 무시 (RPC_E_CHANGED_MODE = -2147417850)
+    try:
+        comtypes.CoInitializeEx(0)  # STA
+    except OSError as _e:
+        if _e.winerror == -2147417850:
+            _log("COM 이미 초기화됨 (MTA) — 계속 진행")
+        else:
+            raise
 
     # ID3D11Device 생성
     class _ID3D11Device(comtypes.IUnknown):

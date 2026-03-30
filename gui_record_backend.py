@@ -41,7 +41,11 @@ def _set_log_path(directory: str):
         pass
 
 def _log(msg: str):
-    pass
+    try:
+        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,13 +106,30 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
     try:
         ov = tk.Toplevel(root)
         ov.overrideredirect(True)
-        ov.attributes("-topmost", True)
         ov.attributes("-alpha", 0.88)
         ov.configure(bg="#101010")
         ov.geometry(f"+{px + 12}+{py + 12}")
         tk.Label(ov, text=message, font=("Segoe UI", 11, "bold"),
                  bg="#101010", fg="#00c8e0", padx=14, pady=8).pack()
         ov.update_idletasks()
+        # 팟플레이어 바로 위 z-order에만 위치 (topmost 제거)
+        try:
+            from win32_utils import find_potplayer_hwnd
+            pot_hwnd = find_potplayer_hwnd()
+            if pot_hwnd:
+                SWP_NOMOVE = 0x0002
+                SWP_NOSIZE = 0x0001
+                SWP_NOACTIVATE = 0x0010
+                ov_hwnd = _user32.GetParent(
+                    ctypes.c_void_p(int(ov.winfo_id()))
+                ) or int(ov.winfo_id())
+                _user32.SetWindowPos(
+                    ov_hwnd, pot_hwnd,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                )
+        except Exception:
+            pass
         _active_overlays.append(ov)
         def _close():
             try: ov.destroy()

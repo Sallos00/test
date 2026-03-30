@@ -250,7 +250,6 @@ class LipSyncGUIRecordOpen:
                 import time as _t, threading as _th
                 self.root.after(0, lambda: rec_status.config(text="💾 저장 중...", fg=self.TEXT_MID))
                 try:
-                    # video stop과 audio stop을 병렬로 실행
                     video_result = [None]; video_exc = [None]
                     audio_result = [None, None, None]; audio_exc = [None]
 
@@ -273,24 +272,21 @@ class LipSyncGUIRecordOpen:
 
                     tmp_video = video_result[0]
                     audio_arr, audio_sr, audio_ch = audio_result
-
                     out = state.get("out_path") or os.path.join(ensure_subdir("Video"), f"record_{_t.strftime('%Y%m%d_%H%M%S')}.mp4")
                     self.root.after(0, lambda: rec_status.config(text="⏳ 오디오 병합 중...", fg=self.TEXT_MID))
                     from gui_record_backend import _save_mp4
                     _save_mp4(tmp_video, audio_arr, audio_sr, audio_ch, out)
                     if os.path.isfile(out) and os.path.getsize(out) > 1024:
                         self.root.after(0, lambda: rec_status.config(
-                            text="✅ 저장 완료: Video/" + os.path.basename(out),
-                            fg=self.ACCENT3))
+                            text="✅ 저장 완료: Video/" + os.path.basename(out), fg=self.ACCENT3))
                     else:
                         self.root.after(0, lambda: rec_status.config(
                             text="⚠ 저장 실패: 파일이 비어있습니다.", fg="#e0a03c"))
                 except Exception as e:
                     import traceback, tempfile
-                    tb = traceback.format_exc()
                     try:
                         with open(os.path.join(tempfile.gettempdir(), "autosinc_record_error.txt"), "w", encoding="utf-8") as lf:
-                            lf.write(tb)
+                            lf.write(traceback.format_exc())
                     except: pass
                     self.root.after(0, lambda: rec_status.config(
                         text="⚠ 저장 실패: " + str(e)[:80], fg="#e0a03c"))
@@ -327,10 +323,8 @@ class LipSyncGUIRecordOpen:
 
                 state["audio_rec"]  = _AudioRecorder()
                 state["screen_rec"] = _ScreenRecorder()
-                # out_path를 미리 결정해서 ffmpeg가 바로 최종 경로에 쓰게 함
                 import time as _t2
-                _ts = _t2.strftime("%Y%m%d_%H%M%S")
-                _out_path = os.path.join(ensure_subdir("Video"), f"record_{_ts}.mp4")
+                _out_path = os.path.join(ensure_subdir("Video"), f"record_{_t2.strftime('%Y%m%d_%H%M%S')}.mp4")
                 state["out_path"] = _out_path
                 try:
                     state["screen_rec"].start(fps=30, out_path=_out_path)

@@ -430,6 +430,31 @@ def _printwindow_loop(hwnd, width, height, fps, running_flag, write_frame_cb):
 # ─────────────────────────────────────────────────────────────────────────────
 # 오디오 캡처
 # ─────────────────────────────────────────────────────────────────────────────
+def _get_buffer_with_qpc(cap):
+    """IAudioCaptureClient::GetBuffer — qpcPosition 포함 반환 (OBS 싱크 방식)."""
+    import ctypes as _ct
+    fn_type = _ct.WINFUNCTYPE(
+        _ct.c_long, _ct.c_void_p,
+        _ct.POINTER(_ct.c_void_p),
+        _ct.POINTER(_ct.c_uint),
+        _ct.POINTER(_ct.c_uint),
+        _ct.POINTER(_ct.c_ulonglong),
+        _ct.POINTER(_ct.c_ulonglong),
+    )
+    vt  = _ct.cast(cap, _ct.POINTER(_ct.c_void_p))[0]
+    fn  = fn_type(_ct.cast(vt, _ct.POINTER(_ct.c_void_p))[3])
+    data   = _ct.c_void_p()
+    frames = _ct.c_uint()
+    flags  = _ct.c_uint()
+    dp     = _ct.c_ulonglong()
+    qp     = _ct.c_ulonglong()
+    hr = fn(cap, _ct.byref(data), _ct.byref(frames), _ct.byref(flags),
+            _ct.byref(dp), _ct.byref(qp))
+    if hr < 0:
+        raise OSError(f"GetBuffer HRESULT=0x{hr & 0xFFFFFFFF:08X}")
+    return data, frames.value, flags.value, qp.value
+
+
 class _AudioRecorder:
     def __init__(self):
         self._frames           = []
@@ -438,10 +463,15 @@ class _AudioRecorder:
         self._running          = False
         self._thread           = None
         self.first_frame_event = threading.Event()  # 첫 오디오 패킷 수신 시 set
+        # OBS 방식: 첫 패킷 QPC 기준점 → 비디오 시작 시각과 맞추기 위한 오프셋
+        self._audio_start_qpc  = None   # 첫 GetBuffer qpcPosition (100ns 단위)
+        self._audio_start_wall = None   # 첫 패킷 수신 시점의 wall-clock
 
     def start(self, pid: int):
-        self._frames  = []
-        self._running = True
+        self._frames           = []
+        self._running          = True
+        self._audio_start_qpc  = None
+        self._audio_start_wall = None
         self.first_frame_event.clear()
         recorder = self
 
@@ -457,7 +487,7 @@ class _AudioRecorder:
                     _activate_process_loopback, _audio_client_initialize,
                     _audio_client_set_event, _audio_client_start,
                     _audio_client_stop, _get_capture_client,
-                    _get_next_packet_size, _get_buffer, _release_buffer,
+                    _get_next_packet_size, _release_buffer,
                     _com_release, AUDCLNT_BUFFERFLAGS_SILENT,
                 )
                 _log(f"오디오: _activate_process_loopback 시작 (pid={pid})")
@@ -472,6 +502,15 @@ class _AudioRecorder:
                 cap = _get_capture_client(client)
                 _audio_client_start(client)
                 _log("오디오: 캡처 시작")
+
+                # OBS win-wasapi 방식:
+                #   GetBuffer 의 qpcPosition(100ns 단위)을 첫 패킷에서 고정하고
+                #   이후 패킷은 QPC 델타로 정확한 오디오 길이를 계산한다.
+                #   WaitForSingleObject 타임아웃/지연에 의한 누적 오프셋 없이
+                #   하드웨어 클럭 기반 타임라인이 유지된다.
+                first_qpc_ref      = None
+                accumulated_frames = 0
+
                 try:
                     while recorder._running:
                         kernel32.WaitForSingleObject(h_event, 10)
@@ -483,17 +522,34 @@ class _AudioRecorder:
                                 break
                             if pkt == 0:
                                 break
-                            data, num_frames, flg = _get_buffer(cap)
+                            data, num_frames, flg, qpc_pos = _get_buffer_with_qpc(cap)
                             if num_frames > 0:
+                                # ── OBS 방식: 첫 QPC를 기준점으로 고정 ──
+                                if first_qpc_ref is None:
+                                    first_qpc_ref = qpc_pos
+                                    recorder._audio_start_qpc  = qpc_pos
+                                    recorder._audio_start_wall = time.time()
+                                    _log(f"오디오: 첫 패킷 QPC={qpc_pos}")
+                                    recorder.first_frame_event.set()
+                                else:
+                                    # QPC 델타로 예상 누적 프레임 수 계산 →
+                                    # 실제 수신 프레임과 차이가 있으면 무음으로 채워 갭 보정
+                                    qpc_elapsed_100ns = qpc_pos - first_qpc_ref
+                                    expected_frames   = int(qpc_elapsed_100ns * sr // 10_000_000)
+                                    gap = expected_frames - accumulated_frames
+                                    if 0 < gap < sr:  # 1초 미만 갭만 보정
+                                        recorder._frames.append(
+                                            np.zeros(gap * ch, dtype=np.float32))
+                                        accumulated_frames += gap
+                                        _log(f"오디오 갭 보정: {gap}프레임 무음 삽입")
+
                                 if not (flg & AUDCLNT_BUFFERFLAGS_SILENT) and data.value:
                                     buf = (ct.c_float * (num_frames * ch)).from_address(data.value)
                                     arr = np.frombuffer(buf, dtype=np.float32).copy()
                                 else:
                                     arr = np.zeros(num_frames * ch, dtype=np.float32)
                                 recorder._frames.append(arr)
-                                if len(recorder._frames) == 1:
-                                    _log("오디오: 첫 프레임 수신")
-                                    recorder.first_frame_event.set()
+                                accumulated_frames += num_frames
                             _release_buffer(cap, num_frames)
                 finally:
                     try: _audio_client_stop(client)
@@ -697,7 +753,13 @@ class _ScreenRecorder:
 # ─────────────────────────────────────────────────────────────────────────────
 # 오디오 병합
 # ─────────────────────────────────────────────────────────────────────────────
-def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_path: str):
+def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_path: str,
+                 audio_delay_sec: float = 0.0):
+    """
+    오디오+영상 병합. audio_delay_sec > 0 이면 오디오가 영상보다 늦게 시작된 것으로
+    해석해 ffmpeg -itsoffset 으로 오디오 스트림을 뒤로 밀어 싱크를 맞춘다.
+    (OBS 방식: 비디오/오디오 각각의 시작 타임스탬프 차이를 보정)
+    """
     import shutil, numpy as np
 
     ffmpeg_bin = _find_ffmpeg()
@@ -739,15 +801,40 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
         wf.write(b"data")
         wf.write(struct.pack("<I", num_samples))       # Subchunk2Size
         wf.write(pcm_bytes)
-    _log("WAV 저장 완료")
+    _log(f"WAV 저장 완료 (audio_delay={audio_delay_sec:.4f}s)")
 
-    cmd = [
-        ffmpeg_bin, "-y",
-        "-i", tmp_video, "-i", tmp_audio,
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-        "-shortest", "-movflags", "+faststart",
-        tmp_out,
-    ]
+    # OBS 방식 싱크 보정:
+    #   audio_delay_sec > 0  → 오디오가 영상보다 늦게 시작 → 오디오를 뒤로 밀기
+    #   audio_delay_sec < 0  → 오디오가 영상보다 일찍 시작 → 앞부분 샘플 잘라내기
+    delay_abs = abs(audio_delay_sec)
+    if audio_delay_sec > 0.005:
+        # 오디오를 delay 만큼 뒤로: -itsoffset 을 오디오 입력 앞에 배치
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", tmp_video,
+            "-itsoffset", f"{audio_delay_sec:.4f}", "-i", tmp_audio,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", "-movflags", "+faststart",
+            tmp_out,
+        ]
+    elif audio_delay_sec < -0.005:
+        # 오디오가 일찍 시작 → 오디오 앞부분 트림 (ss로 잘라내기)
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", tmp_video,
+            "-ss", f"{delay_abs:.4f}", "-i", tmp_audio,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", "-movflags", "+faststart",
+            tmp_out,
+        ]
+    else:
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", tmp_video, "-i", tmp_audio,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", "-movflags", "+faststart",
+            tmp_out,
+        ]
     _log(f"병합 cmd: {' '.join(cmd)}")
     with open(merge_log, "wb") as lf:
         proc = _popen_no_window(cmd, stdout=subprocess.DEVNULL, stderr=lf)
@@ -774,7 +861,8 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
         except: pass
 
 
-def _save_mp4(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_path: str):
+def _save_mp4(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_path: str,
+              audio_delay_sec: float = 0.0):
     import os
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    _merge_audio(tmp_video, audio_arr, audio_sr, audio_ch, out_path)
+    _merge_audio(tmp_video, audio_arr, audio_sr, audio_ch, out_path, audio_delay_sec)

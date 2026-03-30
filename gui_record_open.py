@@ -247,21 +247,53 @@ class LipSyncGUIRecordOpen:
             close_recording_overlay()
 
             def _save():
-                import time as _t
-                rec_status.config(text="💾 저장 중...", fg=self.TEXT_MID)
+                import time as _t, threading as _th
+                self.root.after(0, lambda: rec_status.config(text="💾 저장 중...", fg=self.TEXT_MID))
                 try:
-                    video_frames, fps, size = state["screen_rec"].stop()
-                    audio_arr, audio_sr, audio_ch = state["audio_rec"].stop()
-                    ts  = _t.strftime("%Y%m%d_%H%M%S")
-                    out = os.path.join(ensure_subdir("Video"), f"record_{ts}.mp4")
+                    # video stop과 audio stop을 병렬로 실행
+                    video_result = [None]; video_exc = [None]
+                    audio_result = [None, None, None]; audio_exc = [None]
+
+                    def _sv():
+                        try: video_result[0] = state["screen_rec"].stop()
+                        except Exception as e: video_exc[0] = e
+                    def _sa():
+                        try:
+                            arr, sr, ch = state["audio_rec"].stop()
+                            audio_result[0], audio_result[1], audio_result[2] = arr, sr, ch
+                        except Exception as e: audio_exc[0] = e
+
+                    vt = _th.Thread(target=_sv, daemon=True)
+                    at = _th.Thread(target=_sa, daemon=True)
+                    vt.start(); at.start()
+                    vt.join(timeout=20); at.join(timeout=10)
+
+                    if video_exc[0]: raise video_exc[0]
+                    if audio_exc[0]: raise audio_exc[0]
+
+                    tmp_video = video_result[0]
+                    audio_arr, audio_sr, audio_ch = audio_result
+
+                    out = state.get("out_path") or os.path.join(ensure_subdir("Video"), f"record_{_t.strftime('%Y%m%d_%H%M%S')}.mp4")
+                    self.root.after(0, lambda: rec_status.config(text="⏳ 오디오 병합 중...", fg=self.TEXT_MID))
                     from gui_record_backend import _save_mp4
-                    _save_mp4(video_frames, fps, size, audio_arr, audio_sr, audio_ch, out)
-                    self.root.after(0, lambda: rec_status.config(
-                        text="✅ 저장 완료: Video/" + os.path.basename(out),
-                        fg=self.ACCENT3))
+                    _save_mp4(tmp_video, audio_arr, audio_sr, audio_ch, out)
+                    if os.path.isfile(out) and os.path.getsize(out) > 1024:
+                        self.root.after(0, lambda: rec_status.config(
+                            text="✅ 저장 완료: Video/" + os.path.basename(out),
+                            fg=self.ACCENT3))
+                    else:
+                        self.root.after(0, lambda: rec_status.config(
+                            text="⚠ 저장 실패: 파일이 비어있습니다.", fg="#e0a03c"))
                 except Exception as e:
+                    import traceback, tempfile
+                    tb = traceback.format_exc()
+                    try:
+                        with open(os.path.join(tempfile.gettempdir(), "autosinc_record_error.txt"), "w", encoding="utf-8") as lf:
+                            lf.write(tb)
+                    except: pass
                     self.root.after(0, lambda: rec_status.config(
-                        text="⚠ 저장 실패: " + str(e), fg="#e0a03c"))
+                        text="⚠ 저장 실패: " + str(e)[:80], fg="#e0a03c"))
 
             threading.Thread(target=_save, daemon=True).start()
 
@@ -295,8 +327,13 @@ class LipSyncGUIRecordOpen:
 
                 state["audio_rec"]  = _AudioRecorder()
                 state["screen_rec"] = _ScreenRecorder()
+                # out_path를 미리 결정해서 ffmpeg가 바로 최종 경로에 쓰게 함
+                import time as _t2
+                _ts = _t2.strftime("%Y%m%d_%H%M%S")
+                _out_path = os.path.join(ensure_subdir("Video"), f"record_{_ts}.mp4")
+                state["out_path"] = _out_path
                 try:
-                    state["screen_rec"].start(fps=30)
+                    state["screen_rec"].start(fps=30, out_path=_out_path)
                 except Exception as e:
                     self.root.after(0, lambda: rec_status.config(
                         text="⚠ 화면 캡처 실패: " + str(e), fg="#e0a03c"))

@@ -1,5 +1,5 @@
 """gui_record_backend.py -- 오디오/화면 녹화 백엔드"""
-import os, time, threading
+import os, time, threading, subprocess
 try:
     import cv2
     _CV2_OK = True
@@ -357,7 +357,7 @@ class _ScreenRecorder:
         h = h - (h % 2)
         self._size = (w, h)
 
-        import tempfile, subprocess
+        import tempfile
         self._tmp_video = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
 
         cmd = [
@@ -376,7 +376,7 @@ class _ScreenRecorder:
             "-an",                    # 오디오는 나중에 별도 병합
             self._tmp_video,
         ]
-        self._ffmpeg_proc = subprocess.Popen(
+        self._ffmpeg_proc = _popen_no_window(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
@@ -612,14 +612,39 @@ class _ScreenRecorder:
 # ─────────────────────────────────────────────────────────────────────────────
 def _find_ffmpeg() -> str:
     """ffmpeg 실행 파일 경로 반환. 없으면 빈 문자열."""
-    import shutil
+    import shutil, sys
+
+    # 1. PyInstaller --onefile 번들 내부 (_MEIPASS = 압축 해제된 임시 폴더)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bundled = os.path.join(meipass, "ffmpeg.exe")
+        if os.path.isfile(bundled):
+            return bundled
+
+    # 2. exe 실행 파일과 같은 폴더 (개발 환경 or --onedir 빌드)
+    try:
+        exe_dir = os.path.dirname(sys.executable)
+        local = os.path.join(exe_dir, "ffmpeg.exe")
+        if os.path.isfile(local):
+            return local
+    except Exception:
+        pass
+
+    # 3. 소스 실행 시 스크립트 옆
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        local = os.path.join(here, "ffmpeg.exe")
+        if os.path.isfile(local):
+            return local
+    except Exception:
+        pass
+
+    # 4. 시스템 PATH
     p = shutil.which("ffmpeg")
     if p:
         return p
-    here = os.path.dirname(os.path.abspath(__file__))
-    local = os.path.join(here, "ffmpeg.exe")
-    if os.path.isfile(local):
-        return local
+
+    # 5. 일반적인 설치 위치
     for candidate in [
         r"C:\ffmpeg\bin\ffmpeg.exe",
         r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
@@ -627,7 +652,19 @@ def _find_ffmpeg() -> str:
     ]:
         if os.path.isfile(candidate):
             return candidate
+
     return ""
+
+
+def _popen_no_window(cmd, **kwargs):
+    """
+    --noconsole(윈도우 서브시스템) 빌드에서 subprocess가
+    콘솔 창을 띄우거나 실패하지 않도록 CREATE_NO_WINDOW 플래그를 추가한다.
+    """
+    import subprocess
+    CREATE_NO_WINDOW = 0x08000000
+    kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+    return subprocess.Popen(cmd, **kwargs)
 
 
 def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int,
@@ -671,9 +708,10 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int,
         "-movflags", "+faststart",
         tmp_out,
     ]
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proc = _popen_no_window(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    _, stderr_data = proc.communicate()
 
-    if result.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
+    if proc.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
         shutil.move(tmp_out, out_path)
     else:
         # 병합 실패 시 영상만이라도 저장
@@ -681,7 +719,7 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int,
         try:
             log = out_path + "_merge_error.txt"
             with open(log, "wb") as lf:
-                lf.write(result.stderr)
+                lf.write(stderr_data)
         except Exception:
             pass
 

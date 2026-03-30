@@ -41,11 +41,7 @@ def _set_log_path(directory: str):
         pass
 
 def _log(msg: str):
-    try:
-        with open(_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
-    except Exception:
-        pass
+    pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -751,11 +747,6 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
 # gui_record_open.py에서 호출하는 통합 저장 함수
 # ─────────────────────────────────────────────────────────────────────────────
 def _save_mp4(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_path: str):
-    """
-    _ScreenRecorder.stop()이 반환한 tmp_video 경로와
-    _AudioRecorder.stop()이 반환한 오디오 데이터를 받아
-    최종 out_path에 병합 저장한다.
-    """
     import os
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     _merge_audio(tmp_video, audio_arr, audio_sr, audio_ch, out_path)

@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify pyinstaller pyarmor winsdk
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify pyinstaller pyarmor
 
       - name: ffmpeg 다운로드 (번들용)
         run: |
@@ -106,12 +106,6 @@ jobs:
           --hidden-import="hashlib"
           --hidden-import="platform"
           --hidden-import="pyarmor_runtime_000000"
-          --hidden-import="winsdk"
-          --hidden-import="winsdk.windows.graphics.capture"
-          --hidden-import="winsdk.windows.graphics.directx"
-          --hidden-import="winsdk.windows.graphics.directx.direct3d11"
-          --hidden-import="winsdk.windows.graphics.imaging"
-          --collect-all winsdk
           --collect-data cv2
           --add-data "lbpcascade_animeface.xml;."
           --add-data "app.ico;."

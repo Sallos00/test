@@ -494,7 +494,8 @@ class LipSyncGUIRun:
                     self._log_lines.append(line)
                     existing.add(line)
 
-        self.root.after(100, self._refresh)
+        interval = 100 if self._running else 300
+        self.root.after(interval, self._refresh)
 
     # ── 인증 ──────────────────────────────────────────────────────────────────
     def _destroy_app_root(self):

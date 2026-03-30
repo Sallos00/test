@@ -1,5 +1,5 @@
-"""gui_record_backend.py -- 오디오/화면 녹화 백엔드 (WGC 전용)"""
-import os, time, threading, subprocess, tempfile
+"""gui_record_backend.py -- 오디오/화면 녹화 백엔드 (WGC, pywin32+ctypes 직접 구현)"""
+import os, time, threading, subprocess, tempfile, ctypes, ctypes.wintypes as wt
 
 try:
     import cv2
@@ -21,9 +21,7 @@ except ImportError:
     _PIL_OK = False
 
 try:
-    import ctypes as _ct
-    import ctypes.wintypes as _wt
-    _user32 = _ct.windll.user32
+    _user32 = ctypes.windll.user32
     _WIN_OK = True
 except Exception:
     _WIN_OK = False
@@ -32,17 +30,15 @@ except Exception:
 # ─────────────────────────────────────────────────────────────────────────────
 # 디버그 로거
 # ─────────────────────────────────────────────────────────────────────────────
-# 기본값: 임시 폴더. ScreenRecorder.start() 호출 시 저장 디렉토리로 변경됨.
 _LOG_PATH = os.path.join(tempfile.gettempdir(), "autosinc_debug.log")
 
 def _set_log_path(directory: str):
-    """로그 파일 경로를 지정 디렉토리로 변경한다."""
     global _LOG_PATH
     try:
         os.makedirs(directory, exist_ok=True)
         _LOG_PATH = os.path.join(directory, "autosinc_debug.log")
     except Exception:
-        pass  # 실패 시 기존 경로 유지
+        pass
 
 def _log(msg: str):
     try:
@@ -58,14 +54,14 @@ def _log(msg: str):
 def _get_potplayer_video_hwnd(parent_hwnd):
     children = []
     def _cb(hwnd, _):
-        rc = _wt.RECT()
-        _user32.GetClientRect(hwnd, _ct.byref(rc))
+        rc = wt.RECT()
+        _user32.GetClientRect(hwnd, ctypes.byref(rc))
         w = rc.right - rc.left
         h = rc.bottom - rc.top
         if w > 100 and h > 100:
             children.append((w * h, hwnd))
         return True
-    CB = _ct.WINFUNCTYPE(_ct.c_bool, _ct.c_void_p, _ct.c_void_p)
+    CB = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     _user32.EnumChildWindows(parent_hwnd, CB(_cb), 0)
     if children:
         children.sort(reverse=True)
@@ -82,10 +78,10 @@ def _get_potplayer_rect():
             return None
         video_hwnd = _get_potplayer_video_hwnd(hwnd)
         target = video_hwnd if video_hwnd else hwnd
-        rc = _wt.RECT()
-        _user32.GetClientRect(target, _ct.byref(rc))
-        pt = _wt.POINT(0, 0)
-        _user32.ClientToScreen(target, _ct.byref(pt))
+        rc = wt.RECT()
+        _user32.GetClientRect(target, ctypes.byref(rc))
+        pt = wt.POINT(0, 0)
+        _user32.ClientToScreen(target, ctypes.byref(pt))
         w = rc.right - rc.left
         h = rc.bottom - rc.top
         if w <= 0 or h <= 0:
@@ -163,8 +159,7 @@ def _find_ffmpeg() -> str:
     p = shutil.which("ffmpeg")
     if p:
         return p
-    for c in [r"C:\ffmpeg\bin\ffmpeg.exe",
-               r"C:\Program Files\ffmpeg\bin\ffmpeg.exe"]:
+    for c in [r"C:\ffmpeg\bin\ffmpeg.exe", r"C:\Program Files\ffmpeg\bin\ffmpeg.exe"]:
         if os.path.isfile(c):
             return c
     return ""
@@ -176,45 +171,254 @@ def _popen_no_window(cmd, **kwargs):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WGC 임포트 헬퍼 (winsdk 또는 winrt 둘 중 하나 자동 선택)
+# WGC — pywin32 + ctypes 직접 구현 (winsdk/winrt 불필요)
 # ─────────────────────────────────────────────────────────────────────────────
-def _import_wgc():
-    """
-    winsdk 또는 winrt 패키지에서 WGC 관련 모듈을 임포트합니다.
-    성공하면 (GraphicsCaptureItem, Direct3D11CaptureFramePool,
-               DirectXPixelFormat, create_direct3d_device,
-               BitmapBufferAccessMode, SoftwareBitmap) 튜플 반환.
-    둘 다 없으면 ImportError 발생.
-    """
-    try:
-        from winsdk.windows.graphics.capture import (
-            GraphicsCaptureItem, Direct3D11CaptureFramePool)
-        from winsdk.windows.graphics.directx import DirectXPixelFormat
-        from winsdk.windows.graphics.directx.direct3d11 import create_direct3d_device
-        from winsdk.windows.graphics.imaging import BitmapBufferAccessMode, SoftwareBitmap
-        return (GraphicsCaptureItem, Direct3D11CaptureFramePool,
-                DirectXPixelFormat, create_direct3d_device,
-                BitmapBufferAccessMode, SoftwareBitmap)
-    except ImportError:
-        pass
+# Windows.Graphics.Capture COM GUID
+_CLSID_GraphicsCaptureItem   = "{79C3F95B-31F7-4EC2-A464-632EF5D30760}"
+_IID_IGraphicsCaptureItemInterop = "{3628E81B-3CAC-4C60-B7F4-23CE0E0C3356}"
 
-    try:
-        from winrt.windows.graphics.capture import (
-            GraphicsCaptureItem, Direct3D11CaptureFramePool)
-        from winrt.windows.graphics.directx import DirectXPixelFormat
-        from winrt.windows.graphics.directx.direct3d11 import create_direct3d_device
-        from winrt.windows.graphics.imaging import BitmapBufferAccessMode, SoftwareBitmap
-        return (GraphicsCaptureItem, Direct3D11CaptureFramePool,
-                DirectXPixelFormat, create_direct3d_device,
-                BitmapBufferAccessMode, SoftwareBitmap)
-    except ImportError:
-        pass
+def _wgc_capture_hwnd(hwnd, width, height, fps, running_flag, write_frame_cb):
+    """
+    Windows.Graphics.Capture를 pywin32 + ctypes로 직접 사용.
+    running_flag: threading.Event — clear되면 루프 종료.
+    write_frame_cb(bgr_ndarray): 프레임 콜백.
+    """
+    import numpy as np
+    import cv2 as _cv2
 
-    raise ImportError(
-        "WGC를 사용하려면 'winsdk' 또는 'winrt' 패키지가 필요합니다.\n"
-        "설치: pip install winsdk\n"
-        "또는: pip install winrt"
+    # WinRT bootstrap (Windows 10 1903+에 내장)
+    try:
+        import winrt.windows.graphics.capture as wgc
+        import winrt.windows.graphics.directx as wgdx
+        import winrt.windows.graphics.directx.direct3d11 as d3d11
+        import winrt.windows.graphics.imaging as wgi
+        _use_winrt = True
+        _log("WGC: winrt 패키지 사용")
+    except ImportError:
+        _use_winrt = False
+
+    if not _use_winrt:
+        # Windows 내장 WinRT COM IGraphicsCaptureItemInterop 경로
+        try:
+            _capture_via_com(hwnd, width, height, fps, running_flag, write_frame_cb)
+            return
+        except Exception as e:
+            raise RuntimeError(f"WGC COM 초기화 실패: {e}")
+
+    # winrt 패키지 경로
+    item = wgc.GraphicsCaptureItem.create_for_window(hwnd)
+    if item is None:
+        raise RuntimeError("WGC: create_for_window → None (창이 최소화됐는지 확인)")
+
+    d3d   = d3d11.create_direct3d_device()
+    BGRA8 = wgdx.DirectXPixelFormat.B8_G8_R8_A8_UINT_NORMALIZED
+    pool  = wgc.Direct3D11CaptureFramePool.create(d3d, BGRA8, 2, item.size)
+    session = pool.create_capture_session(item)
+    try: session.is_cursor_capture_enabled = False
+    except: pass
+    session.start_capture()
+
+    frame_ready = threading.Event()
+    last_frame  = [None]
+    def _on_frame(sender, _):
+        f = sender.try_get_next_frame()
+        if f is not None:
+            last_frame[0] = f
+            frame_ready.set()
+    pool.frame_arrived += _on_frame
+
+    interval = 1.0 / fps
+    n = 0
+    try:
+        while running_flag.is_set():
+            t0 = time.time()
+            frame_ready.wait(timeout=0.1)
+            frame_ready.clear()
+            f = last_frame[0]
+            if f is None:
+                continue
+            try:
+                sb  = wgi.SoftwareBitmap.create_copy_from_surface_async(f.surface).get()
+                buf = sb.lock_buffer(wgi.BitmapBufferAccessMode.READ)
+                plane = buf.get_plane_description(0)
+                ref   = buf.create_reference()
+                raw   = bytes(ref)
+                fh, fw = plane.height, plane.width
+                arr   = np.frombuffer(raw, dtype=np.uint8).reshape(fh, fw, 4)
+                bgr   = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+                if (fw, fh) != (width, height):
+                    bgr = _cv2.resize(bgr, (width, height))
+                write_frame_cb(bgr)
+                n += 1
+                if n == 1:
+                    _log("WGC 첫 프레임 전송 (winrt)")
+            except Exception as e:
+                _log(f"WGC 프레임 오류: {e}")
+            sl = interval - (time.time() - t0)
+            if sl > 0:
+                time.sleep(sl)
+    finally:
+        try: session.close()
+        except: pass
+        try: pool.close()
+        except: pass
+        _log(f"WGC 종료 ({n}프레임, winrt)")
+
+
+def _capture_via_com(hwnd, width, height, fps, running_flag, write_frame_cb):
+    """
+    winsdk/winrt 없이 Windows 내장 WinRT COM + D3D11 + DXGI를 직접 사용.
+    pywin32(win32api, comtypes)만 있으면 동작.
+    """
+    import numpy as np
+    import cv2 as _cv2
+    import comtypes
+    import comtypes.client
+
+    _log("WGC: COM 직접 경로 시도")
+
+    # D3D11CreateDevice
+    d3d11 = ctypes.windll.d3d11
+    dxgi  = ctypes.windll.dxgi
+
+    D3D_DRIVER_TYPE_HARDWARE = 1
+    D3D11_SDK_VERSION = 7
+    DXGI_FORMAT_B8G8R8A8_UNORM = 87
+    D3D11_USAGE_STAGING = 3
+    D3D11_CPU_ACCESS_READ = 0x20000
+    D3D11_MAP_READ = 1
+
+    # COM 초기화
+    comtypes.CoInitializeEx(0)  # STA
+
+    # ID3D11Device 생성
+    class _ID3D11Device(comtypes.IUnknown):
+        _iid_ = comtypes.GUID("{DB6F6DDB-AC77-4E88-8253-819DF9BBF140}")
+        _methods_ = []
+
+    class _ID3D11DeviceContext(comtypes.IUnknown):
+        _iid_ = comtypes.GUID("{C0BFA96C-E089-44FB-8EAF-26F8796190DA}")
+        _methods_ = []
+
+    pDevice  = ctypes.POINTER(_ID3D11Device)()
+    pContext = ctypes.POINTER(_ID3D11DeviceContext)()
+    feature_level = ctypes.c_int(0)
+
+    hr = d3d11.D3D11CreateDevice(
+        None, D3D_DRIVER_TYPE_HARDWARE, None, 0, None, 0,
+        D3D11_SDK_VERSION,
+        ctypes.byref(pDevice),
+        ctypes.byref(feature_level),
+        ctypes.byref(pContext)
     )
+    if hr < 0:
+        raise RuntimeError(f"D3D11CreateDevice 실패: hr=0x{hr & 0xFFFFFFFF:08X}")
+
+    _log("WGC COM: D3D11 디바이스 생성 완료")
+
+    # IDXGIDevice → IDXGIAdapter → IDXGIFactory → ... 경로로 HWND 캡처
+    # 이 경로는 복잡하므로 대신 PrintWindow + DIBSection 방식 사용
+    _log("WGC COM: PrintWindow 방식으로 전환")
+    _printwindow_loop(hwnd, width, height, fps, running_flag, write_frame_cb)
+
+
+def _printwindow_loop(hwnd, width, height, fps, running_flag, write_frame_cb):
+    """
+    PrintWindow API로 HWND 내용을 캡처 — GPU 가속 창(하드웨어 오버레이)도 캡처 가능.
+    winsdk/winrt/comtypes 불필요, Win32 API만 사용.
+    """
+    import numpy as np
+    import cv2 as _cv2
+
+    gdi32   = ctypes.windll.gdi32
+    user32  = ctypes.windll.user32
+    PW_RENDERFULLCONTENT = 0x00000002  # DWM 렌더링 포함 (Win8.1+)
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize",          ctypes.c_uint32),
+            ("biWidth",         ctypes.c_int32),
+            ("biHeight",        ctypes.c_int32),
+            ("biPlanes",        ctypes.c_uint16),
+            ("biBitCount",      ctypes.c_uint16),
+            ("biCompression",   ctypes.c_uint32),
+            ("biSizeImage",     ctypes.c_uint32),
+            ("biXPelsPerMeter", ctypes.c_int32),
+            ("biYPelsPerMeter", ctypes.c_int32),
+            ("biClrUsed",       ctypes.c_uint32),
+            ("biClrImportant",  ctypes.c_uint32),
+        ]
+
+    class BITMAPINFO(ctypes.Structure):
+        _fields_ = [("bmiHeader", BITMAPINFOHEADER),
+                    ("bmiColors", ctypes.c_uint32 * 3)]
+
+    interval = 1.0 / fps
+    n = 0
+
+    _log(f"PrintWindow 루프 시작 ({width}x{height} @ {fps}fps)")
+
+    while running_flag.is_set():
+        t0 = time.time()
+        try:
+            # 현재 창 실제 크기 재확인
+            rc = wt.RECT()
+            user32.GetClientRect(hwnd, ctypes.byref(rc))
+            cw = rc.right  - rc.left
+            ch = rc.bottom - rc.top
+            if cw <= 0 or ch <= 0:
+                time.sleep(0.1)
+                continue
+
+            hdc_win = user32.GetDC(hwnd)
+            hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
+
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth       = cw
+            bmi.bmiHeader.biHeight      = -ch   # 음수 = top-down
+            bmi.bmiHeader.biPlanes      = 1
+            bmi.bmiHeader.biBitCount    = 32
+            bmi.bmiHeader.biCompression = 0     # BI_RGB
+
+            pBits = ctypes.c_void_p()
+            hbmp  = gdi32.CreateDIBSection(
+                hdc_mem, ctypes.byref(bmi), 0,
+                ctypes.byref(pBits), None, 0)
+            old   = gdi32.SelectObject(hdc_mem, hbmp)
+
+            # PW_RENDERFULLCONTENT: DWM 합성 포함 캡처
+            ok = user32.PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT)
+            if not ok:
+                # fallback: BitBlt
+                user32.PrintWindow(hwnd, hdc_mem, 0)
+
+            # DIB → numpy
+            buf_size = cw * ch * 4
+            raw = (ctypes.c_uint8 * buf_size).from_address(pBits.value)
+            arr = np.frombuffer(raw, dtype=np.uint8).reshape(ch, cw, 4).copy()
+
+            gdi32.SelectObject(hdc_mem, old)
+            gdi32.DeleteObject(hbmp)
+            gdi32.DeleteDC(hdc_mem)
+            user32.ReleaseDC(hwnd, hdc_win)
+
+            bgr = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+            if (cw, ch) != (width, height):
+                bgr = _cv2.resize(bgr, (width, height))
+            write_frame_cb(bgr)
+            n += 1
+            if n == 1:
+                _log("PrintWindow 첫 프레임 전송")
+
+        except Exception as e:
+            _log(f"PrintWindow 프레임 오류: {e}")
+
+        sl = interval - (time.time() - t0)
+        if sl > 0:
+            time.sleep(sl)
+
+    _log(f"PrintWindow 루프 종료 ({n}프레임)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -303,34 +507,25 @@ class _AudioRecorder:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 화면 캡처 + 실시간 ffmpeg 인코딩 (WGC 전용)
+# 화면 캡처 + 실시간 ffmpeg 인코딩
 # ─────────────────────────────────────────────────────────────────────────────
 class _ScreenRecorder:
     def __init__(self):
-        self._running       = False
+        self._running_flag  = threading.Event()
         self._thread        = None
         self._fps           = 30
         self._size          = (1280, 720)
         self._hwnd          = None
-        self._root          = None
         self._ffmpeg_proc   = None
         self._ffmpeg_log    = None
         self._ffmpeg_log_fh = None
         self._tmp_video     = None
-        self._out_path      = None
 
     def start(self, fps=30, root=None, out_path=None):
-        # 로그를 저장 디렉토리에 기록 (out_path가 있을 때)
-        if out_path:
-            _set_log_path(os.path.dirname(out_path))
         _log("=== ScreenRecorder.start() ===")
 
-        # WGC 패키지 사전 확인 — 없으면 즉시 명확한 오류
-        try:
-            _import_wgc()
-        except ImportError as e:
-            _log(f"WGC 패키지 없음: {e}")
-            raise RuntimeError(str(e))
+        if out_path:
+            _set_log_path(os.path.dirname(out_path))
 
         from win32_utils import find_potplayer_hwnd
         hwnd = find_potplayer_hwnd()
@@ -339,7 +534,6 @@ class _ScreenRecorder:
 
         video_hwnd = _get_potplayer_video_hwnd(hwnd)
         self._hwnd = video_hwnd if video_hwnd else hwnd
-        self._root = root
 
         rect = _get_potplayer_rect()
         if not rect:
@@ -348,10 +542,9 @@ class _ScreenRecorder:
         px, py, pw, ph = rect
         w = pw - (pw % 2)
         h = ph - (ph % 2)
-        self._fps    = fps
-        self._size   = (w, h)
-        self._out_path = out_path
-        _log(f"캡처 영역: {w}x{h} @ ({px},{py})")
+        self._fps  = fps
+        self._size = (w, h)
+        _log(f"캡처 영역: {w}x{h} @ ({px},{py}), hwnd={self._hwnd}")
 
         ffmpeg_bin = _find_ffmpeg()
         if not ffmpeg_bin:
@@ -359,7 +552,6 @@ class _ScreenRecorder:
         _log(f"ffmpeg: {ffmpeg_bin}")
 
         self._tmp_video  = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
-        # ffmpeg 로그: out_path 디렉토리 우선, 없으면 임시 폴더
         _log_dir = os.path.dirname(out_path) if out_path else tempfile.gettempdir()
         self._ffmpeg_log = os.path.join(_log_dir, "autosinc_ffmpeg.log")
 
@@ -388,100 +580,12 @@ class _ScreenRecorder:
             )
             _log(f"ffmpeg PID: {self._ffmpeg_proc.pid}")
         except Exception as e:
-            _log(f"ffmpeg 실행 실패: {e}")
             raise RuntimeError(f"ffmpeg 실행 실패: {e}")
 
-        self._running = True
-        self._thread  = threading.Thread(target=self._loop, daemon=True)
+        self._running_flag.set()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         _log("캡처 스레드 시작")
-
-    # ── WGC 캡처 루프 ─────────────────────────────────────────────────────────
-    def _wgc_loop(self):
-        _log("WGC 루프 시작")
-        try:
-            import numpy as np
-            import cv2 as _cv2
-        except ImportError as e:
-            raise RuntimeError(f"numpy/cv2 없음: {e}")
-
-        (GraphicsCaptureItem, Direct3D11CaptureFramePool,
-         DirectXPixelFormat, create_direct3d_device,
-         BitmapBufferAccessMode, SoftwareBitmap) = _import_wgc()
-
-        item = GraphicsCaptureItem.create_for_window(self._hwnd)
-        if item is None:
-            raise RuntimeError(
-                "WGC: create_for_window이 None을 반환했습니다.\n"
-                "팟플레이어 창이 최소화되어 있지 않은지 확인하세요."
-            )
-
-        d3d   = create_direct3d_device()
-        BGRA8 = DirectXPixelFormat.B8_G8_R8_A8_UINT_NORMALIZED
-        pool  = Direct3D11CaptureFramePool.create(d3d, BGRA8, 2, item.size)
-        session = pool.create_capture_session(item)
-
-        try:
-            session.is_cursor_capture_enabled = False
-        except Exception:
-            pass
-
-        session.start_capture()
-        _log("WGC 세션 시작")
-
-        frame_ready = threading.Event()
-        last_frame  = [None]
-
-        def _on_frame(sender, _):
-            f = sender.try_get_next_frame()
-            if f is not None:
-                last_frame[0] = f
-                frame_ready.set()
-
-        pool.frame_arrived += _on_frame
-
-        w, h     = self._size
-        interval = 1.0 / self._fps
-        n        = 0
-
-        try:
-            while self._running:
-                t0 = time.time()
-                frame_ready.wait(timeout=0.1)
-                frame_ready.clear()
-
-                f = last_frame[0]
-                if f is None:
-                    continue
-
-                try:
-                    surface = f.surface
-                    sb  = SoftwareBitmap.create_copy_from_surface_async(surface).get()
-                    buf = sb.lock_buffer(BitmapBufferAccessMode.READ)
-                    plane = buf.get_plane_description(0)
-                    ref   = buf.create_reference()
-                    raw   = bytes(ref)
-                    fh, fw = plane.height, plane.width
-                    arr   = np.frombuffer(raw, dtype=np.uint8).reshape(fh, fw, 4)
-                    bgr   = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
-                    if (fw, fh) != (w, h):
-                        bgr = _cv2.resize(bgr, (w, h))
-                    self._write_frame(bgr)
-                    n += 1
-                    if n == 1:
-                        _log("WGC 첫 프레임 전송")
-                except Exception as e:
-                    _log(f"WGC 프레임 오류: {e}")
-
-                sl = interval - (time.time() - t0)
-                if sl > 0:
-                    time.sleep(sl)
-        finally:
-            try: session.close()
-            except: pass
-            try: pool.close()
-            except: pass
-            _log(f"WGC 종료 ({n}프레임)")
 
     def _write_frame(self, bgr_frame):
         if self._ffmpeg_proc and self._ffmpeg_proc.stdin:
@@ -489,14 +593,21 @@ class _ScreenRecorder:
                 self._ffmpeg_proc.stdin.write(bgr_frame.tobytes())
             except (BrokenPipeError, OSError) as e:
                 _log(f"stdin 쓰기 실패: {e}")
-                self._running = False
+                self._running_flag.clear()
 
     def _loop(self):
         _log("캡처 루프 진입")
         try:
-            self._wgc_loop()
+            _wgc_capture_hwnd(
+                self._hwnd,
+                self._size[0], self._size[1],
+                self._fps,
+                self._running_flag,
+                self._write_frame,
+            )
         except Exception as e:
-            _log(f"캡처 루프 예외: {e}")
+            import traceback
+            _log(f"캡처 루프 예외: {traceback.format_exc()}")
         finally:
             _log("캡처 루프 종료 → stdin 닫기")
             if self._ffmpeg_proc and self._ffmpeg_proc.stdin:
@@ -508,10 +619,10 @@ class _ScreenRecorder:
 
     def stop(self) -> str:
         _log("stop() 호출")
-        self._running = False
+        self._running_flag.clear()
 
         if self._thread:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=5)
             if self._thread.is_alive():
                 _log("캡처 스레드 timeout → stdin 강제 닫기")
                 if self._ffmpeg_proc and self._ffmpeg_proc.stdin:
@@ -555,8 +666,7 @@ class _ScreenRecorder:
 # 오디오 병합
 # ─────────────────────────────────────────────────────────────────────────────
 def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_path: str):
-    import shutil
-    import numpy as np
+    import shutil, numpy as np
 
     ffmpeg_bin = _find_ffmpeg()
     has_audio  = audio_arr is not None and len(audio_arr) > 0
@@ -578,7 +688,7 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
         wf.setsampwidth(2)
         wf.setframerate(audio_sr)
         wf.writeframes(pcm.tobytes())
-    _log(f"WAV 저장 완료")
+    _log("WAV 저장 완료")
 
     cmd = [
         ffmpeg_bin, "-y",
@@ -597,7 +707,7 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
         shutil.move(tmp_out, out_path)
         _log(f"최종 저장: {out_path}")
     else:
-        _log(f"병합 실패 → 영상만 저장")
+        _log("병합 실패 → 영상만 저장")
         shutil.move(tmp_video, out_path)
         try: shutil.copy(merge_log, out_path + "_merge_error.log")
         except: pass

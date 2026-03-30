@@ -7,6 +7,7 @@ from gui_record_backend import (
     _get_potplayer_rect, _get_potplayer_video_hwnd, _show_overlay,
     _hide_all_overlays, _show_all_overlays,
     _AudioRecorder, _ScreenRecorder, _merge_audio, _find_ffmpeg,
+    _log,
 )
 
 class RecordCapturePopup:
@@ -515,7 +516,8 @@ class RecordCapturePopup:
                 except Exception:
                     pass
                 short = str(e)[:80]
-                msg = f"⚠ 저장 실패: {short}"
+                msg = (f"⚠ 저장 실패: {short}\n"
+                       f"로그: %TEMP%\\autosinc_debug.log / autosinc_ffmpeg.log")
                 g.root.after(0, lambda m=msg: self._rec_status.config(text=m, fg="#e0a03c"))
 
         threading.Thread(target=_finish, daemon=True).start()
@@ -564,68 +566,51 @@ class RecordCapturePopup:
             self._cap_status.config(text=f"⚠ 캡처 실패: {e}", fg="#e0a03c")
 
     def _try_wgc_capture(self, out_path: str) -> bool:
-        """
-        WGC로 팟플레이어 HWND를 한 프레임 캡처해 PNG로 저장.
-        성공하면 True, pywinrt 없거나 실패하면 False.
-        """
+        """WGC로 팟플레이어 한 프레임 캡처 → PNG 저장. 실패 시 False."""
         try:
             from win32_utils import find_potplayer_hwnd
             import numpy as np
             import cv2 as _cv2
+            from PIL import Image
 
             hwnd = find_potplayer_hwnd()
-            if hwnd is None:
+            if not hwnd:
                 return False
             video_hwnd = _get_potplayer_video_hwnd(hwnd)
             target = video_hwnd if video_hwnd else hwnd
 
-            # pywinrt 두 네임스페이스 모두 시도
-            GraphicsCaptureItem = Direct3D11CaptureFramePool = None
-            DirectXPixelFormat  = create_direct3d_device = None
-            BitmapBufferAccessMode = SoftwareBitmap = None
             try:
                 from winsdk.windows.graphics.capture import (
                     GraphicsCaptureItem, Direct3D11CaptureFramePool)
                 from winsdk.windows.graphics.directx import DirectXPixelFormat
                 from winsdk.windows.graphics.directx.direct3d11 import create_direct3d_device
-                from winsdk.windows.graphics.imaging import (
-                    BitmapBufferAccessMode, SoftwareBitmap)
+                from winsdk.windows.graphics.imaging import BitmapBufferAccessMode, SoftwareBitmap
             except ImportError:
-                try:
-                    from winrt.windows.graphics.capture import (
-                        GraphicsCaptureItem, Direct3D11CaptureFramePool)
-                    from winrt.windows.graphics.directx import DirectXPixelFormat
-                    from winrt.windows.graphics.directx.direct3d11 import create_direct3d_device
-                    from winrt.windows.graphics.imaging import (
-                        BitmapBufferAccessMode, SoftwareBitmap)
-                except ImportError:
-                    return False
+                from winrt.windows.graphics.capture import (
+                    GraphicsCaptureItem, Direct3D11CaptureFramePool)
+                from winrt.windows.graphics.directx import DirectXPixelFormat
+                from winrt.windows.graphics.directx.direct3d11 import create_direct3d_device
+                from winrt.windows.graphics.imaging import BitmapBufferAccessMode, SoftwareBitmap
 
             item = GraphicsCaptureItem.create_for_window(target)
             if item is None:
                 return False
 
-            d3d      = create_direct3d_device()
-            BGRA8    = DirectXPixelFormat.B8_G8_R8_A8_UINT_NORMALIZED
-            item_size = item.size
-            pool     = Direct3D11CaptureFramePool.create(d3d, BGRA8, 1, item_size)
-            session  = pool.create_capture_session(item)
-            try:
-                session.is_cursor_capture_enabled = False
-            except Exception:
-                pass
+            d3d   = create_direct3d_device()
+            BGRA8 = DirectXPixelFormat.B8_G8_R8_A8_UINT_NORMALIZED
+            pool  = Direct3D11CaptureFramePool.create(d3d, BGRA8, 1, item.size)
+            session = pool.create_capture_session(item)
+            try: session.is_cursor_capture_enabled = False
+            except: pass
             session.start_capture()
 
-            import threading as _th
-            got = _th.Event()
+            got = threading.Event()
             frame_box = [None]
-
             def _on_frame(sender, _):
                 f = sender.try_get_next_frame()
                 if f is not None:
                     frame_box[0] = f
                     got.set()
-
             pool.frame_arrived += _on_frame
             got.wait(timeout=2.0)
             session.close()
@@ -636,7 +621,7 @@ class RecordCapturePopup:
                 return False
 
             surface = f.surface
-            sb = SoftwareBitmap.create_copy_from_surface_async(surface).get()
+            sb    = SoftwareBitmap.create_copy_from_surface_async(surface).get()
             buf   = sb.lock_buffer(BitmapBufferAccessMode.READ)
             plane = buf.get_plane_description(0)
             ref   = buf.create_reference()
@@ -644,12 +629,10 @@ class RecordCapturePopup:
             h, w  = plane.height, plane.width
             arr   = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)
             bgr   = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
-            rgb   = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB)
-            from PIL import Image
-            Image.fromarray(rgb).save(out_path, "PNG")
+            Image.fromarray(_cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB)).save(out_path, "PNG")
             return True
-
-        except Exception:
+        except Exception as e:
+            _log(f"WGC 캡처 실패: {e}")
             return False
 
     # ── 닫기 ───────────────────────────────────────────────────────────────

@@ -411,15 +411,17 @@ def _printwindow_loop(hwnd, width, height, fps, running_flag, write_frame_cb):
 # ─────────────────────────────────────────────────────────────────────────────
 class _AudioRecorder:
     def __init__(self):
-        self._frames  = []
-        self._sr      = 48000
-        self._ch      = 2
-        self._running = False
-        self._thread  = None
+        self._frames           = []
+        self._sr               = 48000
+        self._ch               = 2
+        self._running          = False
+        self._thread           = None
+        self.first_frame_event = threading.Event()  # 첫 오디오 패킷 수신 시 set
 
     def start(self, pid: int):
         self._frames  = []
         self._running = True
+        self.first_frame_event.clear()
         recorder = self
 
         def _session_mta():
@@ -470,6 +472,7 @@ class _AudioRecorder:
                                 recorder._frames.append(arr)
                                 if len(recorder._frames) == 1:
                                     _log("오디오: 첫 프레임 수신")
+                                    recorder.first_frame_event.set()
                             _release_buffer(cap, num_frames)
                 finally:
                     try: _audio_client_stop(client)

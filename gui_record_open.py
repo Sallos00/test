@@ -19,7 +19,6 @@ class LipSyncGUIRecordOpen:
         popup.title("녹화 및 캡처")
         popup.resizable(False, False)
         popup.configure(bg=self.BG)
-        popup.grab_set()
         self._place_popup(popup, pw, ph)
 
         F_TITLE = max(9,  round(11 * r))
@@ -216,13 +215,14 @@ class LipSyncGUIRecordOpen:
         def show_recording_overlay():
             try:
                 from gui_record_backend import _get_potplayer_rect
+                from win32_utils import find_potplayer_hwnd
+                import ctypes
                 rect = _get_potplayer_rect()
                 if rect is None:
                     return
                 px, py = rect[0], rect[1]
                 ov = tk.Toplevel(self.root)
                 ov.overrideredirect(True)
-                ov.attributes("-topmost", True)
                 ov.attributes("-alpha", 0.88)
                 ov.configure(bg="#101010")
                 ov.geometry(f"+{px + 12}+{py + 12}")
@@ -231,6 +231,29 @@ class LipSyncGUIRecordOpen:
                          bg="#101010", fg="#00c8e0",
                          padx=14, pady=8).pack()
                 ov.update_idletasks()
+                # 팟플레이어 바로 위 z-order에만 위치 (topmost 제거)
+                # SetWindowPos로 팟플레이어 hwnd 바로 위에 삽입
+                try:
+                    pot_hwnd = find_potplayer_hwnd()
+                    if pot_hwnd:
+                        HWND_NOTOPMOST = -2
+                        SWP_NOMOVE = 0x0002
+                        SWP_NOSIZE = 0x0001
+                        SWP_NOACTIVATE = 0x0010
+                        ov_hwnd = ctypes.windll.user32.FindWindowW(None, None)
+                        ov_hwnd = int(ov.wm_frame(), 16) if hasattr(ov, 'wm_frame') else 0
+                        # Tkinter HWND 추출
+                        ov_hwnd = ctypes.windll.user32.GetParent(
+                            ctypes.c_void_p(int(ov.winfo_id()))
+                        ) or int(ov.winfo_id())
+                        # 팟플레이어 바로 위(위에 삽입)
+                        ctypes.windll.user32.SetWindowPos(
+                            ov_hwnd, pot_hwnd,
+                            0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                        )
+                except Exception:
+                    pass
                 state["overlay"] = ov
             except Exception:
                 pass

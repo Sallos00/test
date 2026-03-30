@@ -360,69 +360,50 @@ def _printwindow_loop(hwnd, width, height, fps, running_flag, write_frame_cb):
     interval = 1.0 / fps
     n = 0
 
-    _log(f"PrintWindow 루프 시작 ({width}x{height} @ {fps}fps)")
+    # GDI 리소스를 루프 밖에서 한 번만 생성해 매 프레임 재사용 (성능 최적화)
+    hdc_win = user32.GetDC(hwnd)
+    hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
 
-    while running_flag.is_set():
-        t0 = time.time()
-        try:
-            # 현재 창 실제 크기 재확인
-            rc = wt.RECT()
-            user32.GetClientRect(hwnd, ctypes.byref(rc))
-            cw = rc.right  - rc.left
-            ch = rc.bottom - rc.top
-            if cw <= 0 or ch <= 0:
-                time.sleep(0.1)
-                continue
+    bmi = BITMAPINFO()
+    bmi.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
+    bmi.bmiHeader.biWidth       = width
+    bmi.bmiHeader.biHeight      = -height
+    bmi.bmiHeader.biPlanes      = 1
+    bmi.bmiHeader.biBitCount    = 32
+    bmi.bmiHeader.biCompression = 0
 
-            hdc_win = user32.GetDC(hwnd)
-            hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
+    pBits = ctypes.c_void_p()
+    hbmp  = gdi32.CreateDIBSection(
+        hdc_mem, ctypes.byref(bmi), 0,
+        ctypes.byref(pBits), None, 0)
+    gdi32.SelectObject(hdc_mem, hbmp)
 
-            bmi = BITMAPINFO()
-            bmi.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
-            bmi.bmiHeader.biWidth       = cw
-            bmi.bmiHeader.biHeight      = -ch   # 음수 = top-down
-            bmi.bmiHeader.biPlanes      = 1
-            bmi.bmiHeader.biBitCount    = 32
-            bmi.bmiHeader.biCompression = 0     # BI_RGB
+    buf_size = width * height * 4
+    frame_buf = (ctypes.c_uint8 * buf_size)
 
-            pBits = ctypes.c_void_p()
-            hbmp  = gdi32.CreateDIBSection(
-                hdc_mem, ctypes.byref(bmi), 0,
-                ctypes.byref(pBits), None, 0)
-            old   = gdi32.SelectObject(hdc_mem, hbmp)
+    try:
+        while running_flag.is_set():
+            t0 = time.time()
+            try:
+                ok = user32.PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT)
+                if not ok:
+                    user32.PrintWindow(hwnd, hdc_mem, 0)
 
-            # PW_RENDERFULLCONTENT: DWM 합성 포함 캡처
-            ok = user32.PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT)
-            if not ok:
-                # fallback: BitBlt
-                user32.PrintWindow(hwnd, hdc_mem, 0)
+                raw = frame_buf.from_address(pBits.value)
+                arr = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 4).copy()
+                bgr = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+                write_frame_cb(bgr)
+                n += 1
+            except Exception:
+                pass
 
-            # DIB → numpy
-            buf_size = cw * ch * 4
-            raw = (ctypes.c_uint8 * buf_size).from_address(pBits.value)
-            arr = np.frombuffer(raw, dtype=np.uint8).reshape(ch, cw, 4).copy()
-
-            gdi32.SelectObject(hdc_mem, old)
-            gdi32.DeleteObject(hbmp)
-            gdi32.DeleteDC(hdc_mem)
-            user32.ReleaseDC(hwnd, hdc_win)
-
-            bgr = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
-            if (cw, ch) != (width, height):
-                bgr = _cv2.resize(bgr, (width, height))
-            write_frame_cb(bgr)
-            n += 1
-            if n == 1:
-                _log("PrintWindow 첫 프레임 전송")
-
-        except Exception as e:
-            _log(f"PrintWindow 프레임 오류: {e}")
-
-        sl = interval - (time.time() - t0)
-        if sl > 0:
-            time.sleep(sl)
-
-    _log(f"PrintWindow 루프 종료 ({n}프레임)")
+            sl = interval - (time.time() - t0)
+            if sl > 0:
+                time.sleep(sl)
+    finally:
+        gdi32.DeleteObject(hbmp)
+        gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(hwnd, hdc_win)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -743,9 +724,6 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
     # tmp_video == out_path이므로 별도 삭제 불필요
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# gui_record_open.py에서 호출하는 통합 저장 함수
-# ─────────────────────────────────────────────────────────────────────────────
 def _save_mp4(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_path: str):
     import os
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

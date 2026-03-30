@@ -388,6 +388,16 @@ class RecordCapturePopup:
         end_sec   = self._parse_time(self._end_time_var.get())   if use_range else None
 
         def _run():
+            import traceback
+            try:
+                _run_impl()
+            except Exception as e:
+                tb = traceback.format_exc()
+                _log(f"_run 예외:\n{tb}")
+                g.root.after(0, lambda: self._rec_status.config(
+                    text=f"⚠ 오류: {e}", fg="#e0a03c"))
+
+        def _run_impl():
             # 구간 녹화: 시작 시각 대기
             if use_range and start_sec is not None:
                 from win32_utils import find_potplayer_hwnd, get_playback_info
@@ -424,8 +434,9 @@ class RecordCapturePopup:
             try:
                 self._screen_rec.start(fps=30, root=g.root, out_path=out_path)
             except Exception as e:
+                err = str(e)
                 g.root.after(0, lambda: self._rec_status.config(
-                    text=f"⚠ 화면 캡처 실패: {e}", fg="#e0a03c"))
+                    text=f"⚠ 화면 캡처 실패: {err}", fg="#e0a03c"))
                 return
 
             # 오디오 캡처 시작

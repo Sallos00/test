@@ -490,9 +490,17 @@ class RecordCapturePopup:
                 g.root.after(0, lambda: self._rec_status.config(
                     text="⏳ 인코딩 완료 대기 중...", fg=g.TEXT_MID))
 
-                # 오디오 stop과 ffmpeg 인코딩 완료를 병렬로 처리
+                # 화면 stop과 오디오 stop을 완전히 병렬로 처리
+                video_result = [None]
+                video_exc    = [None]
                 audio_result = [None, None, None]
                 audio_exc    = [None]
+
+                def _stop_video():
+                    try:
+                        video_result[0] = self._screen_rec.stop()
+                    except Exception as e:
+                        video_exc[0] = e
 
                 def _stop_audio():
                     try:
@@ -501,17 +509,20 @@ class RecordCapturePopup:
                     except Exception as e:
                         audio_exc[0] = e
 
+                video_thread = threading.Thread(target=_stop_video, daemon=True)
                 audio_thread = threading.Thread(target=_stop_audio, daemon=True)
+                video_thread.start()
                 audio_thread.start()
 
-                # ffmpeg 인코딩 완료 대기 (오디오와 동시 진행)
-                tmp_video = self._screen_rec.stop()
+                video_thread.join(timeout=20)
+                audio_thread.join(timeout=10)
 
-                # 오디오 스레드 합류
-                audio_thread.join(timeout=5)
+                if video_exc[0]:
+                    raise video_exc[0]
                 if audio_exc[0]:
                     raise audio_exc[0]
 
+                tmp_video = video_result[0]
                 audio_arr, audio_sr, audio_ch = audio_result
 
                 # 오디오 병합

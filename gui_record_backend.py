@@ -650,6 +650,13 @@ class _ScreenRecorder:
                     f"ffmpeg 인코딩 실패 (code={self._ffmpeg_proc.returncode})\n"
                     f"로그: {self._ffmpeg_log}"
                 )
+            else:
+                # 성공 시 로그 파일 삭제 (실패 시에만 남김)
+                try:
+                    if self._ffmpeg_log and os.path.isfile(self._ffmpeg_log):
+                        os.remove(self._ffmpeg_log)
+                except Exception:
+                    pass
 
         tmp = self._tmp_video
         if not tmp or not os.path.isfile(tmp):

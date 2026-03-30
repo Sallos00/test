@@ -685,14 +685,29 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
     tmp_out   = os.path.join(tempfile.gettempdir(), "autosinc_merge_out.mp4")
     merge_log = os.path.join(tempfile.gettempdir(), "autosinc_merge.log")
 
-    import wave
+    import struct
     audio_data = audio_arr.reshape(-1, audio_ch) if audio_ch > 1 else audio_arr.reshape(-1, 1)
     pcm = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
-    with wave.open(tmp_audio, "wb") as wf:
-        wf.setnchannels(audio_ch)
-        wf.setsampwidth(2)
-        wf.setframerate(audio_sr)
-        wf.writeframes(pcm.tobytes())
+    pcm_bytes = pcm.tobytes()
+    num_samples = len(pcm_bytes)
+    byte_rate = audio_sr * audio_ch * 2
+    block_align = audio_ch * 2
+    with open(tmp_audio, "wb") as wf:
+        # RIFF WAV 헤더 직접 작성 (wave 모듈 불필요)
+        wf.write(b"RIFF")
+        wf.write(struct.pack("<I", 36 + num_samples))  # ChunkSize
+        wf.write(b"WAVE")
+        wf.write(b"fmt ")
+        wf.write(struct.pack("<I", 16))                # Subchunk1Size (PCM=16)
+        wf.write(struct.pack("<H", 1))                 # AudioFormat (PCM=1)
+        wf.write(struct.pack("<H", audio_ch))          # NumChannels
+        wf.write(struct.pack("<I", audio_sr))          # SampleRate
+        wf.write(struct.pack("<I", byte_rate))         # ByteRate
+        wf.write(struct.pack("<H", block_align))       # BlockAlign
+        wf.write(struct.pack("<H", 16))                # BitsPerSample
+        wf.write(b"data")
+        wf.write(struct.pack("<I", num_samples))       # Subchunk2Size
+        wf.write(pcm_bytes)
     _log("WAV 저장 완료")
 
     cmd = [

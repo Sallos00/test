@@ -358,7 +358,8 @@ class _ScreenRecorder:
         self._size = (w, h)
 
         import tempfile
-        self._tmp_video = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
+        self._tmp_video    = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
+        self._ffmpeg_log   = os.path.join(tempfile.gettempdir(), "autosinc_ffmpeg.log")
 
         cmd = [
             ffmpeg_bin, "-y",
@@ -376,11 +377,13 @@ class _ScreenRecorder:
             "-an",                    # 오디오는 나중에 별도 병합
             self._tmp_video,
         ]
+        # stderr를 파이프 대신 파일에 기록 → 파이프 버퍼 고갈로 인한 deadlock 방지
+        self._ffmpeg_log_fh = open(self._ffmpeg_log, "wb")
         self._ffmpeg_proc = _popen_no_window(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=self._ffmpeg_log_fh,
         )
 
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -570,39 +573,52 @@ class _ScreenRecorder:
         오류 시 RuntimeError 발생.
         """
         self._running = False
+
+        # 캡처 루프가 현재 프레임 처리를 마치고 빠져나올 시간만 주면 됨
         if self._thread:
-            self._thread.join(timeout=15)
+            self._thread.join(timeout=2)
+            # join이 timeout됐다면 강제로 stdin을 닫아 ffmpeg 종료 유도
+            if self._thread.is_alive():
+                if self._ffmpeg_proc and self._ffmpeg_proc.stdin:
+                    try:
+                        self._ffmpeg_proc.stdin.close()
+                    except Exception:
+                        pass
 
         # ffmpeg가 남은 프레임을 마저 인코딩하도록 대기
+        # stderr는 파일로 리다이렉트했으므로 communicate() 대신 wait() 사용
         if self._ffmpeg_proc:
             try:
-                _, stderr_data = self._ffmpeg_proc.communicate(timeout=60)
+                self._ffmpeg_proc.wait(timeout=120)
             except Exception:
-                stderr_data = b""
                 try:
                     self._ffmpeg_proc.kill()
+                    self._ffmpeg_proc.wait()
+                except Exception:
+                    pass
+            finally:
+                # stderr 파일 핸들 닫기
+                try:
+                    fh = getattr(self, "_ffmpeg_log_fh", None)
+                    if fh:
+                        fh.close()
                 except Exception:
                     pass
 
             if self._ffmpeg_proc.returncode != 0:
-                # 에러 로그 저장
-                try:
-                    log = os.path.join(
-                        os.path.dirname(self._out_path),
-                        "ffmpeg_error.txt"
-                    )
-                    with open(log, "wb") as lf:
-                        lf.write(stderr_data)
-                except Exception:
-                    pass
+                log = getattr(self, "_ffmpeg_log", "")
                 raise RuntimeError(
                     f"ffmpeg 인코딩 실패 (code={self._ffmpeg_proc.returncode})\n"
-                    f"로그: {os.path.dirname(self._out_path)}\\ffmpeg_error.txt"
+                    f"로그: {log}"
                 )
 
         tmp = getattr(self, "_tmp_video", None)
         if not tmp or not os.path.isfile(tmp) or os.path.getsize(tmp) < 1024:
-            raise RuntimeError("녹화된 영상 파일이 없습니다. 캡처에 실패했을 수 있습니다.")
+            log = getattr(self, "_ffmpeg_log", "%TEMP%\\autosinc_ffmpeg.log")
+            raise RuntimeError(
+                f"녹화된 영상 파일이 없습니다.\n"
+                f"ffmpeg 로그를 확인하세요: {log}"
+            )
 
         return tmp
 
@@ -697,6 +713,7 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int,
         wf.writeframes(pcm.tobytes())
 
     # ffmpeg로 비디오 + 오디오 병합 (비디오는 스트림 복사, 오디오만 AAC 인코딩)
+    merge_log = tmp_out + ".log"
     cmd = [
         ffmpeg_bin, "-y",
         "-i", tmp_video,
@@ -708,8 +725,9 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int,
         "-movflags", "+faststart",
         tmp_out,
     ]
-    proc = _popen_no_window(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    _, stderr_data = proc.communicate()
+    with open(merge_log, "wb") as log_fh:
+        proc = _popen_no_window(cmd, stdout=subprocess.DEVNULL, stderr=log_fh)
+        proc.wait()
 
     if proc.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
         shutil.move(tmp_out, out_path)
@@ -717,13 +735,11 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int,
         # 병합 실패 시 영상만이라도 저장
         shutil.move(tmp_video, out_path)
         try:
-            log = out_path + "_merge_error.txt"
-            with open(log, "wb") as lf:
-                lf.write(stderr_data)
+            shutil.copy(merge_log, out_path + "_merge_error.log")
         except Exception:
             pass
 
-    for p in [tmp_audio, tmp_out, tmp_video]:
+    for p in [tmp_audio, tmp_out, tmp_video, merge_log]:
         try:
             os.remove(p)
         except Exception:

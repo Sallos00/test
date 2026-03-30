@@ -546,7 +546,7 @@ class _ScreenRecorder:
             raise RuntimeError("ffmpeg를 찾을 수 없습니다.")
         _log(f"ffmpeg: {ffmpeg_bin}")
 
-        self._tmp_video  = out_path if out_path else os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
+        self._tmp_video  = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
         _log_dir = os.path.dirname(out_path) if out_path else tempfile.gettempdir()
         self._ffmpeg_log = os.path.join(_log_dir, "autosinc_ffmpeg.log")
 
@@ -705,7 +705,12 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
     _log(f"병합 cmd: {' '.join(cmd)}")
     with open(merge_log, "wb") as lf:
         proc = _popen_no_window(cmd, stdout=subprocess.DEVNULL, stderr=lf)
-        proc.wait()
+        try:
+            proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            _log("병합 ffmpeg timeout → kill")
     _log(f"병합 code={proc.returncode}")
 
     if proc.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
@@ -718,10 +723,9 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_pa
         try: shutil.copy(merge_log, out_path + "_merge_error.log")
         except: pass
 
-    for p in [tmp_audio, tmp_out, merge_log]:
+    for p in [tmp_audio, tmp_out, merge_log, tmp_video]:
         try: os.remove(p)
         except: pass
-    # tmp_video == out_path이므로 별도 삭제 불필요
 
 
 def _save_mp4(tmp_video: str, audio_arr, audio_sr: int, audio_ch: int, out_path: str):

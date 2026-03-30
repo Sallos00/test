@@ -97,6 +97,7 @@ jobs:
           PIL
           --copy-metadata
           Pillow
+          --hidden-import="mss"
           --hidden-import="winotify"
           --hidden-import="urllib.request"
           --hidden-import="urllib.parse"

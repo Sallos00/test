@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify pyinstaller pyarmor
+          pip install opencv-python numpy sounddevice soundfile scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow mss winotify pyinstaller pyarmor
 
       - name: ffmpeg 다운로드 (번들용)
         run: |
@@ -46,8 +46,7 @@ jobs:
 
       - name: 코드 난독화 (PyArmor)
         run: |
-          pyarmor gen --output dist_obf app_icon.py win32_utils.py audio_capture.py processes.py gui_base.py gui_ui.py gui_record_open.py gui_record_backend.py gui_run.py gui_auth.py auth.py potplayer_lipsync_mp.py
-          copy gui_record.py dist_obf\gui_record.py
+          pyarmor gen --output dist_obf app_icon.py win32_utils.py audio_capture.py processes.py gui_base.py gui_ui.py gui_record_backend.py gui_record_open.py gui_run.py gui_auth.py auth.py potplayer_lipsync_mp.py
 
       - name: PyInstaller EXE 빌드
         run: >
@@ -67,7 +66,6 @@ jobs:
           --hidden-import="gui_auth"
           --hidden-import="gui_run"
           --hidden-import="gui_record_open"
-          --hidden-import="gui_record"
           --hidden-import="gui_record_backend"
           --hidden-import="auth"
           --hidden-import="cv2"

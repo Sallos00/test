@@ -460,14 +460,18 @@ class _AudioRecorder:
                     _get_next_packet_size, _get_buffer, _release_buffer,
                     _com_release, AUDCLNT_BUFFERFLAGS_SILENT,
                 )
+                _log(f"오디오: _activate_process_loopback 시작 (pid={pid})")
                 client = _activate_process_loopback(pid)
+                _log(f"오디오: client 획득 완료 {client}")
                 sr, ch = _audio_client_initialize(client)
                 recorder._sr = sr
                 recorder._ch = ch
+                _log(f"오디오: 초기화 완료 sr={sr} ch={ch}")
                 h_event = kernel32.CreateEventW(None, False, False, None)
                 _audio_client_set_event(client, h_event)
                 cap = _get_capture_client(client)
                 _audio_client_start(client)
+                _log("오디오: 캡처 시작")
                 try:
                     while recorder._running:
                         kernel32.WaitForSingleObject(h_event, 10)
@@ -487,6 +491,8 @@ class _AudioRecorder:
                                 else:
                                     arr = np.zeros(num_frames * ch, dtype=np.float32)
                                 recorder._frames.append(arr)
+                                if len(recorder._frames) == 1:
+                                    _log("오디오: 첫 프레임 수신")
                             _release_buffer(cap, num_frames)
                 finally:
                     try: _audio_client_stop(client)
@@ -507,10 +513,14 @@ class _AudioRecorder:
     def stop(self):
         self._running = False
         if self._thread:
-            self._thread.join(timeout=10)
+            self._thread.join(timeout=3)
+        _log(f"오디오 stop: frames={len(self._frames)}")
         if self._frames:
             import numpy as np
-            return np.concatenate(self._frames), self._sr, self._ch
+            arr = np.concatenate(self._frames)
+            _log(f"오디오 데이터 크기: {arr.shape}, sr={self._sr}, ch={self._ch}")
+            return arr, self._sr, self._ch
+        _log("오디오 데이터 없음 → 무음으로 처리")
         return None, self._sr, self._ch
 
 
@@ -638,9 +648,15 @@ class _ScreenRecorder:
                     except: pass
 
         if self._ffmpeg_proc:
+            # stdin이 아직 열려있으면 확실히 닫아서 ffmpeg가 EOF를 받게 함
+            try:
+                if self._ffmpeg_proc.stdin:
+                    self._ffmpeg_proc.stdin.close()
+            except Exception:
+                pass
             try:
                 _log("ffmpeg wait...")
-                self._ffmpeg_proc.wait(timeout=120)
+                self._ffmpeg_proc.wait(timeout=15)
                 _log(f"ffmpeg 종료 code={self._ffmpeg_proc.returncode}")
             except subprocess.TimeoutExpired:
                 _log("ffmpeg timeout → kill")

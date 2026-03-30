@@ -1,11 +1,15 @@
 """gui_record_open.py -- 녹화/캡처 팝업 열기 믹스인"""
 import os, threading
 import tkinter as tk
+from gui_record_backend import _log
 
 class LipSyncGUIRecordOpen:
 
     def _open_record_capture(self):
+        _default_dir = os.path.join(os.path.expanduser("~"), "Desktop")
         save_dir = getattr(self, "_record_save_dir", None) or self._load_setting("record_save_dir", "")
+        if not save_dir or not os.path.isdir(save_dir):
+            save_dir = _default_dir
 
         r     = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw    = round(340 * r)

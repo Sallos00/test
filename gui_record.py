@@ -466,17 +466,36 @@ class RecordCapturePopup:
         def _finish():
             import traceback, tempfile
             try:
-                # 1. 화면 캡처 중단 → ffmpeg가 파이프를 닫고 인코딩 완료할 때까지 대기
                 g.root.after(0, lambda: self._rec_status.config(
-                    text="⏳ 영상 인코딩 완료 대기 중...", fg=g.TEXT_MID))
-                tmp_video = self._screen_rec.stop()   # ffmpeg communicate() 완료까지 블로킹
+                    text="⏳ 인코딩 완료 대기 중...", fg=g.TEXT_MID))
 
-                # 2. 오디오 수집 중단
+                # 오디오 stop과 ffmpeg 인코딩 완료를 병렬로 처리
+                audio_result = [None, None, None]
+                audio_exc    = [None]
+
+                def _stop_audio():
+                    try:
+                        arr, sr, ch = self._audio_rec.stop()
+                        audio_result[0], audio_result[1], audio_result[2] = arr, sr, ch
+                    except Exception as e:
+                        audio_exc[0] = e
+
+                audio_thread = threading.Thread(target=_stop_audio, daemon=True)
+                audio_thread.start()
+
+                # ffmpeg 인코딩 완료 대기 (오디오와 동시 진행)
+                tmp_video = self._screen_rec.stop()
+
+                # 오디오 스레드 합류
+                audio_thread.join(timeout=10)
+                if audio_exc[0]:
+                    raise audio_exc[0]
+
+                audio_arr, audio_sr, audio_ch = audio_result
+
+                # 오디오 병합
                 g.root.after(0, lambda: self._rec_status.config(
                     text="⏳ 오디오 병합 중...", fg=g.TEXT_MID))
-                audio_arr, audio_sr, audio_ch = self._audio_rec.stop()
-
-                # 3. 오디오를 완성된 MP4에 병합
                 out_path = self._out_path
                 _merge_audio(tmp_video, audio_arr, audio_sr, audio_ch, out_path)
 

@@ -63,8 +63,10 @@ class LipSyncGUIRecordOpen:
 
         def pick_dir():
             from tkinter import filedialog
+            # 버그 수정: parent=popup 지정 → dialog 가 팝업 뒤에 숨지 않음
             path = filedialog.askdirectory(
                 title="저장 위치 선택",
+                parent=popup,
                 initialdir=state["save_dir"] or os.path.expanduser("~"))
             if path:
                 state["save_dir"] = path
@@ -303,8 +305,14 @@ class LipSyncGUIRecordOpen:
                     audio_arr, audio_sr, audio_ch = audio_result
                     out = state.get("out_path") or os.path.join(ensure_subdir("Video"), f"record_{_t.strftime('%Y%m%d_%H%M%S')}.mp4")
                     self.root.after(0, lambda: rec_status.config(text="⏳ 오디오 병합 중...", fg=self.TEXT_MID))
-                    from gui_record_backend import _save_mp4
-                    _save_mp4(tmp_video, audio_arr, audio_sr, audio_ch, out)
+                    from gui_record_backend import _save_mp4, _log
+                    # OBS 방식 싱크 보정: 비디오 시작 wall-clock vs 오디오 첫 패킷 wall-clock 차이
+                    audio_rec = state.get("audio_rec")
+                    audio_delay = 0.0
+                    if audio_rec is not None and getattr(audio_rec, "_audio_start_wall", None) and state.get("video_start_wall"):
+                        audio_delay = audio_rec._audio_start_wall - state["video_start_wall"]
+                        _log(f"싱크 보정: audio_delay={audio_delay:.4f}s (audio_wall={audio_rec._audio_start_wall:.4f} video_wall={state['video_start_wall']:.4f})")
+                    _save_mp4(tmp_video, audio_arr, audio_sr, audio_ch, out, audio_delay_sec=audio_delay)
                     if os.path.isfile(out) and os.path.getsize(out) > 1024:
                         self.root.after(0, lambda: rec_status.config(
                             text="✅ 저장 완료: Video/" + os.path.basename(out), fg=self.ACCENT3))
@@ -373,9 +381,12 @@ class LipSyncGUIRecordOpen:
                     arrived = state["audio_rec"].first_frame_event.wait(timeout=2.0)
                     _log(f"오디오 첫 패킷 {'수신' if arrived else '타임아웃 → 강행'}")
 
+                import time as _time_mod
                 state["screen_rec"] = _ScreenRecorder()
                 try:
                     state["screen_rec"].start(fps=30, out_path=_out_path)
+                    # OBS 방식: 비디오 스트림 시작 wall-clock 기록 → 싱크 보정에 사용
+                    state["video_start_wall"] = _time_mod.time()
                 except Exception as e:
                     state["audio_rec"].stop()
                     self.root.after(0, lambda: rec_status.config(

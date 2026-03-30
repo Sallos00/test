@@ -508,7 +508,7 @@ class RecordCapturePopup:
                 tmp_video = self._screen_rec.stop()
 
                 # 오디오 스레드 합류
-                audio_thread.join(timeout=10)
+                audio_thread.join(timeout=5)
                 if audio_exc[0]:
                     raise audio_exc[0]
 

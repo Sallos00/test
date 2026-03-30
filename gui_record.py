@@ -367,16 +367,25 @@ class RecordCapturePopup:
 
     # ── 녹화 토글 ──────────────────────────────────────────────────────────
     def _toggle_record(self):
-        if self._recording:
-            self._stop_record()
-        else:
-            self._start_record()
+        _log(f"_toggle_record 호출 (recording={self._recording})")
+        try:
+            if self._recording:
+                self._stop_record()
+            else:
+                self._start_record()
+        except Exception as e:
+            import traceback
+            _log(f"_toggle_record 예외:\n{traceback.format_exc()}")
+            self._rec_status.config(text=f"⚠ 오류: {e}", fg="#e0a03c")
 
     def _start_record(self):
+        _log(f"_start_record 진입 (CV2_OK={_CV2_OK})")
         if not _CV2_OK:
             self._rec_status.config(text="⚠ opencv-python 필요", fg="#e0a03c")
             return
-        if not _find_ffmpeg():
+        ffmpeg = _find_ffmpeg()
+        _log(f"ffmpeg 경로: {ffmpeg!r}")
+        if not ffmpeg:
             self._rec_status.config(
                 text="⚠ ffmpeg를 찾을 수 없습니다. PATH에 추가하거나 프로그램 폴더에 ffmpeg.exe를 넣어주세요.",
                 fg="#e0a03c")

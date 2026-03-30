@@ -29,8 +29,8 @@ class RecordCapturePopup:
         self._tab_frame    = None
         self._tabs         = {}
 
-        # 저장된 경로 불러오기
-        self._save_dir = self.gui._load_setting(self.SETTING_KEY, "")
+        # 저장된 경로 불러오기 (settings.json 직접 읽기)
+        self._save_dir = self._load_save_dir()
 
     # ── 팝업 열기 ──────────────────────────────────────────────────────────
     def open(self):
@@ -274,16 +274,46 @@ class RecordCapturePopup:
         self._cap_status.pack(anchor="w", pady=(round(4*r), 0))
 
     # ── 저장 위치 ──────────────────────────────────────────────────────────
+    # ── 저장 경로 직접 읽기/쓰기 (gui_base._save_settings에 의존하지 않음) ──
+    def _load_save_dir(self) -> str:
+        """settings.json에서 record_save_dir만 읽어 반환. 없으면 ""."""
+        try:
+            import json
+            with open(self.gui.CFG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f).get("record_save_dir", "")
+        except Exception:
+            return ""
+
+    def _persist_save_dir(self, path: str):
+        """record_save_dir을 settings.json에 즉시 저장. 다른 키는 건드리지 않음."""
+        import json
+        cfg = self.gui.CFG_FILE
+        try:
+            os.makedirs(os.path.dirname(cfg), exist_ok=True)
+            existing = {}
+            try:
+                with open(cfg, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                pass
+            existing["record_save_dir"] = path
+            # 원자적 쓰기: 임시 파일에 먼저 쓴 뒤 rename
+            tmp = cfg + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(existing, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, cfg)
+            # gui_base가 나중에 _save_settings()를 호출할 때 덮어쓰지 않도록 속성도 세팅
+            self.gui._record_save_dir = path
+        except Exception:
+            pass
+
     def _pick_dir(self):
         path = filedialog.askdirectory(title="저장 위치 선택",
                                        initialdir=self._save_dir or os.path.expanduser("~"))
         if path:
             self._save_dir = path
             self._save_dir_var.set(path)
-            # gui_base._save_settings()이 _record_save_dir 속성을 읽으므로 여기서 세팅
-            self.gui._record_save_dir = path
-            self.gui._save_settings()
-            # 버튼 활성 상태 갱신
+            self._persist_save_dir(path)   # 즉시 독립 저장
             self._update_rec_btn_state()
             self._update_cap_btn_state()
 

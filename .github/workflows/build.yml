@@ -111,6 +111,7 @@ jobs:
           --hidden-import="winsdk.windows.graphics.directx"
           --hidden-import="winsdk.windows.graphics.directx.direct3d11"
           --hidden-import="winsdk.windows.graphics.imaging"
+          --collect-all winsdk
           --collect-data cv2
           --add-data "lbpcascade_animeface.xml;."
           --add-data "app.ico;."

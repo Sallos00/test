@@ -15,6 +15,12 @@ except ImportError:
     _SF_OK = False
 
 try:
+    from PIL import ImageGrab
+    _PIL_OK = True
+except ImportError:
+    _PIL_OK = False
+
+try:
     import ctypes as _ct
     import ctypes.wintypes as _wt
     _user32 = _ct.windll.user32

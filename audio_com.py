@@ -328,3 +328,64 @@ def get_buffer(cap):
 def release_buffer(cap, n: int):
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint)
     fn_type(_vtbl(cap, 4))(cap, n)
+
+
+# ── 전체 루프백 활성화 (빌드 19041 미만 폴백) ─────────────────────────────────
+def activate_global_loopback() -> ctypes.c_void_p:
+    """
+    기본 렌더 디바이스의 loopback IAudioClient를 반환.
+    ProcessLoopback 미지원 환경(빌드 < 19041)에서 폴백으로 사용.
+    팟플레이어뿐 아니라 시스템 전체 오디오가 캡처된다.
+    """
+    CLSCTX_ALL = 0x17
+    enumerator = ctypes.c_void_p()
+    hr = _ole32.CoCreateInstance(
+        ctypes.byref(_CLSID_MMDeviceEnumerator), None, CLSCTX_ALL,
+        ctypes.byref(_IID_IMMDeviceEnumerator), ctypes.byref(enumerator))
+    _hcheck(hr, "CoCreateInstance(MMDeviceEnumerator)")
+
+    try:
+        fn_gde = ctypes.WINFUNCTYPE(
+            ctypes.c_long, ctypes.c_void_p,
+            ctypes.c_uint, ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_void_p))(_vtbl(enumerator, 4))
+        device = ctypes.c_void_p()
+        _hcheck(fn_gde(enumerator, _EDataFlow_eRender, _ERole_eConsole,
+                       ctypes.byref(device)), "GetDefaultAudioEndpoint")
+        try:
+            fn_act = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p,
+                ctypes.c_byte * 16, ctypes.c_uint,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p))(_vtbl(device, 3))
+            client = ctypes.c_void_p()
+            _hcheck(fn_act(device, _IID_IAudioClient, CLSCTX_ALL,
+                           None, ctypes.byref(client)),
+                    "IMMDevice::Activate(IAudioClient)")
+            return client
+        finally:
+            _com_release(device)
+    finally:
+        _com_release(enumerator)
+
+
+def audio_client_initialize_loopback(client) -> tuple:
+    """
+    전체 루프백용 IAudioClient::Initialize.
+    AUDCLNT_STREAMFLAGS_LOOPBACK 플래그만 사용 (ProcessLoopback 파라미터 없음).
+    반환: (sample_rate, channels)
+    """
+    REFTIMES_PER_SEC = 10_000_000
+    fmt_ptr, sr, ch = get_render_mix_format()
+    try:
+        fn_type = ctypes.WINFUNCTYPE(
+            ctypes.c_long, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
+            ctypes.c_longlong, ctypes.c_longlong, ctypes.c_void_p, ctypes.c_void_p)
+        fn    = fn_type(_vtbl(client, 3))
+        flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+        hr    = fn(client, AUDCLNT_SHAREMODE_SHARED, flags,
+                   REFTIMES_PER_SEC, 0, fmt_ptr, None)
+        _hcheck(hr, "IAudioClient::Initialize(loopback)")
+    finally:
+        _ole32.CoTaskMemFree(fmt_ptr)
+    return sr, ch

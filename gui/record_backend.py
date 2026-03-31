@@ -613,19 +613,35 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
     tmp_out   = os.path.join(tempfile.gettempdir(), "autosinc_merge_out.mp4")
     merge_log = os.path.join(tempfile.gettempdir(), "autosinc_merge.log")
 
-    import wave
     if audio_ch > 1:
         rem = len(audio_arr) % audio_ch
         if rem: audio_arr = audio_arr[:-rem]
         audio_data = audio_arr.reshape(-1, audio_ch)
     else:
         audio_data = audio_arr.reshape(-1, 1)
-    pcm = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
-    with wave.open(tmp_audio, "wb") as wf:
-        wf.setnchannels(audio_ch)
-        wf.setsampwidth(2)
-        wf.setframerate(audio_sr)
-        wf.writeframes(pcm.tobytes())
+    pcm      = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
+    pcm_bytes = pcm.tobytes()
+
+    # wave 모듈 없이 WAV 헤더 직접 작성 (PyInstaller 빌드 호환)
+    import struct
+    num_frames  = audio_data.shape[0]
+    data_size   = num_frames * audio_ch * 2   # 16bit = 2byte/sample
+    byte_rate   = audio_sr * audio_ch * 2
+    block_align = audio_ch * 2
+    with open(tmp_audio, "wb") as wf:
+        wf.write(b"RIFF")
+        wf.write(struct.pack("<I", 36 + data_size))
+        wf.write(b"WAVEfmt ")
+        wf.write(struct.pack("<I", 16))
+        wf.write(struct.pack("<H", 1))           # PCM
+        wf.write(struct.pack("<H", audio_ch))
+        wf.write(struct.pack("<I", audio_sr))
+        wf.write(struct.pack("<I", byte_rate))
+        wf.write(struct.pack("<H", block_align))
+        wf.write(struct.pack("<H", 16))          # bits per sample
+        wf.write(b"data")
+        wf.write(struct.pack("<I", data_size))
+        wf.write(pcm_bytes)
 
     cmd = [
         ffmpeg_bin, "-y",

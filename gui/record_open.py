@@ -422,7 +422,22 @@ class LipSyncGUIRecordOpen:
 
                 gdi32  = ctypes.windll.gdi32
                 user32 = ctypes.windll.user32
-                PW_RENDERFULLCONTENT = 0x00000002
+
+                rc = wt.RECT()
+                user32.GetClientRect(target, ctypes.byref(rc))
+                cw = rc.right - rc.left
+                ch = rc.bottom - rc.top
+                if cw <= 0 or ch <= 0:
+                    cap_status.config(text="⚠ 창 크기 오류", fg="#e0a03c")
+                    return
+
+                # BitBlt: 창에 메시지를 보내지 않으므로 팟플레이어 z-order에 영향 없음
+                hdc_win = user32.GetDC(target)
+                hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
+                hbmp    = gdi32.CreateCompatibleBitmap(hdc_win, cw, ch)
+                old     = gdi32.SelectObject(hdc_mem, hbmp)
+                SRCCOPY = 0x00CC0020
+                gdi32.BitBlt(hdc_mem, 0, 0, cw, ch, hdc_win, 0, 0, SRCCOPY)
 
                 class BITMAPINFOHEADER(ctypes.Structure):
                     _fields_ = [
@@ -436,16 +451,6 @@ class LipSyncGUIRecordOpen:
                 class BITMAPINFO(ctypes.Structure):
                     _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
 
-                rc = wt.RECT()
-                user32.GetClientRect(target, ctypes.byref(rc))
-                cw = rc.right - rc.left
-                ch = rc.bottom - rc.top
-                if cw <= 0 or ch <= 0:
-                    cap_status.config(text="⚠ 창 크기 오류", fg="#e0a03c")
-                    return
-
-                hdc_win = user32.GetDC(target)
-                hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
                 bmi = BITMAPINFO()
                 bmi.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
                 bmi.bmiHeader.biWidth       = cw
@@ -453,22 +458,16 @@ class LipSyncGUIRecordOpen:
                 bmi.bmiHeader.biPlanes      = 1
                 bmi.bmiHeader.biBitCount    = 32
                 bmi.bmiHeader.biCompression = 0
-                pBits = ctypes.c_void_p()
-                hbmp  = gdi32.CreateDIBSection(hdc_mem, ctypes.byref(bmi), 0,
-                                               ctypes.byref(pBits), None, 0)
-                old  = gdi32.SelectObject(hdc_mem, hbmp)
-                ok   = user32.PrintWindow(target, hdc_mem, PW_RENDERFULLCONTENT)
-                if not ok:
-                    user32.PrintWindow(target, hdc_mem, 0)
-
                 buf_size = cw * ch * 4
-                raw = (ctypes.c_uint8 * buf_size).from_address(pBits.value)
-                arr = np.frombuffer(raw, dtype=np.uint8).reshape(ch, cw, 4).copy()
+                buf = (ctypes.c_uint8 * buf_size)()
+                gdi32.GetDIBits(hdc_mem, hbmp, 0, ch, buf, ctypes.byref(bmi), 0)
+
                 gdi32.SelectObject(hdc_mem, old)
                 gdi32.DeleteObject(hbmp)
                 gdi32.DeleteDC(hdc_mem)
                 user32.ReleaseDC(target, hdc_win)
 
+                arr = np.frombuffer(buf, dtype=np.uint8).reshape(ch, cw, 4)
                 img = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
                 ts  = _t.strftime("%Y%m%d_%H%M%S")
                 out = os.path.join(ensure_subdir("Screenshot"), f"capture_{ts}.png")

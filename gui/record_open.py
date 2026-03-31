@@ -70,6 +70,7 @@ class LipSyncGUIRecordOpen:
         def pick_dir():
             from tkinter import filedialog
             path = filedialog.askdirectory(
+                parent=popup,
                 title="저장 위치 선택",
                 initialdir=state["save_dir"] or os.path.expanduser("~"))
             if path:

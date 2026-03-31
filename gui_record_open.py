@@ -19,6 +19,7 @@ class LipSyncGUIRecordOpen:
         popup.title("녹화 및 캡처")
         popup.resizable(False, False)
         popup.configure(bg=self.BG)
+        popup.grab_set()
         self._place_popup(popup, pw, ph)
 
         F_TITLE = max(9,  round(11 * r))
@@ -63,10 +64,17 @@ class LipSyncGUIRecordOpen:
 
         def pick_dir():
             from tkinter import filedialog
+            # grab_set 된 Toplevel 안에서 filedialog 를 열려면
+            # grab 을 일시 해제한 뒤 dialog 를 띄우고, 닫히면 다시 grab 을 건다
+            popup.grab_release()
             path = filedialog.askdirectory(
                 title="저장 위치 선택",
-                parent=self.root,
+                parent=popup,
                 initialdir=state["save_dir"] or os.path.expanduser("~"))
+            try:
+                popup.grab_set()
+            except Exception:
+                pass
             if path:
                 state["save_dir"] = path
                 save_dir_var.set(path)

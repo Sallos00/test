@@ -14,6 +14,7 @@ from audio_com import (
     audio_client_set_event, audio_client_start, audio_client_stop,
     get_capture_client, get_next_packet_size, get_buffer, release_buffer,
     _com_release, _kernel32, _ole32, AUDCLNT_BUFFERFLAGS_SILENT,
+    activate_global_loopback, audio_client_initialize_loopback,
 )
 
 # 하위 호환 별칭 (gui_record_backend 에서 직접 import 하는 이름)
@@ -190,6 +191,83 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
 
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
+def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
+    """
+    전체 루프백 캡처 세션 (빌드 19041 미만 폴백).
+    IMMDevice 기본 렌더 디바이스 loopback — 시스템 전체 오디오 캡처.
+    """
+    result_box = [None]
+
+    def _mta():
+        hr_co = _ole32.CoInitializeEx(None, 0x0)
+        co_ok = hr_co in (0, 1)
+        client  = None
+        cap     = None
+        h_event = None
+        try:
+            client  = activate_global_loopback()
+            sr, ch  = audio_client_initialize_loopback(client)
+            h_event = _kernel32.CreateEventW(None, False, False, None)
+            audio_client_set_event(client, h_event)
+            cap = get_capture_client(client)
+            audio_client_start(client)
+
+            sos, sosfilt = _make_bandpass(sr)
+            send_log(f"🎙 [GlobalLoopback] sr={sr} ch={ch} (전체 루프백)")
+
+            first_packet = True
+            while not stop_flag.value:
+                _kernel32.WaitForSingleObject(h_event, 10)
+                while not stop_flag.value:
+                    try:
+                        pkt = get_next_packet_size(cap)
+                    except OSError as e:
+                        send_log(f"⚠ GetNextPacketSize: {e}")
+                        result_box[0] = (False, str(e))
+                        return
+                    if pkt == 0:
+                        break
+                    data, num_frames, flg = get_buffer(cap)
+                    if first_packet:
+                        first_packet = False
+                        send_log("✅ 첫 패킷 수신! (전체 루프백)")
+                    if num_frames > 0:
+                        if flg & AUDCLNT_BUFFERFLAGS_SILENT:
+                            rms = 0.0
+                        else:
+                            if not data.value:
+                                release_buffer(cap, num_frames)
+                                continue
+                            buf = (ctypes.c_float * (num_frames * ch)).from_address(data.value)
+                            arr = np.frombuffer(buf, dtype=np.float32).copy()
+                            if ch > 1:
+                                arr = arr.reshape(-1, ch).mean(axis=1)
+                            arr = _apply_filter(arr, sos, sosfilt)
+                            rms = float(np.sqrt(np.mean(arr ** 2)))
+                        queue_put(audio_queue, (time.time(), rms))
+                    release_buffer(cap, num_frames)
+            result_box[0] = (True, "")
+        except Exception as e:
+            result_box[0] = (False, str(e))
+        finally:
+            if cap:
+                try: audio_client_stop(client)
+                except Exception: pass
+                _com_release(cap)
+            if client:
+                _com_release(client)
+            if h_event:
+                _kernel32.CloseHandle(h_event)
+            if co_ok:
+                _ole32.CoUninitialize()
+
+    import threading
+    t = threading.Thread(target=_mta, daemon=True)
+    t.start()
+    t.join()
+    return result_box[0] if result_box[0] is not None else (False, "MTA 스레드 비정상 종료")
+
+
 def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queue=None):
     import sys, os
     if sys.stdout is None:
@@ -211,7 +289,23 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
     send_log(f"ℹ Win build={_WIN_BUILD} | ProcessLoopback={_SUPPORT_PROCESS_LOOPBACK}")
 
     if not _SUPPORT_PROCESS_LOOPBACK:
-        send_log(f"✖ ProcessLoopback 미지원 (빌드 {_WIN_BUILD} < 19041).")
+        send_log(f"⚠ ProcessLoopback 미지원 (빌드 {_WIN_BUILD} < 19041) — 전체 루프백으로 전환.")
+        _retry = 0
+        while not stop_flag.value:
+            try:
+                ok, reason = _run_global_loopback_session(audio_queue, stop_flag, send_log)
+            except Exception as e:
+                ok, reason = False, f"예외: {e}"
+            if ok:
+                _retry = 0
+                continue
+            send_log(f"⚠ 전체 루프백 실패: {reason}")
+            _retry += 1
+            send_log(f"🔄 {_retry}회 재시도 대기 중 (5초)...")
+            for _ in range(50):
+                if stop_flag.value:
+                    break
+                time.sleep(0.1)
         return
 
     _retry = 0

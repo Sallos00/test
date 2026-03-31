@@ -68,19 +68,19 @@ class LipSyncGUIRecordOpen:
                       padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
 
         def pick_dir():
-            from tkinter import filedialog
-            try:
-                popup.grab_release()
-            except Exception:
-                pass
-            path = filedialog.askdirectory(
-                parent=popup,
-                title="저장 위치 선택",
-                initialdir=state["save_dir"] or os.path.expanduser("~"))
-            try:
-                popup.grab_set()
-            except Exception:
-                pass
+    from tkinter import filedialog
+    try:
+        popup.grab_release()
+    except Exception:
+        pass
+    path = filedialog.askdirectory(
+        parent=None,  # 변경: parent=popup → parent=None
+        title="저장 위치 선택",
+        initialdir=state["save_dir"] or os.path.expanduser("~"))
+    try:
+        popup.grab_set()
+    except Exception:
+        pass
             if path:
                 state["save_dir"] = path
                 save_dir_var.set(path)

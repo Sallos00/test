@@ -48,9 +48,6 @@ class LipSyncGUIRecordOpen:
                  bg=self.BG2, fg=self.TEXT_MID).pack(anchor="w")
         dir_row = tk.Frame(dir_card, bg=self.BG2)
         dir_row.pack(fill="x", pady=(round(4*r), 0))
-        dir_row.columnconfigure(0, weight=1)   # Entry가 남은 공간 차지
-        dir_row.columnconfigure(1, weight=0)   # 📂 버튼 고정 크기
-        dir_row.columnconfigure(2, weight=0)   # 🗂 버튼 고정 크기
         save_dir_var = tk.StringVar(value=save_dir)
 
         tk.Entry(dir_row, textvariable=save_dir_var,
@@ -59,15 +56,13 @@ class LipSyncGUIRecordOpen:
                  disabledforeground="#111111",
                  readonlybackground="white",
                  insertbackground=self.ACCENT,
-                 relief="flat", bd=4, state="readonly",
-                 width=28).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+                 relief="flat", bd=4, state="readonly").pack(side="left", fill="x", expand=True)
 
         btn_kw = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
                       padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
 
         def pick_dir():
             from tkinter import filedialog
-            # 버그 수정: parent=popup 지정 → dialog 가 팝업 뒤에 숨지 않음
             path = filedialog.askdirectory(
                 title="저장 위치 선택",
                 parent=self.root,
@@ -100,11 +95,9 @@ class LipSyncGUIRecordOpen:
                 os.startfile(d)
 
         tk.Button(dir_row, text="📂", bg=self.BG3, fg=self.TEXT,
-                  activeforeground=self.TEXT, activebackground=self.BORDER,
-                  command=pick_dir, **btn_kw).grid(row=0, column=1, padx=(0, 4))
+                  command=pick_dir, **btn_kw).pack(side="left", padx=(4, 0))
         tk.Button(dir_row, text="🗂 열기", bg=self.BG3, fg=self.TEXT_MID,
-                  activeforeground=self.TEXT_MID, activebackground=self.BORDER,
-                  command=open_dir, **btn_kw).grid(row=0, column=2)
+                  command=open_dir, **btn_kw).pack(side="left", padx=(4, 0))
 
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", padx=PAD, pady=(PAD_V, 0))
 
@@ -311,14 +304,8 @@ class LipSyncGUIRecordOpen:
                     audio_arr, audio_sr, audio_ch = audio_result
                     out = state.get("out_path") or os.path.join(ensure_subdir("Video"), f"record_{_t.strftime('%Y%m%d_%H%M%S')}.mp4")
                     self.root.after(0, lambda: rec_status.config(text="⏳ 오디오 병합 중...", fg=self.TEXT_MID))
-                    from gui_record_backend import _save_mp4, _log
-                    # OBS 방식 싱크 보정: 비디오 시작 wall-clock vs 오디오 첫 패킷 wall-clock 차이
-                    audio_rec = state.get("audio_rec")
-                    audio_delay = 0.0
-                    if audio_rec is not None and getattr(audio_rec, "_audio_start_wall", None) and state.get("video_start_wall"):
-                        audio_delay = audio_rec._audio_start_wall - state["video_start_wall"]
-                        _log(f"싱크 보정: audio_delay={audio_delay:.4f}s (audio_wall={audio_rec._audio_start_wall:.4f} video_wall={state['video_start_wall']:.4f})")
-                    _save_mp4(tmp_video, audio_arr, audio_sr, audio_ch, out, audio_delay_sec=audio_delay)
+                    from gui_record_backend import _save_mp4
+                    _save_mp4(tmp_video, audio_arr, audio_sr, audio_ch, out)
                     if os.path.isfile(out) and os.path.getsize(out) > 1024:
                         self.root.after(0, lambda: rec_status.config(
                             text="✅ 저장 완료: Video/" + os.path.basename(out), fg=self.ACCENT3))
@@ -387,12 +374,9 @@ class LipSyncGUIRecordOpen:
                     arrived = state["audio_rec"].first_frame_event.wait(timeout=2.0)
                     _log(f"오디오 첫 패킷 {'수신' if arrived else '타임아웃 → 강행'}")
 
-                import time as _time_mod
                 state["screen_rec"] = _ScreenRecorder()
                 try:
                     state["screen_rec"].start(fps=30, out_path=_out_path)
-                    # OBS 방식: 비디오 스트림 시작 wall-clock 기록 → 싱크 보정에 사용
-                    state["video_start_wall"] = _time_mod.time()
                 except Exception as e:
                     state["audio_rec"].stop()
                     self.root.after(0, lambda: rec_status.config(

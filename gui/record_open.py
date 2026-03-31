@@ -5,6 +5,7 @@ gui/record_open.py -- 녹화/캡처 팝업 열기 믹스인
   [기능1] 녹화 중에는 구간 녹화 체크박스 및 시간 입력칸 비활성화
   [기능2] 오버레이는 팟플레이어 위에만 (record_backend._show_overlay 개선)
   [기능3] OBS 방식 — 화면+오디오 동시 시작 후 ffmpeg 합산
+  [버그수정] 저장 위치 📂 버튼 — grab_set 제거 + 별도 helper Toplevel로 filedialog 호출
 """
 import os, threading
 import tkinter as tk
@@ -23,7 +24,8 @@ class LipSyncGUIRecordOpen:
         popup.title("녹화 및 캡처")
         popup.resizable(False, False)
         popup.configure(bg=self.BG)
-        popup.grab_set()
+        # grab_set 제거 — grab_set 상태에서 filedialog를 열면
+        # Windows 에서 다이얼로그가 표시되지 않는 문제가 있음
         self._place_popup(popup, pw, ph)
 
         F_TITLE = max(9,  round(11 * r))
@@ -47,6 +49,57 @@ class LipSyncGUIRecordOpen:
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", pady=(round(8*r), 0))
 
         # ── 저장 위치 ──────────────────────────────────────────────────────────
+        save_dir_var = tk.StringVar(value=save_dir)
+
+        def _apply_save_dir(path):
+            """경로 확정 후 UI·상태·설정파일을 일괄 업데이트."""
+            if not path:
+                return
+            state["save_dir"] = path
+            save_dir_var.set(path)
+            self._record_save_dir = path
+            try:
+                import json
+                existing = {}
+                try:
+                    with open(self.CFG_FILE, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                except Exception:
+                    pass
+                existing["record_save_dir"] = path
+                os.makedirs(self.APP_DIR, exist_ok=True)
+                with open(self.CFG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(existing, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            s = "normal" if os.path.isdir(path) else "disabled"
+            rec_btn.config(state=s)
+            cap_btn.config(state=s)
+
+        def pick_dir():
+            """grab 없는 별도 helper Toplevel을 부모로 삼아 filedialog를 띄운다.
+            grab_set 된 창이나 root를 parent로 쓰면 Windows에서
+            폴더 선택 다이얼로그가 열리지 않는 문제가 있어 이 방식으로 우회."""
+            import tkinter.filedialog as fd
+            helper = tk.Toplevel()
+            helper.withdraw()
+            helper.attributes("-topmost", True)
+            path = fd.askdirectory(
+                parent=helper,
+                title="저장 위치 선택",
+                initialdir=state["save_dir"] or os.path.expanduser("~"),
+            )
+            try:
+                helper.destroy()
+            except Exception:
+                pass
+            _apply_save_dir(path)
+
+        def open_dir():
+            d = state["save_dir"]
+            if d and os.path.isdir(d):
+                os.startfile(d)
+
         dir_card = tk.Frame(popup, bg=self.BG2, padx=PAD2, pady=PAD_V)
         dir_card.pack(fill="x", padx=PAD, pady=(PAD_V, 0))
         tk.Label(dir_card, text="저장 위치",
@@ -54,7 +107,6 @@ class LipSyncGUIRecordOpen:
                  bg=self.BG2, fg=self.TEXT_MID).pack(anchor="w")
         dir_row = tk.Frame(dir_card, bg=self.BG2)
         dir_row.pack(fill="x", pady=(round(4*r), 0))
-        save_dir_var = tk.StringVar(value=save_dir)
 
         tk.Entry(dir_row, textvariable=save_dir_var,
                  font=("Consolas", max(7, F_MONO - 1)),
@@ -66,61 +118,6 @@ class LipSyncGUIRecordOpen:
 
         btn_kw = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
                       padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
-
-        def pick_dir():
-            # grab_release 후 이벤트 루프가 안정된 시점에 다이얼로그를 띄운다.
-            # grab_release → filedialog → grab_set 을 동기로 연달아 호출하면
-            # Windows 에서 다이얼로그 창이 열리지 않는 타이밍 문제가 발생하므로
-            # after()로 메인 루프에 위임한다.
-            try:
-                popup.grab_release()
-            except Exception:
-                pass
-
-            def _open_dialog():
-                from tkinter import filedialog
-                path = filedialog.askdirectory(
-                    parent=self.root,
-                    title="저장 위치 선택",
-                    initialdir=state["save_dir"] or os.path.expanduser("~"),
-                )
-                # 다이얼로그가 닫힌 뒤 grab 복원
-                try:
-                    if popup.winfo_exists():
-                        popup.grab_set()
-                except Exception:
-                    pass
-                if not path:
-                    return
-                state["save_dir"] = path
-                save_dir_var.set(path)
-                # 설정 파일에 저장
-                try:
-                    import json
-                    existing = {}
-                    try:
-                        with open(self.CFG_FILE, "r", encoding="utf-8") as f:
-                            existing = json.load(f)
-                    except Exception:
-                        pass
-                    existing["record_save_dir"] = path
-                    os.makedirs(self.APP_DIR, exist_ok=True)
-                    with open(self.CFG_FILE, "w", encoding="utf-8") as f:
-                        json.dump(existing, f, ensure_ascii=False, indent=2)
-                except Exception:
-                    pass
-                self._record_save_dir = path
-                s = "normal" if os.path.isdir(path) else "disabled"
-                rec_btn.config(state=s)
-                cap_btn.config(state=s)
-
-            popup.after(50, _open_dialog)
-
-        def open_dir():
-            d = state["save_dir"]
-            if d and os.path.isdir(d):
-                os.startfile(d)
-
         tk.Button(dir_row, text="📂", bg=self.BG3, fg=self.TEXT,
                   command=pick_dir, **btn_kw).pack(side="left", padx=(4, 0))
         tk.Button(dir_row, text="🗂 열기", bg=self.BG3, fg=self.TEXT_MID,

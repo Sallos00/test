@@ -10,7 +10,7 @@ from multiprocessing import Queue, Value
 from win32_utils import (
     CFG, find_potplayer_hwnd, post_key_to_potplayer,
     queue_put, VK_OEM_PERIOD, VK_OEM_COMMA, VK_OEM_2,
-    _user32, WM_USER, POT_SET_CURRENT_TIME,
+    _user32, WM_USER, POT_SET_CURRENT_TIME, capture_window,
 )
 from audio_capture import proc_audio_capture
 def _load_saved_setting(key, default):
@@ -22,7 +22,6 @@ def _load_saved_setting(key, default):
         return default
 def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
     import cv2
-    import mss
     import sys
     if getattr(sys, 'frozen', False):
         base = sys._MEIPASS
@@ -30,43 +29,23 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
         base = os.path.dirname(os.path.abspath(__file__))
     cascade_path = os.path.join(base, 'lbpcascade_animeface.xml')
     cascade = cv2.CascadeClassifier(cascade_path)
-    sct = mss.mss()
     interval = 1.0 / cfg["CAPTURE_FPS"]
     DETECT_EVERY_N = 5
     prev = None
     last_roi = None
     frame_count = 0
-    def get_potplayer_monitor():
-        try:
-            hwnd = find_potplayer_hwnd()
-            if hwnd:
-                rect = ctypes.wintypes.RECT()
-                ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rect))
-                pt = ctypes.wintypes.POINT(0, 0)
-                ctypes.windll.user32.ClientToScreen(hwnd, ctypes.byref(pt))
-                w = rect.right - rect.left
-                h = rect.bottom - rect.top
-                if w > 100 and h > 100:
-                    margin_x = int(w * 0.10)
-                    margin_y = int(h * 0.10)
-                    return {
-                        "left":   pt.x + margin_x,
-                        "top":    pt.y + margin_y,
-                        "width":  w - margin_x * 2,
-                        "height": h - margin_y * 2,
-                    }
-        except Exception:
-            pass
-        return sct.monitors[1]
-    capture_region   = get_potplayer_monitor()
-    region_refresh_t = time.time()
     while not stop_flag.value:
         t0 = time.perf_counter()
-        if time.time() - region_refresh_t > 5.0:
-            capture_region   = get_potplayer_monitor()
-            region_refresh_t = time.time()
-        raw  = np.array(sct.grab(capture_region))
-        gray = cv2.cvtColor(raw, cv2.COLOR_BGRA2GRAY)
+        raw = capture_window(find_potplayer_hwnd())
+        if raw is None:
+            time.sleep(interval)
+            continue
+        # 마진 적용 (전체 창의 10% 마진)
+        h, w = raw.shape[:2]
+        margin_x = int(w * 0.10)
+        margin_y = int(h * 0.10)
+        roi = raw[margin_y:h-margin_y, margin_x:w-margin_x]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGRA2GRAY)
         frame_count += 1
         motion = 0.0
         if frame_count % DETECT_EVERY_N == 1 or last_roi is None:

@@ -70,7 +70,6 @@ class LipSyncGUIRecordOpen:
         def pick_dir():
             from tkinter import filedialog
             path = filedialog.askdirectory(
-                parent=popup,
                 title="저장 위치 선택",
                 initialdir=state["save_dir"] or os.path.expanduser("~"))
             if path:
@@ -90,8 +89,8 @@ class LipSyncGUIRecordOpen:
                         json.dump(existing, f)
                 except Exception:
                     pass
-                self._record_save_dir = path  # _save_settings와 동기화
                 s = "normal" if os.path.isdir(path) else "disabled"
+                self._record_save_dir = path  # _save_settings와 동기화
                 rec_btn.config(state=s)
                 cap_btn.config(state=s)
 

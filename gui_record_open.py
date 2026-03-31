@@ -153,16 +153,23 @@ class LipSyncGUIRecordOpen:
             # 충돌로 응답 없음이 발생한다.
             # Win32 IFileOpenDialog (Vista+) 를 직접 호출해 우회한다.
             try:
+                import ctypes
+                # winfo_id()는 tkinter 내부 ID이므로 GetParent()로 실제 Win32 HWND를 얻는다.
+                hwnd = ctypes.windll.user32.GetParent(
+                    ctypes.c_void_p(int(popup.winfo_id()))
+                ) or int(self.root.winfo_id())
                 path = _win32_pick_folder(
-                    hwnd=popup.winfo_id(),
+                    hwnd=hwnd,
                     initial=state["save_dir"] or os.path.expanduser("~"),
                 )
             except Exception:
-                from tkinter import filedialog
+                import ctypes
                 popup.grab_release()
+                from tkinter import filedialog
                 path = filedialog.askdirectory(
                     title="저장 위치 선택",
-                    initialdir=state["save_dir"] or os.path.expanduser("~"))
+                    initialdir=state["save_dir"] or os.path.expanduser("~"),
+                    parent=self.root)
                 try:
                     popup.grab_set()
                 except Exception:

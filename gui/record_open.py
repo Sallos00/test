@@ -354,7 +354,7 @@ class LipSyncGUIRecordOpen:
 
                 try:
                     # [기능3] OBS 방식: ffmpeg 즉시 기동 후 오디오도 동시 시작
-                    state["screen_rec"].start(fps=30, out_path=_out_path)
+                    state["screen_rec"].start(fps=30)
                 except Exception as e:
                     self.root.after(0, lambda: rec_status.config(
                         text="⚠ 화면 캡처 실패: " + str(e), fg="#e0a03c"))

@@ -121,7 +121,7 @@ class LipSyncGUIBase:
 
         self._scale_var     = tk.StringVar( value=self._load_setting("scale",      "중"))
 
-        self._record_save_dir = self._load_setting("record_save_dir", "")            
+        self._record_save_dir = self._load_setting("record_save_dir", None) or ""
 
         # ── OP/ED 자동 스킵 설정 ────────────────────────────────────────────
         self._oped_auto_var     = tk.BooleanVar(

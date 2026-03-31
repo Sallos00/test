@@ -5,6 +5,9 @@ gui/record_open.py -- 녹화/캡처 팝업 열기 믹스인
   [기능1] 녹화 중에는 구간 녹화 체크박스 및 시간 입력칸 비활성화
   [기능2] 오버레이는 팟플레이어 위에만 (record_backend._show_overlay 개선)
   [기능3] OBS 방식 — 화면+오디오 동시 시작 후 ffmpeg 합산
+  [버그수정] 저장 위치 📂 버튼 클릭 시 파일 다이얼로그가 열리지 않던 문제 수정
+            (filedialog.askdirectory에 parent=popup을 전달하면 grab_set() 충돌로
+             다이얼로그가 차단됨 → parent 인수 제거 후 grab_release/grab_set으로 처리)
 """
 import os, threading
 import tkinter as tk
@@ -68,11 +71,31 @@ class LipSyncGUIRecordOpen:
                       padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
 
         def pick_dir():
+            """
+            저장 위치 선택 다이얼로그.
+
+            grab_set()이 걸린 Toplevel을 parent로 넘기면 filedialog가
+            grab을 가져가지 못해 열리지 않는다.
+            -> grab을 일시 해제하고 다이얼로그를 연 뒤 다시 복원한다.
+            """
             from tkinter import filedialog
+
+            # grab 일시 해제
+            try:
+                popup.grab_release()
+            except Exception:
+                pass
+
             path = filedialog.askdirectory(
-                parent=popup,
                 title="저장 위치 선택",
                 initialdir=state["save_dir"] or os.path.expanduser("~"))
+
+            # grab 복원
+            try:
+                popup.grab_set()
+            except Exception:
+                pass
+
             if path:
                 state["save_dir"] = path
                 save_dir_var.set(path)

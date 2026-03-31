@@ -110,12 +110,13 @@ def _set_owner(ov_hwnd: int, pot_hwnd: int):
 def _show_overlay(root, message: str, duration_ms: int = 3000):
     """
     팟플레이어 좌상단에 오버레이 표시.
-    owner를 팟플레이어로 설정하여 z-order를 OS가 자동 연동.
+    owner를 팟플레이어로 설정 → OS가 z-order를 자동 연동.
     팟플레이어가 다른 창 뒤로 가면 오버레이도 같이 뒤로 감.
+    OP/ED 스킵 팝업과 동일한 방식.
     """
     rect = _get_potplayer_rect()
     if rect is None:
-        return
+        return None
     px, py, pw, ph = rect
     try:
         from win32_utils import find_potplayer_hwnd
@@ -126,7 +127,7 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
     try:
         ov = tk.Toplevel(root)
         ov.overrideredirect(True)
-        ov.attributes("-topmost", False)
+        ov.attributes("-topmost", False)   # owned window가 z-order 연동을 담당
         ov.attributes("-alpha", 0.88)
         ov.configure(bg="#101010")
         ov.geometry(f"+{px + 12}+{py + 12}")
@@ -134,12 +135,27 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
                  bg="#101010", fg="#00c8e0", padx=14, pady=8).pack()
         ov.update_idletasks()
 
-        # owner 설정 — Tk 창이 화면에 나타난 뒤 hwnd를 얻어야 함
+        # owner를 팟플레이어로 설정 — OP/ED 팝업과 동일한 방식
+        # wm_frame() 대신 FindWindowEx로 hwnd를 안정적으로 얻음
+        _GWLP_HWNDPARENT = -8
         if pot_hwnd and _WIN_OK:
             try:
-                ov_hwnd = int(ov.wm_frame(), 16)
-                if ov_hwnd:
-                    _set_owner(ov_hwnd, pot_hwnd)
+                # Tk 내부 창 이름으로 Win32 hwnd 취득
+                tk_hwnd = int(ov.winfo_id())
+                # winfo_id()는 클라이언트 창 hwnd — 실제 top-level frame은 부모
+                ov_hwnd = ctypes.windll.user32.GetAncestor(tk_hwnd, 2)  # GA_ROOT
+                if not ov_hwnd:
+                    ov_hwnd = tk_hwnd
+                try:
+                    ctypes.windll.user32.SetWindowLongPtrW(ov_hwnd, _GWLP_HWNDPARENT, pot_hwnd)
+                except AttributeError:
+                    ctypes.windll.user32.SetWindowLongW(ov_hwnd, _GWLP_HWNDPARENT, pot_hwnd)
+                # owner 변경 후 z-order 반영을 위해 SWP_FRAMECHANGED
+                SWP_NOMOVE = 0x0002; SWP_NOSIZE = 0x0001
+                SWP_NOZORDER = 0x0004; SWP_FRAMECHANGED = 0x0020
+                ctypes.windll.user32.SetWindowPos(
+                    ov_hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
             except Exception:
                 pass
 
@@ -215,48 +231,87 @@ def _popen_no_window(cmd, **kwargs):
     return subprocess.Popen(cmd, **kwargs)
 
 
-# ── mss 기반 화면 캡처 (메인 캡처 루프) ─────────────────────────────────────────
+# ── PrintWindow 기반 화면 캡처 (메인 캡처 루프) ──────────────────────────────────
 def _mss_capture_loop(width, height, fps, running_flag, write_frame_cb):
     """
-    mss로 팟플레이어 영역을 실시간 캡처하여 write_frame_cb(bgr)을 호출.
-    팟플레이어가 이동해도 매 프레임마다 좌표를 새로 가져온다.
+    PrintWindow API로 팟플레이어 hwnd에서 직접 픽셀을 읽는다.
+    팟플레이어 위에 다른 창이 있어도 팟플레이어 내용만 캡처된다.
     """
     import numpy as np
     import cv2 as _cv2
+    from win32_utils import find_potplayer_hwnd
 
-    try:
-        import mss as _mss
-    except ImportError:
-        _log("mss 모듈 없음 — PrintWindow 폴백")
-        # mss 없으면 hwnd 기반 폴백: start()에서 hwnd 저장 필요
-        return
+    gdi32  = ctypes.windll.gdi32
+    user32 = ctypes.windll.user32
+    PW_RENDERFULLCONTENT = 0x00000002
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize",          ctypes.c_uint32), ("biWidth",       ctypes.c_int32),
+            ("biHeight",        ctypes.c_int32),  ("biPlanes",      ctypes.c_uint16),
+            ("biBitCount",      ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+            ("biSizeImage",     ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+            ("biYPelsPerMeter", ctypes.c_int32),  ("biClrUsed",     ctypes.c_uint32),
+            ("biClrImportant",  ctypes.c_uint32),
+        ]
+
+    class BITMAPINFO(ctypes.Structure):
+        _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
 
     interval = 1.0 / fps
-    with _mss.mss() as sct:
-        while running_flag.is_set():
-            t0 = __import__("time").time()
-            rect = _get_potplayer_rect()
-            if rect is None:
-                __import__("time").sleep(0.05)
-                continue
-            px, py, pw, ph = rect
-            pw = pw - (pw % 2)
-            ph = ph - (ph % 2)
-            if pw <= 0 or ph <= 0:
-                __import__("time").sleep(0.05)
-                continue
-            try:
-                shot = sct.grab({"left": px, "top": py, "width": pw, "height": ph})
-                arr  = np.frombuffer(shot.raw, dtype=np.uint8).reshape(ph, pw, 4)
-                bgr  = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
-                if (pw, ph) != (width, height):
-                    bgr = _cv2.resize(bgr, (width, height))
-                write_frame_cb(bgr)
-            except Exception as e:
-                _log(f"mss 프레임 오류: {e}")
-            sl = interval - (__import__("time").time() - t0)
-            if sl > 0:
-                __import__("time").sleep(sl)
+    while running_flag.is_set():
+        t0 = time.time()
+        try:
+            hwnd = find_potplayer_hwnd()
+            if not hwnd:
+                time.sleep(0.1); continue
+            video_hwnd = _get_potplayer_video_hwnd(hwnd)
+            target = video_hwnd if video_hwnd else hwnd
+
+            rc = wt.RECT()
+            user32.GetClientRect(target, ctypes.byref(rc))
+            cw = rc.right  - rc.left
+            ch = rc.bottom - rc.top
+            cw = cw - (cw % 2)
+            ch = ch - (ch % 2)
+            if cw <= 0 or ch <= 0:
+                time.sleep(0.05); continue
+
+            hdc_win = user32.GetDC(target)
+            hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth       = cw
+            bmi.bmiHeader.biHeight      = -ch   # top-down
+            bmi.bmiHeader.biPlanes      = 1
+            bmi.bmiHeader.biBitCount    = 32
+            bmi.bmiHeader.biCompression = 0
+
+            pBits = ctypes.c_void_p()
+            hbmp  = gdi32.CreateDIBSection(hdc_mem, ctypes.byref(bmi), 0,
+                                           ctypes.byref(pBits), None, 0)
+            old  = gdi32.SelectObject(hdc_mem, hbmp)
+            ok   = user32.PrintWindow(target, hdc_mem, PW_RENDERFULLCONTENT)
+            if not ok:
+                user32.PrintWindow(target, hdc_mem, 0)
+
+            buf_size = cw * ch * 4
+            raw  = (ctypes.c_uint8 * buf_size).from_address(pBits.value)
+            arr  = np.frombuffer(raw, dtype=np.uint8).reshape(ch, cw, 4).copy()
+            gdi32.SelectObject(hdc_mem, old)
+            gdi32.DeleteObject(hbmp)
+            gdi32.DeleteDC(hdc_mem)
+            user32.ReleaseDC(target, hdc_win)
+
+            bgr = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+            if (cw, ch) != (width, height):
+                bgr = _cv2.resize(bgr, (width, height))
+            write_frame_cb(bgr)
+        except Exception as e:
+            _log(f"PrintWindow 캡처 오류: {e}")
+        sl = interval - (time.time() - t0)
+        if sl > 0:
+            time.sleep(sl)
 
 
 # ── WGC 캡처 (PrintWindow 폴백 포함) ──────────────────────────────────────────

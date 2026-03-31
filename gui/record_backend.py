@@ -2,8 +2,7 @@
 gui/record_backend.py -- 오디오/화면 녹화 백엔드
 
 변경사항:
-  [기능2] 오버레이를 팟플레이어 위에만 표시 (SetWindowPos + HWND_TOPMOST 한 번만 설정,
-          팟플레이어 hwnd를 부모로 삼아 다른 창이 앞에 와도 팟플레이어 영역 위에만 출력)
+  [기능2] 오버레이를 팟플레이어의 owned window로 설정 → z-order 자동 연동
   [기능3] OBS 방식 싱크 (화면+오디오 동시 시작, ffmpeg로 후합산),
           autosinc_ffmpeg.log 는 실패 시에만 저장
 """
@@ -87,35 +86,23 @@ def _get_potplayer_rect():
         return None
 
 
-# ── 오버레이 (기능2: SetParent로 팟플레이어 자식 창 → 다른 창 위에 절대 안 뜸) ──
+# ── 오버레이 (기능2: 팟플레이어 owned window → z-order 자동 연동) ──────────────
+# SetWindowLongPtrW(ov_hwnd, GWLP_HWNDPARENT, pot_hwnd) 로 오버레이의 owner를
+# 팟플레이어로 설정하면, OS가 z-order를 자동으로 연동한다.
+# → 팟플레이어가 다른 창 뒤로 가면 오버레이도 같이 뒤로 감 (-topmost 불필요)
 _active_overlays: list = []
 
-# Win32 상수
-_GWL_STYLE        = -16
-_WS_CHILD         = 0x40000000
-_WS_POPUP         = 0x80000000
-_SWP_NOACTIVATE   = 0x0010
-_SWP_SHOWWINDOW   = 0x0040
-_HWND_TOP         = 0
+_GWLP_HWNDPARENT = -8   # SetWindowLongPtr 로 owner 설정
 
 
-def _attach_to_potplayer(ov_hwnd: int, pot_hwnd: int, rel_x: int, rel_y: int, ow: int, oh: int):
-    """
-    오버레이를 팟플레이어 Win32 자식 창으로 변환.
-    자식 창은 부모 영역 안에서만 렌더링되고,
-    부모(팟플레이어)가 다른 창 뒤로 가면 OS가 자동으로 가려줌.
-    """
+def _set_owner(ov_hwnd: int, pot_hwnd: int):
+    """오버레이의 Win32 owner를 팟플레이어로 설정."""
     try:
-        u32 = ctypes.windll.user32
-        # WS_POPUP 제거 → WS_CHILD 추가
-        style = u32.GetWindowLongW(ov_hwnd, _GWL_STYLE)
-        style = (style & ~_WS_POPUP) | _WS_CHILD
-        u32.SetWindowLongW(ov_hwnd, _GWL_STYLE, style)
-        # 부모를 팟플레이어로 지정
-        u32.SetParent(ov_hwnd, pot_hwnd)
-        # 팟플레이어 클라이언트 좌표 기준 배치
-        u32.SetWindowPos(ov_hwnd, _HWND_TOP, rel_x, rel_y, ow, oh,
-                         _SWP_NOACTIVATE | _SWP_SHOWWINDOW)
+        # 64bit: SetWindowLongPtrW / 32bit: SetWindowLongW — 둘 다 시도
+        try:
+            ctypes.windll.user32.SetWindowLongPtrW(ov_hwnd, _GWLP_HWNDPARENT, pot_hwnd)
+        except AttributeError:
+            ctypes.windll.user32.SetWindowLongW(ov_hwnd, _GWLP_HWNDPARENT, pot_hwnd)
     except Exception:
         pass
 
@@ -123,54 +110,55 @@ def _attach_to_potplayer(ov_hwnd: int, pot_hwnd: int, rel_x: int, rel_y: int, ow
 def _show_overlay(root, message: str, duration_ms: int = 3000):
     """
     팟플레이어 좌상단에 오버레이 표시.
-    SetParent()로 팟플레이어의 자식 창으로 만들어,
-    팟플레이어가 다른 창 뒤에 있으면 오버레이도 자동으로 가려짐.
+    owner를 팟플레이어로 설정하여 z-order를 OS가 자동 연동.
+    팟플레이어가 다른 창 뒤로 가면 오버레이도 같이 뒤로 감.
     """
-    try:
-        from win32_utils import find_potplayer_hwnd
-        pot_hwnd = find_potplayer_hwnd()
-        if not pot_hwnd or not _WIN_OK:
-            return
-    except Exception:
-        return
-
     rect = _get_potplayer_rect()
     if rect is None:
         return
+    px, py, pw, ph = rect
+    try:
+        from win32_utils import find_potplayer_hwnd
+        pot_hwnd = find_potplayer_hwnd() if _WIN_OK else None
+    except Exception:
+        pot_hwnd = None
 
-    px, py = rect[0], rect[1]
     try:
         ov = tk.Toplevel(root)
         ov.overrideredirect(True)
         ov.attributes("-topmost", False)
         ov.attributes("-alpha", 0.88)
         ov.configure(bg="#101010")
-        # 크기 확정을 위해 화면에 임시 배치
         ov.geometry(f"+{px + 12}+{py + 12}")
         tk.Label(ov, text=message, font=("Segoe UI", 11, "bold"),
                  bg="#101010", fg="#00c8e0", padx=14, pady=8).pack()
         ov.update_idletasks()
 
-        ow = ov.winfo_width()
-        oh = ov.winfo_height()
-
-        try:
-            ov_hwnd = int(ov.wm_frame(), 16)
-        except Exception:
-            ov_hwnd = None
-
-        if ov_hwnd:
-            _attach_to_potplayer(ov_hwnd, pot_hwnd, 12, 12, ow, oh)
+        # owner 설정 — Tk 창이 화면에 나타난 뒤 hwnd를 얻어야 함
+        if pot_hwnd and _WIN_OK:
+            try:
+                ov_hwnd = int(ov.wm_frame(), 16)
+                if ov_hwnd:
+                    _set_owner(ov_hwnd, pot_hwnd)
+            except Exception:
+                pass
 
         _active_overlays.append(ov)
 
+        # 팟플레이어 이동 시 오버레이 위치 동기화
+        def _track():
+            if not _try_exists(ov):
+                return
+            r = _get_potplayer_rect()
+            if r:
+                try: ov.geometry(f"+{r[0] + 12}+{r[1] + 12}")
+                except Exception: pass
+            try: root.after(150, _track)
+            except Exception: pass
+
+        root.after(150, _track)
+
         def _close():
-            try:
-                # 닫기 전 부모에서 분리해야 Tk destroy 가 안전하게 동작
-                if ov_hwnd and _WIN_OK:
-                    ctypes.windll.user32.SetParent(ov_hwnd, 0)
-            except Exception:
-                pass
             try: ov.destroy()
             except: pass
             try: _active_overlays.remove(ov)
@@ -178,8 +166,6 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
         root.after(duration_ms, _close)
     except Exception:
         pass
-
-
 def _try_exists(widget) -> bool:
     try:
         return widget.winfo_exists()
@@ -497,7 +483,6 @@ class _ScreenRecorder:
         if not ffmpeg_bin:
             raise RuntimeError("ffmpeg를 찾을 수 없습니다.")
 
-        # 항상 임시 경로에 영상만 저장 — 오디오 병합은 _save_mp4에서 처리
         self._tmp_video = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
         # 로그는 임시 파일 — 성공 시 삭제
         self._ffmpeg_log_path = os.path.join(tempfile.gettempdir(), "autosinc_ffmpeg.log")
@@ -629,7 +614,12 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
     merge_log = os.path.join(tempfile.gettempdir(), "autosinc_merge.log")
 
     import wave
-    audio_data = audio_arr.reshape(-1, audio_ch) if audio_ch > 1 else audio_arr.reshape(-1, 1)
+    if audio_ch > 1:
+        rem = len(audio_arr) % audio_ch
+        if rem: audio_arr = audio_arr[:-rem]
+        audio_data = audio_arr.reshape(-1, audio_ch)
+    else:
+        audio_data = audio_arr.reshape(-1, 1)
     pcm = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
     with wave.open(tmp_audio, "wb") as wf:
         wf.setnchannels(audio_ch)
@@ -646,7 +636,10 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
     ]
     with open(merge_log, "wb") as lf:
         proc = _popen_no_window(cmd, stdout=subprocess.DEVNULL, stderr=lf)
-        proc.wait()
+        try:
+            proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill(); proc.wait()
 
     if proc.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
         shutil.move(tmp_out, out_path)

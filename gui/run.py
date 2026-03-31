@@ -542,9 +542,49 @@ class LipSyncGUIRun:
 
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True)
-        popup.attributes("-topmost", True)
+        popup.attributes("-topmost", False)   # owned window가 z-order 연동을 담당
         popup.configure(bg=self.BORDER)
         popup.geometry(f"{pw}x{ph}+{px}+{py}")
+        popup.update_idletasks()
+
+        # owner를 팟플레이어로 설정 → 팟플레이어가 뒤로 가면 팝업도 같이 뒤로 감
+        _GWLP_HWNDPARENT = -8
+        try:
+            _ov_hwnd  = int(popup.wm_frame(), 16)
+            _pot_hwnd = hwnd
+            if _ov_hwnd and _pot_hwnd:
+                try:
+                    ctypes.windll.user32.SetWindowLongPtrW(_ov_hwnd, _GWLP_HWNDPARENT, _pot_hwnd)
+                except AttributeError:
+                    ctypes.windll.user32.SetWindowLongW(_ov_hwnd, _GWLP_HWNDPARENT, _pot_hwnd)
+        except Exception:
+            pass
+
+        # 팟플레이어 이동 시 팝업 위치 동기화
+        def _track_popup():
+            try:
+                if not popup.winfo_exists():
+                    return
+            except Exception:
+                return
+            _h = find_potplayer_hwnd()
+            if _h:
+                try:
+                    _rc = ctypes.wintypes.RECT()
+                    ctypes.windll.user32.GetWindowRect(_h, ctypes.byref(_rc))
+                    _pw2 = popup.winfo_width() or pw
+                    _ph2 = popup.winfo_height() or ph
+                    _px2 = max(vx, min(_rc.right  - _pw2 - 12, vx + vw - _pw2))
+                    _py2 = max(vy, min(_rc.bottom - _ph2 - 48, vy + vh - _ph2))
+                    popup.geometry(f"+{_px2}+{_py2}")
+                except Exception:
+                    pass
+            try:
+                self.root.after(150, _track_popup)
+            except Exception:
+                pass
+
+        self.root.after(150, _track_popup)
 
         def send_cmd(cmd: str):
             try:

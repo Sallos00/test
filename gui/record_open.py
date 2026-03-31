@@ -241,14 +241,22 @@ class LipSyncGUIRecordOpen:
             return path
 
         def show_recording_overlay():
-            from gui.record_backend import _show_overlay
+            from gui.record_backend import _show_overlay, _active_overlays
+            # 기존 녹화 오버레이가 남아있으면 먼저 닫기
+            close_recording_overlay()
             _show_overlay(self.root, "🔴 녹화중", duration_ms=99999999)
+            # _show_overlay가 _active_overlays 마지막에 추가한 위젯을 보관
+            if _active_overlays:
+                state["overlay"] = _active_overlays[-1]
 
         def close_recording_overlay():
+            from gui.record_backend import _active_overlays
             ov = state.get("overlay")
             if ov:
                 try: ov.destroy()
                 except Exception: pass
+                try: _active_overlays.remove(ov)
+                except ValueError: pass
                 state["overlay"] = None
 
         # ── 녹화 정지 ──────────────────────────────────────────────────────────
@@ -400,23 +408,21 @@ class LipSyncGUIRecordOpen:
         def do_capture():
             import time as _t
             from gui.record_backend import _get_potplayer_rect, _show_overlay
-            from win32_utils import find_potplayer_hwnd, capture_window
-            hwnd = find_potplayer_hwnd()
-            if not hwnd:
+            rect = _get_potplayer_rect()
+            if rect is None:
                 cap_status.config(text="⚠ 팟플레이어 창 없음", fg="#e0a03c")
                 return
             try:
+                import mss, numpy as np, cv2
                 from PIL import Image
-                img = capture_window(hwnd)
-                if img is None:
-                    cap_status.config(text="⚠ 캡처 실패", fg="#e0a03c")
-                    return
-                # BGRA to RGB
-                img = img[:, :, :3][:, :, ::-1]  # BGRA to BGR, then to RGB? Wait, PIL expects RGB
-                img = Image.fromarray(img)
+                px, py, pw, ph = rect
+                with mss.mss() as sct:
+                    shot = sct.grab({"left": px, "top": py, "width": pw, "height": ph})
+                    img  = np.array(shot)
+                    img  = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
                 ts  = _t.strftime("%Y%m%d_%H%M%S")
                 out = os.path.join(ensure_subdir("Screenshot"), f"capture_{ts}.png")
-                img.save(out, "PNG")
+                Image.fromarray(img).save(out, "PNG")
                 cap_status.config(text="✅ 저장: Screenshot/" + os.path.basename(out),
                                   fg=self.ACCENT3)
                 _show_overlay(self.root, "📷 장면이 캡처되었습니다.", duration_ms=3000)

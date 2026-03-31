@@ -7,10 +7,9 @@ from gui_record_backend import _log
 class LipSyncGUIRecordOpen:
 
     def _open_record_capture(self):
-        _default_dir = os.path.join(os.path.expanduser("~"), "Desktop")
         save_dir = getattr(self, "_record_save_dir", None) or self._load_setting("record_save_dir", "")
-        if not save_dir or not os.path.isdir(save_dir):
-            save_dir = _default_dir
+        if not save_dir:
+            save_dir = os.path.join(os.path.expanduser("~"), "Desktop")
 
         r     = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw    = round(340 * r)
@@ -60,19 +59,15 @@ class LipSyncGUIRecordOpen:
                  insertbackground=self.ACCENT,
                  relief="flat", bd=4, state="readonly").pack(side="left", fill="x", expand=True)
 
-        btn_kw = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
-                      padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
+        btn_kw     = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
+                          padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
+        pick_btn_kw = dict(**btn_kw)  # 📂 버튼은 항상 활성 — btn_kw와 별도로 관리
 
         def pick_dir():
             from tkinter import filedialog
-            popup.grab_release()
             path = filedialog.askdirectory(
                 title="저장 위치 선택",
                 initialdir=state["save_dir"] or os.path.expanduser("~"))
-            try:
-                popup.grab_set()
-            except Exception:
-                pass
             if path:
                 state["save_dir"] = path
                 save_dir_var.set(path)
@@ -101,7 +96,7 @@ class LipSyncGUIRecordOpen:
                 os.startfile(d)
 
         tk.Button(dir_row, text="📂", bg=self.BG3, fg=self.TEXT,
-                  command=pick_dir, **btn_kw).pack(side="left", padx=(4, 0))
+                  command=pick_dir, **pick_btn_kw).pack(side="left", padx=(4, 0))
         tk.Button(dir_row, text="🗂 열기", bg=self.BG3, fg=self.TEXT_MID,
                   command=open_dir, **btn_kw).pack(side="left", padx=(4, 0))
 

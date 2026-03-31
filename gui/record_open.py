@@ -68,35 +68,53 @@ class LipSyncGUIRecordOpen:
                       padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
 
         def pick_dir():
-            from tkinter import filedialog
-            try: popup.grab_release()
-            except Exception: pass
-            path = filedialog.askdirectory(
-                title="저장 위치 선택",
-                initialdir=state["save_dir"] or os.path.expanduser("~"))
-            try: popup.grab_set()
-            except Exception: pass
-            if path:
+            # grab_release 후 이벤트 루프가 안정된 시점에 다이얼로그를 띄운다.
+            # grab_release → filedialog → grab_set 을 동기로 연달아 호출하면
+            # Windows 에서 다이얼로그 창이 열리지 않는 타이밍 문제가 발생하므로
+            # after()로 메인 루프에 위임한다.
+            try:
+                popup.grab_release()
+            except Exception:
+                pass
+
+            def _open_dialog():
+                from tkinter import filedialog
+                path = filedialog.askdirectory(
+                    parent=self.root,
+                    title="저장 위치 선택",
+                    initialdir=state["save_dir"] or os.path.expanduser("~"),
+                )
+                # 다이얼로그가 닫힌 뒤 grab 복원
+                try:
+                    if popup.winfo_exists():
+                        popup.grab_set()
+                except Exception:
+                    pass
+                if not path:
+                    return
                 state["save_dir"] = path
                 save_dir_var.set(path)
+                # 설정 파일에 저장
                 try:
                     import json
                     existing = {}
                     try:
-                        with open(self.CFG_FILE, "r") as f:
+                        with open(self.CFG_FILE, "r", encoding="utf-8") as f:
                             existing = json.load(f)
                     except Exception:
                         pass
                     existing["record_save_dir"] = path
                     os.makedirs(self.APP_DIR, exist_ok=True)
-                    with open(self.CFG_FILE, "w") as f:
-                        json.dump(existing, f)
+                    with open(self.CFG_FILE, "w", encoding="utf-8") as f:
+                        json.dump(existing, f, ensure_ascii=False, indent=2)
                 except Exception:
                     pass
                 self._record_save_dir = path
                 s = "normal" if os.path.isdir(path) else "disabled"
                 rec_btn.config(state=s)
                 cap_btn.config(state=s)
+
+            popup.after(50, _open_dialog)
 
         def open_dir():
             d = state["save_dir"]

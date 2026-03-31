@@ -103,6 +103,7 @@ jobs:
           --hidden-import="win32gui"
           --hidden-import="tkinter"
           --hidden-import="tkinter.messagebox"
+          --hidden-import="tkinter.filedialog"
           --hidden-import="multiprocessing"
           --hidden-import="comtypes"
           --hidden-import="comtypes.client"

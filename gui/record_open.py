@@ -69,22 +69,10 @@ class LipSyncGUIRecordOpen:
 
         def pick_dir():
             from tkinter import filedialog
-            # popup을 잠깐 숨겨야 filedialog가 앞으로 나옴
-            # grab_release만 하면 popup이 filedialog를 가려버림
-            try:
-                popup.grab_release()
-                popup.withdraw()
-            except Exception:
-                pass
             path = filedialog.askdirectory(
+                parent=popup,
                 title="저장 위치 선택",
                 initialdir=state["save_dir"] or os.path.expanduser("~"))
-            try:
-                popup.deiconify()
-                popup.lift()
-                popup.grab_set()
-            except Exception:
-                pass
             if path:
                 state["save_dir"] = path
                 save_dir_var.set(path)

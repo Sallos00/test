@@ -4,91 +4,6 @@ import tkinter as tk
 from gui_record_backend import _log
 
 
-def _win32_pick_folder(hwnd: int, initial: str = "") -> str:
-    """
-    IFileOpenDialog (Vista+) 로 폴더 선택 다이얼로그를 띄운다.
-    tkinter filedialog 를 우회해 Toplevel+grab_set 환경에서도 동작한다.
-    선택하지 않으면 빈 문자열 반환.
-    """
-    import ctypes, ctypes.wintypes as wt
-    ole32   = ctypes.windll.ole32
-    shell32 = ctypes.windll.shell32
-
-    clsid = (ctypes.c_byte * 16)(
-        0x9C, 0x5A, 0x1C, 0xDC, 0xD6, 0x26, 0x10, 0x4D,
-        0x85, 0x71, 0x18, 0x4A, 0x7C, 0x37, 0x2A, 0x45,
-    )
-    iid_ifiledialog = (ctypes.c_byte * 16)(
-        0xB4, 0xDB, 0x1E, 0x42, 0x08, 0x52, 0xD5, 0x11,
-        0xBB, 0xBB, 0x00, 0xAA, 0x00, 0x30, 0x7A, 0x01,
-    )
-    iid_ishellitem = (ctypes.c_byte * 16)(
-        0x1E, 0xF9, 0xAD, 0x43, 0xA2, 0x05, 0xD5, 0x11,
-        0xBC, 0x8D, 0x00, 0xC0, 0x4F, 0xD9, 0x18, 0xD0,
-    )
-
-    CLSCTX_INPROC_SERVER = 1
-    FOS_PICKFOLDERS      = 0x20
-    FOS_FORCEFILESYSTEM  = 0x40
-    FOS_PATHMUSTEXIST    = 0x800
-
-    def _rel(obj):
-        fn = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(
-            ctypes.cast(ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))[0],
-                        ctypes.POINTER(ctypes.c_void_p))[2])
-        fn(obj)
-
-    def _vt(obj, idx, restype, *argtypes):
-        vt   = ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))[0]
-        fptr = ctypes.cast(vt,  ctypes.POINTER(ctypes.c_void_p))[idx]
-        return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(fptr)
-
-    pDlg = ctypes.c_void_p()
-    hr   = ole32.CoCreateInstance(
-        ctypes.byref(clsid), None, CLSCTX_INPROC_SERVER,
-        ctypes.byref(iid_ifiledialog), ctypes.byref(pDlg),
-    )
-    if hr < 0:
-        raise OSError(f"CoCreateInstance 실패: 0x{hr&0xFFFFFFFF:08X}")
-
-    try:
-        # SetOptions
-        _vt(pDlg, 9, ctypes.c_long, ctypes.c_uint)(
-            pDlg, FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
-
-        # SetFolder (초기 경로)
-        if initial and os.path.isdir(initial):
-            pItem = ctypes.c_void_p()
-            hr2 = shell32.SHCreateItemFromParsingName(
-                initial, None,
-                ctypes.byref(iid_ishellitem), ctypes.byref(pItem))
-            if hr2 >= 0 and pItem:
-                _vt(pDlg, 12, ctypes.c_long, ctypes.c_void_p)(pDlg, pItem)
-                _rel(pItem)
-
-        # Show — 블로킹. 취소 시 0x800704C7 반환
-        hr3 = _vt(pDlg, 3, ctypes.c_long, wt.HWND)(pDlg, hwnd)
-        if hr3 != 0:
-            return ""
-
-        # GetResult
-        pResult = ctypes.c_void_p()
-        _vt(pDlg, 20, ctypes.c_long,
-            ctypes.POINTER(ctypes.c_void_p))(pDlg, ctypes.byref(pResult))
-        try:
-            pName = ctypes.c_wchar_p()
-            _vt(pResult, 5, ctypes.c_long,
-                ctypes.c_int, ctypes.POINTER(ctypes.c_wchar_p))(
-                pResult, 0x80058000, ctypes.byref(pName))
-            result = pName.value or ""
-            ole32.CoTaskMemFree(pName)
-            return result
-        finally:
-            _rel(pResult)
-    finally:
-        _rel(pDlg)
-
-
 class LipSyncGUIRecordOpen:
 
     def _open_record_capture(self):
@@ -149,31 +64,15 @@ class LipSyncGUIRecordOpen:
                       padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
 
         def pick_dir():
-            # tkinter filedialog 는 Toplevel + grab_set 환경에서 Windows 메시지 루프
-            # 충돌로 응답 없음이 발생한다.
-            # Win32 IFileOpenDialog (Vista+) 를 직접 호출해 우회한다.
+            from tkinter import filedialog
+            popup.grab_release()
+            path = filedialog.askdirectory(
+                title="저장 위치 선택",
+                initialdir=state["save_dir"] or os.path.expanduser("~"))
             try:
-                import ctypes
-                # winfo_id()는 tkinter 내부 ID이므로 GetParent()로 실제 Win32 HWND를 얻는다.
-                hwnd = ctypes.windll.user32.GetParent(
-                    ctypes.c_void_p(int(popup.winfo_id()))
-                ) or int(self.root.winfo_id())
-                path = _win32_pick_folder(
-                    hwnd=hwnd,
-                    initial=state["save_dir"] or os.path.expanduser("~"),
-                )
+                popup.grab_set()
             except Exception:
-                import ctypes
-                popup.grab_release()
-                from tkinter import filedialog
-                path = filedialog.askdirectory(
-                    title="저장 위치 선택",
-                    initialdir=state["save_dir"] or os.path.expanduser("~"),
-                    parent=self.root)
-                try:
-                    popup.grab_set()
-                except Exception:
-                    pass
+                pass
             if path:
                 state["save_dir"] = path
                 save_dir_var.set(path)

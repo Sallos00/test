@@ -48,6 +48,9 @@ class LipSyncGUIRecordOpen:
                  bg=self.BG2, fg=self.TEXT_MID).pack(anchor="w")
         dir_row = tk.Frame(dir_card, bg=self.BG2)
         dir_row.pack(fill="x", pady=(round(4*r), 0))
+        dir_row.columnconfigure(0, weight=1)   # Entry가 남은 공간 차지
+        dir_row.columnconfigure(1, weight=0)   # 📂 버튼 고정 크기
+        dir_row.columnconfigure(2, weight=0)   # 🗂 버튼 고정 크기
         save_dir_var = tk.StringVar(value=save_dir)
 
         tk.Entry(dir_row, textvariable=save_dir_var,
@@ -56,7 +59,8 @@ class LipSyncGUIRecordOpen:
                  disabledforeground="#111111",
                  readonlybackground="white",
                  insertbackground=self.ACCENT,
-                 relief="flat", bd=4, state="readonly").pack(side="left", fill="x", expand=True)
+                 relief="flat", bd=4, state="readonly",
+                 width=28).grid(row=0, column=0, sticky="ew", padx=(0, 4))
 
         btn_kw = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
                       padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
@@ -66,7 +70,7 @@ class LipSyncGUIRecordOpen:
             # 버그 수정: parent=popup 지정 → dialog 가 팝업 뒤에 숨지 않음
             path = filedialog.askdirectory(
                 title="저장 위치 선택",
-                parent=popup,
+                parent=self.root,
                 initialdir=state["save_dir"] or os.path.expanduser("~"))
             if path:
                 state["save_dir"] = path
@@ -96,9 +100,11 @@ class LipSyncGUIRecordOpen:
                 os.startfile(d)
 
         tk.Button(dir_row, text="📂", bg=self.BG3, fg=self.TEXT,
-                  command=pick_dir, **btn_kw).pack(side="left", padx=(4, 0))
+                  activeforeground=self.TEXT, activebackground=self.BORDER,
+                  command=pick_dir, **btn_kw).grid(row=0, column=1, padx=(0, 4))
         tk.Button(dir_row, text="🗂 열기", bg=self.BG3, fg=self.TEXT_MID,
-                  command=open_dir, **btn_kw).pack(side="left", padx=(4, 0))
+                  activeforeground=self.TEXT_MID, activebackground=self.BORDER,
+                  command=open_dir, **btn_kw).grid(row=0, column=2)
 
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", padx=PAD, pady=(PAD_V, 0))
 

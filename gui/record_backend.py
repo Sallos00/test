@@ -87,22 +87,35 @@ def _get_potplayer_rect():
         return None
 
 
-# ── 오버레이 (기능2: 팟플레이어 위에만, 다른 창이 가려도 유지) ─────────────────
+# ── 오버레이 (기능2: SetParent로 팟플레이어 자식 창 → 다른 창 위에 절대 안 뜸) ──
 _active_overlays: list = []
 
-# Win32 SetWindowPos 플래그
-_HWND_TOPMOST   = -1
-_SWP_NOSIZE     = 0x0001
-_SWP_NOMOVE     = 0x0002
-_SWP_NOACTIVATE = 0x0010
-_SWP_FLAGS      = _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE
+# Win32 상수
+_GWL_STYLE        = -16
+_WS_CHILD         = 0x40000000
+_WS_POPUP         = 0x80000000
+_SWP_NOACTIVATE   = 0x0010
+_SWP_SHOWWINDOW   = 0x0040
+_HWND_TOP         = 0
 
 
-def _make_overlay_topmost(hwnd_int: int):
-    """SetWindowPos로 오버레이를 TOPMOST 설정 (팟플레이어 위 고정)."""
+def _attach_to_potplayer(ov_hwnd: int, pot_hwnd: int, rel_x: int, rel_y: int, ow: int, oh: int):
+    """
+    오버레이를 팟플레이어 Win32 자식 창으로 변환.
+    자식 창은 부모 영역 안에서만 렌더링되고,
+    부모(팟플레이어)가 다른 창 뒤로 가면 OS가 자동으로 가려줌.
+    """
     try:
-        ctypes.windll.user32.SetWindowPos(
-            hwnd_int, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_FLAGS)
+        u32 = ctypes.windll.user32
+        # WS_POPUP 제거 → WS_CHILD 추가
+        style = u32.GetWindowLongW(ov_hwnd, _GWL_STYLE)
+        style = (style & ~_WS_POPUP) | _WS_CHILD
+        u32.SetWindowLongW(ov_hwnd, _GWL_STYLE, style)
+        # 부모를 팟플레이어로 지정
+        u32.SetParent(ov_hwnd, pot_hwnd)
+        # 팟플레이어 클라이언트 좌표 기준 배치
+        u32.SetWindowPos(ov_hwnd, _HWND_TOP, rel_x, rel_y, ow, oh,
+                         _SWP_NOACTIVATE | _SWP_SHOWWINDOW)
     except Exception:
         pass
 
@@ -110,56 +123,54 @@ def _make_overlay_topmost(hwnd_int: int):
 def _show_overlay(root, message: str, duration_ms: int = 3000):
     """
     팟플레이어 좌상단에 오버레이 표시.
-    -topmost + SetWindowPos(TOPMOST) 조합으로 다른 창이 팟플레이어 앞에 와도
-    오버레이는 팟플레이어 영역 위에 남아있음.
+    SetParent()로 팟플레이어의 자식 창으로 만들어,
+    팟플레이어가 다른 창 뒤에 있으면 오버레이도 자동으로 가려짐.
     """
+    try:
+        from win32_utils import find_potplayer_hwnd
+        pot_hwnd = find_potplayer_hwnd()
+        if not pot_hwnd or not _WIN_OK:
+            return
+    except Exception:
+        return
+
     rect = _get_potplayer_rect()
     if rect is None:
         return
-    px, py, pw, ph = rect
+
+    px, py = rect[0], rect[1]
     try:
         ov = tk.Toplevel(root)
         ov.overrideredirect(True)
-        ov.attributes("-topmost", True)
+        ov.attributes("-topmost", False)
         ov.attributes("-alpha", 0.88)
         ov.configure(bg="#101010")
+        # 크기 확정을 위해 화면에 임시 배치
         ov.geometry(f"+{px + 12}+{py + 12}")
         tk.Label(ov, text=message, font=("Segoe UI", 11, "bold"),
                  bg="#101010", fg="#00c8e0", padx=14, pady=8).pack()
         ov.update_idletasks()
 
-        # Win32 TOPMOST 강제 설정 — Tk -topmost 와 병행
+        ow = ov.winfo_width()
+        oh = ov.winfo_height()
+
         try:
-            import ctypes as _ct
-            hwnd_int = int(ov.wm_frame(), 16)
+            ov_hwnd = int(ov.wm_frame(), 16)
         except Exception:
-            hwnd_int = None
-        if hwnd_int:
-            _make_overlay_topmost(hwnd_int)
+            ov_hwnd = None
+
+        if ov_hwnd:
+            _attach_to_potplayer(ov_hwnd, pot_hwnd, 12, 12, ow, oh)
 
         _active_overlays.append(ov)
 
-        # 팟플레이어 위치 추적 루프 (100ms마다 오버레이 위치 동기화)
-        def _track():
-            if not _try_exists(ov):
-                return
-            r = _get_potplayer_rect()
-            if r:
-                nx, ny = r[0] + 12, r[1] + 12
-                try:
-                    ov.geometry(f"+{nx}+{ny}")
-                    if hwnd_int:
-                        _make_overlay_topmost(hwnd_int)
-                except Exception:
-                    pass
+        def _close():
             try:
-                root.after(100, _track)
+                # 닫기 전 부모에서 분리해야 Tk destroy 가 안전하게 동작
+                if ov_hwnd and _WIN_OK:
+                    ctypes.windll.user32.SetParent(ov_hwnd, 0)
             except Exception:
                 pass
-
-        root.after(100, _track)
-
-        def _close():
             try: ov.destroy()
             except: pass
             try: _active_overlays.remove(ov)
@@ -486,7 +497,8 @@ class _ScreenRecorder:
         if not ffmpeg_bin:
             raise RuntimeError("ffmpeg를 찾을 수 없습니다.")
 
-        self._tmp_video = out_path or os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
+        # 항상 임시 경로에 영상만 저장 — 오디오 병합은 _save_mp4에서 처리
+        self._tmp_video = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
         # 로그는 임시 파일 — 성공 시 삭제
         self._ffmpeg_log_path = os.path.join(tempfile.gettempdir(), "autosinc_ffmpeg.log")
 

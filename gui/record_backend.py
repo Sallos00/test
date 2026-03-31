@@ -162,10 +162,13 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
             try: ov.destroy()
             except: pass
             try: _active_overlays.remove(ov)
-            except: pass
+            except ValueError: pass
         root.after(duration_ms, _close)
+
+        return ov
     except Exception:
         pass
+    return None
 def _try_exists(widget) -> bool:
     try:
         return widget.winfo_exists()
@@ -210,6 +213,50 @@ def _popen_no_window(cmd, **kwargs):
     CREATE_NO_WINDOW = 0x08000000
     kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
     return subprocess.Popen(cmd, **kwargs)
+
+
+# ── mss 기반 화면 캡처 (메인 캡처 루프) ─────────────────────────────────────────
+def _mss_capture_loop(width, height, fps, running_flag, write_frame_cb):
+    """
+    mss로 팟플레이어 영역을 실시간 캡처하여 write_frame_cb(bgr)을 호출.
+    팟플레이어가 이동해도 매 프레임마다 좌표를 새로 가져온다.
+    """
+    import numpy as np
+    import cv2 as _cv2
+
+    try:
+        import mss as _mss
+    except ImportError:
+        _log("mss 모듈 없음 — PrintWindow 폴백")
+        # mss 없으면 hwnd 기반 폴백: start()에서 hwnd 저장 필요
+        return
+
+    interval = 1.0 / fps
+    with _mss.mss() as sct:
+        while running_flag.is_set():
+            t0 = __import__("time").time()
+            rect = _get_potplayer_rect()
+            if rect is None:
+                __import__("time").sleep(0.05)
+                continue
+            px, py, pw, ph = rect
+            pw = pw - (pw % 2)
+            ph = ph - (ph % 2)
+            if pw <= 0 or ph <= 0:
+                __import__("time").sleep(0.05)
+                continue
+            try:
+                shot = sct.grab({"left": px, "top": py, "width": pw, "height": ph})
+                arr  = np.frombuffer(shot.raw, dtype=np.uint8).reshape(ph, pw, 4)
+                bgr  = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+                if (pw, ph) != (width, height):
+                    bgr = _cv2.resize(bgr, (width, height))
+                write_frame_cb(bgr)
+            except Exception as e:
+                _log(f"mss 프레임 오류: {e}")
+            sl = interval - (__import__("time").time() - t0)
+            if sl > 0:
+                __import__("time").sleep(sl)
 
 
 # ── WGC 캡처 (PrintWindow 폴백 포함) ──────────────────────────────────────────
@@ -525,8 +572,8 @@ class _ScreenRecorder:
 
     def _loop(self):
         try:
-            _wgc_capture_hwnd(
-                self._hwnd, self._size[0], self._size[1],
+            _mss_capture_loop(
+                self._size[0], self._size[1],
                 self._fps, self._running_flag, self._write_frame)
         except Exception as e:
             _log(f"캡처 루프 예외: {e}")

@@ -372,6 +372,11 @@ class LipSyncGUIRun:
                     if not hasattr(self, "_log_lines"):
                         self._log_lines = collections.deque(maxlen=100)
                     self._log_lines.append(f"🔊 {msg}")
+                    # 캡처 방식 감지 — send_log 메시지에서 추출
+                    if "[ProcessLoopback]" in msg:
+                        self._aud_capture_mode = "ProcessLoopback"
+                    elif "[GlobalLoopback]" in msg:
+                        self._aud_capture_mode = "GlobalLoopback"
                 except Exception:
                     break
 
@@ -410,7 +415,9 @@ class LipSyncGUIRun:
                 self._pot_lbl.config(text="연결됨" if pot_ok else "미감지", fg=c)
                 c = self.ACCENT3 if aud_n > 0 else self.TEXT_DIM
                 self._aud_dot.config(fg=c)
-                self._aud_lbl.config(text="캡처 중" if aud_n > 0 else "대기 중", fg=c)
+                _aud_mode = getattr(self, "_aud_capture_mode", "")
+                _aud_suffix = f" ({_aud_mode})" if _aud_mode and aud_n > 0 else ""
+                self._aud_lbl.config(text=("캡처 중" if aud_n > 0 else "대기 중") + _aud_suffix, fg=c)
                 self._proc_dot.config(fg=self.ACCENT)
                 self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
 
@@ -451,7 +458,9 @@ class LipSyncGUIRun:
             self._pot_dot.config(fg=c); self._pot_lbl.config(text=t, fg=c)
 
             c = self.ACCENT3 if aud_n > 0 else self.TEXT_DIM
-            t = "캡처 중" if aud_n > 0 else "대기 중"
+            _aud_mode = getattr(self, "_aud_capture_mode", "")
+            _aud_suffix = f" ({_aud_mode})" if _aud_mode and aud_n > 0 else ""
+            t = ("캡처 중" if aud_n > 0 else "대기 중") + _aud_suffix
             self._aud_dot.config(fg=c); self._aud_lbl.config(text=t, fg=c)
 
             if self._running and lip_n > 0:

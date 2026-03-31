@@ -152,3 +152,78 @@ def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
     # wParam = 명령(POT_SET_CURRENT_TIME), lParam = 위치값
     _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, int(new_pos))
     return new_pos, True
+
+def capture_window(hwnd):
+    """특정 창의 내용을 캡처하여 numpy 배열로 반환한다."""
+    if not hwnd:
+        return None
+    
+    try:
+        # 창의 DC 가져오기
+        hdc_window = ctypes.windll.user32.GetWindowDC(hwnd)
+        if not hdc_window:
+            return None
+        
+        # 창 크기 가져오기 (전체 창 영역)
+        rect = ctypes.wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        
+        if width <= 0 or height <= 0:
+            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
+            return None
+        
+        # 메모리 DC 생성
+        hdc_mem = ctypes.windll.gdi32.CreateCompatibleDC(hdc_window)
+        if not hdc_mem:
+            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
+            return None
+        
+        # 비트맵 생성
+        hbitmap = ctypes.windll.gdi32.CreateCompatibleBitmap(hdc_window, width, height)
+        if not hbitmap:
+            ctypes.windll.gdi32.DeleteDC(hdc_mem)
+            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
+            return None
+        
+        # 비트맵 선택
+        hbitmap_old = ctypes.windll.gdi32.SelectObject(hdc_mem, hbitmap)
+        
+        # 창 내용 복사 (전체 창)
+        if not ctypes.windll.user32.PrintWindow(hwnd, hdc_mem, 0):
+            ctypes.windll.gdi32.SelectObject(hdc_mem, hbitmap_old)
+            ctypes.windll.gdi32.DeleteObject(hbitmap)
+            ctypes.windll.gdi32.DeleteDC(hdc_mem)
+            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
+            return None
+        
+        # 비트맵 정보 가져오기
+        bmi = ctypes.create_string_buffer(40)  # BITMAPINFOHEADER
+        bmi_header = (ctypes.c_int * 11)(40, width, height, 1, 32, 0, width * height * 4, 0, 0, 0, 0)
+        ctypes.memmove(bmi, ctypes.addressof(bmi_header), 40)
+        
+        # 픽셀 데이터 가져오기
+        pixels = ctypes.create_string_buffer(width * height * 4)
+        if ctypes.windll.gdi32.GetDIBits(hdc_mem, hbitmap, 0, height, pixels, bmi, 0) == 0:
+            ctypes.windll.gdi32.SelectObject(hdc_mem, hbitmap_old)
+            ctypes.windll.gdi32.DeleteObject(hbitmap)
+            ctypes.windll.gdi32.DeleteDC(hdc_mem)
+            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
+            return None
+        
+        # numpy 배열로 변환 (BGRA -> RGBA)
+        import numpy as np
+        arr = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 4))
+        arr = np.flipud(arr)  # Y축 뒤집기
+        
+        # 정리
+        ctypes.windll.gdi32.SelectObject(hdc_mem, hbitmap_old)
+        ctypes.windll.gdi32.DeleteObject(hbitmap)
+        ctypes.windll.gdi32.DeleteDC(hdc_mem)
+        ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
+        
+        return arr
+    
+    except Exception:
+        return None

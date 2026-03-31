@@ -3,13 +3,10 @@ import os, threading
 import tkinter as tk
 from gui_record_backend import _log
 
-
 class LipSyncGUIRecordOpen:
 
     def _open_record_capture(self):
         save_dir = getattr(self, "_record_save_dir", None) or self._load_setting("record_save_dir", "")
-        if not save_dir:
-            save_dir = os.path.join(os.path.expanduser("~"), "Desktop")
 
         r     = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw    = round(340 * r)
@@ -59,9 +56,8 @@ class LipSyncGUIRecordOpen:
                  insertbackground=self.ACCENT,
                  relief="flat", bd=4, state="readonly").pack(side="left", fill="x", expand=True)
 
-        btn_kw     = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
-                          padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
-        pick_btn_kw = dict(**btn_kw)  # 📂 버튼은 항상 활성 — btn_kw와 별도로 관리
+        btn_kw = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
+                      padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
 
         def pick_dir():
             from tkinter import filedialog
@@ -96,7 +92,7 @@ class LipSyncGUIRecordOpen:
                 os.startfile(d)
 
         tk.Button(dir_row, text="📂", bg=self.BG3, fg=self.TEXT,
-                  command=pick_dir, **pick_btn_kw).pack(side="left", padx=(4, 0))
+                  command=pick_dir, **btn_kw).pack(side="left", padx=(4, 0))
         tk.Button(dir_row, text="🗂 열기", bg=self.BG3, fg=self.TEXT_MID,
                   command=open_dir, **btn_kw).pack(side="left", padx=(4, 0))
 
@@ -217,14 +213,13 @@ class LipSyncGUIRecordOpen:
         def show_recording_overlay():
             try:
                 from gui_record_backend import _get_potplayer_rect
-                from win32_utils import find_potplayer_hwnd
-                import ctypes
                 rect = _get_potplayer_rect()
                 if rect is None:
                     return
                 px, py = rect[0], rect[1]
                 ov = tk.Toplevel(self.root)
                 ov.overrideredirect(True)
+                ov.attributes("-topmost", True)
                 ov.attributes("-alpha", 0.88)
                 ov.configure(bg="#101010")
                 ov.geometry(f"+{px + 12}+{py + 12}")
@@ -233,29 +228,6 @@ class LipSyncGUIRecordOpen:
                          bg="#101010", fg="#00c8e0",
                          padx=14, pady=8).pack()
                 ov.update_idletasks()
-                # 팟플레이어 바로 위 z-order에만 위치 (topmost 제거)
-                # SetWindowPos로 팟플레이어 hwnd 바로 위에 삽입
-                try:
-                    pot_hwnd = find_potplayer_hwnd()
-                    if pot_hwnd:
-                        HWND_NOTOPMOST = -2
-                        SWP_NOMOVE = 0x0002
-                        SWP_NOSIZE = 0x0001
-                        SWP_NOACTIVATE = 0x0010
-                        ov_hwnd = ctypes.windll.user32.FindWindowW(None, None)
-                        ov_hwnd = int(ov.wm_frame(), 16) if hasattr(ov, 'wm_frame') else 0
-                        # Tkinter HWND 추출
-                        ov_hwnd = ctypes.windll.user32.GetParent(
-                            ctypes.c_void_p(int(ov.winfo_id()))
-                        ) or int(ov.winfo_id())
-                        # 팟플레이어 바로 위(위에 삽입)
-                        ctypes.windll.user32.SetWindowPos(
-                            ov_hwnd, pot_hwnd,
-                            0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-                        )
-                except Exception:
-                    pass
                 state["overlay"] = ov
             except Exception:
                 pass
@@ -269,6 +241,17 @@ class LipSyncGUIRecordOpen:
                     pass
                 state["overlay"] = None
 
+        def lock_range_widgets():
+            range_chk.config(state="disabled")
+            start_entry.config(state="disabled")
+            end_entry.config(state="disabled")
+
+        def unlock_range_widgets():
+            range_chk.config(state="normal")
+            entry_state = "normal" if range_var.get() else "disabled"
+            start_entry.config(state=entry_state)
+            end_entry.config(state=entry_state)
+
         def stop_record():
             if not state["recording"]:
                 return
@@ -281,6 +264,7 @@ class LipSyncGUIRecordOpen:
                 import time as _t, threading as _th
                 self.root.after(0, lambda: rec_status.config(text="💾 저장 중...", fg=self.TEXT_MID))
                 try:
+                    # video stop과 audio stop을 병렬로 실행
                     video_result = [None]; video_exc = [None]
                     audio_result = [None, None, None]; audio_exc = [None]
 
@@ -303,37 +287,29 @@ class LipSyncGUIRecordOpen:
 
                     tmp_video = video_result[0]
                     audio_arr, audio_sr, audio_ch = audio_result
+
                     out = state.get("out_path") or os.path.join(ensure_subdir("Video"), f"record_{_t.strftime('%Y%m%d_%H%M%S')}.mp4")
                     self.root.after(0, lambda: rec_status.config(text="⏳ 오디오 병합 중...", fg=self.TEXT_MID))
                     from gui_record_backend import _save_mp4
                     _save_mp4(tmp_video, audio_arr, audio_sr, audio_ch, out)
                     if os.path.isfile(out) and os.path.getsize(out) > 1024:
                         self.root.after(0, lambda: rec_status.config(
-                            text="✅ 저장 완료: Video/" + os.path.basename(out), fg=self.ACCENT3))
+                            text="✅ 저장 완료: Video/" + os.path.basename(out),
+                            fg=self.ACCENT3))
                     else:
                         self.root.after(0, lambda: rec_status.config(
                             text="⚠ 저장 실패: 파일이 비어있습니다.", fg="#e0a03c"))
                 except Exception as e:
                     import traceback, tempfile
+                    tb = traceback.format_exc()
                     try:
                         with open(os.path.join(tempfile.gettempdir(), "autosinc_record_error.txt"), "w", encoding="utf-8") as lf:
-                            lf.write(traceback.format_exc())
+                            lf.write(tb)
                     except: pass
                     self.root.after(0, lambda: rec_status.config(
                         text="⚠ 저장 실패: " + str(e)[:80], fg="#e0a03c"))
 
             threading.Thread(target=_save, daemon=True).start()
-
-        def lock_range_widgets():
-            range_chk.config(state="disabled")
-            start_entry.config(state="disabled")
-            end_entry.config(state="disabled")
-
-        def unlock_range_widgets():
-            range_chk.config(state="normal")
-            entry_state = "normal" if range_var.get() else "disabled"
-            start_entry.config(state=entry_state)
-            end_entry.config(state=entry_state)
 
         def start_record():
             from gui_record_backend import _CV2_OK, _PIL_OK, _AudioRecorder, _ScreenRecorder
@@ -371,7 +347,6 @@ class LipSyncGUIRecordOpen:
                 state["audio_rec"] = _AudioRecorder()
                 if pid:
                     state["audio_rec"].start(pid)
-                    # 첫 오디오 패킷이 실제로 도착할 때까지 대기 (최대 2초)
                     arrived = state["audio_rec"].first_frame_event.wait(timeout=2.0)
                     _log(f"오디오 첫 패킷 {'수신' if arrived else '타임아웃 → 강행'}")
 

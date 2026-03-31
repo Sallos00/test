@@ -406,20 +406,70 @@ class LipSyncGUIRecordOpen:
 
         # ── 캡처 ───────────────────────────────────────────────────────────────
         def do_capture():
-            import time as _t
-            from gui.record_backend import _get_potplayer_rect, _show_overlay
-            rect = _get_potplayer_rect()
-            if rect is None:
+            import time as _t, ctypes, ctypes.wintypes as wt
+            from gui.record_backend import _get_potplayer_video_hwnd, _show_overlay
+            from win32_utils import find_potplayer_hwnd
+            hwnd = find_potplayer_hwnd()
+            if not hwnd:
                 cap_status.config(text="⚠ 팟플레이어 창 없음", fg="#e0a03c")
                 return
             try:
-                import mss, numpy as np, cv2
+                import numpy as np, cv2
                 from PIL import Image
-                px, py, pw, ph = rect
-                with mss.mss() as sct:
-                    shot = sct.grab({"left": px, "top": py, "width": pw, "height": ph})
-                    img  = np.array(shot)
-                    img  = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+
+                video_hwnd = _get_potplayer_video_hwnd(hwnd)
+                target = video_hwnd if video_hwnd else hwnd
+
+                gdi32  = ctypes.windll.gdi32
+                user32 = ctypes.windll.user32
+                PW_RENDERFULLCONTENT = 0x00000002
+
+                class BITMAPINFOHEADER(ctypes.Structure):
+                    _fields_ = [
+                        ("biSize",          ctypes.c_uint32), ("biWidth",       ctypes.c_int32),
+                        ("biHeight",        ctypes.c_int32),  ("biPlanes",      ctypes.c_uint16),
+                        ("biBitCount",      ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                        ("biSizeImage",     ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                        ("biYPelsPerMeter", ctypes.c_int32),  ("biClrUsed",     ctypes.c_uint32),
+                        ("biClrImportant",  ctypes.c_uint32),
+                    ]
+                class BITMAPINFO(ctypes.Structure):
+                    _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
+
+                rc = wt.RECT()
+                user32.GetClientRect(target, ctypes.byref(rc))
+                cw = rc.right - rc.left
+                ch = rc.bottom - rc.top
+                if cw <= 0 or ch <= 0:
+                    cap_status.config(text="⚠ 창 크기 오류", fg="#e0a03c")
+                    return
+
+                hdc_win = user32.GetDC(target)
+                hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
+                bmi = BITMAPINFO()
+                bmi.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
+                bmi.bmiHeader.biWidth       = cw
+                bmi.bmiHeader.biHeight      = -ch
+                bmi.bmiHeader.biPlanes      = 1
+                bmi.bmiHeader.biBitCount    = 32
+                bmi.bmiHeader.biCompression = 0
+                pBits = ctypes.c_void_p()
+                hbmp  = gdi32.CreateDIBSection(hdc_mem, ctypes.byref(bmi), 0,
+                                               ctypes.byref(pBits), None, 0)
+                old  = gdi32.SelectObject(hdc_mem, hbmp)
+                ok   = user32.PrintWindow(target, hdc_mem, PW_RENDERFULLCONTENT)
+                if not ok:
+                    user32.PrintWindow(target, hdc_mem, 0)
+
+                buf_size = cw * ch * 4
+                raw = (ctypes.c_uint8 * buf_size).from_address(pBits.value)
+                arr = np.frombuffer(raw, dtype=np.uint8).reshape(ch, cw, 4).copy()
+                gdi32.SelectObject(hdc_mem, old)
+                gdi32.DeleteObject(hbmp)
+                gdi32.DeleteDC(hdc_mem)
+                user32.ReleaseDC(target, hdc_win)
+
+                img = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
                 ts  = _t.strftime("%Y%m%d_%H%M%S")
                 out = os.path.join(ensure_subdir("Screenshot"), f"capture_{ts}.png")
                 Image.fromarray(img).save(out, "PNG")

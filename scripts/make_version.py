@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 content = """VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 0, 0, 0),
-    prodvers=(2, 0, 0, 0),
+    filevers=(3, 0, 0, 0),
+    prodvers=(3, 0, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,

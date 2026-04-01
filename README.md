@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/26393917/README.md)
+
 # 🎬 Auto Sinc
 
 팟플레이어 재생 중 화면(입모양)과 오디오를 실시간 분석하여  

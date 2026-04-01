@@ -474,11 +474,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        raw_offset_ms, _, _, lip_mean, aud_mean = compute_offset(lip_sig, aud_sig)
+        raw_offset_ms, lip_std, aud_std, lip_mean, aud_mean = compute_offset(lip_sig, aud_sig)
 
-        if dgc < 3:
-            dgc += 1
-            add_log(f"📊 raw_offset={raw_offset_ms:.0f}ms lip={lip_mean:.3f} aud={aud_mean:.3f}")
+        # 매 사이클 진단 로그
+        add_log(f"📊 raw={raw_offset_ms:.0f}ms lip_std={lip_std:.3f} aud_std={aud_std:.3f} "
+                f"lip_mean={lip_mean:.3f} aud_mean={aud_mean:.3f} "
+                f"n={len(lip_sig)}")
 
         if lip_mean < 1e-6:
             push_state("미감지", 0, tms, lgl, pot_ok,
@@ -486,25 +487,31 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(1.0)
             continue
 
+        # lip_std 또는 aud_std가 너무 낮으면 신호가 flat → correlation 신뢰 불가
+        if lip_std < 0.05 or aud_std < 0.05:
+            add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_std={aud_std:.3f}) → 건너뜀")
+            push_state("신호 부족", 0, tms, lgl, pot_ok,
+                       lip_n, aud_n, notify, oped_prompt)
+            time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
+            continue
+
         # ── [개선] EMA 스무딩 ────────────────────────────────────────────────
-        # OBS 버퍼 보정 방식에서 착안:
-        # raw correlation 값을 그대로 쓰면 프레임마다 흔들려 과보정이 생긴다.
-        # EMA로 스무딩한 뒤 임계값을 초과할 때만 보정 실행.
-        #   smoothed = alpha * raw + (1-alpha) * smoothed_prev
-        # alpha=0.25 → 약 4 사이클에 걸쳐 수렴 (안정적이면서 반응도 빠름)
         if not EMA_INIT:
             smoothed_offset = raw_offset_ms
             EMA_INIT        = True
         else:
             smoothed_offset = EMA_ALPHA * raw_offset_ms + (1.0 - EMA_ALPHA) * smoothed_offset
 
-        offset_ms = smoothed_offset   # 이후 보정 결정은 스무딩된 값 사용
-
-        if dgc <= 3:
-            add_log(f"📈 smoothed_offset={offset_ms:.1f}ms (EMA α={EMA_ALPHA})")
+        offset_ms = smoothed_offset
+        add_log(f"📈 smoothed={offset_ms:.1f}ms (EMA α={EMA_ALPHA})")
 
         if abs(offset_ms) >= THRESH and hwnd:
             steps = min(int(abs(offset_ms) / STEP), MAX_STEPS)
+            # correlate(lip, aud) lag 부호 해석:
+            #   lag > 0 : lip 피크가 aud보다 나중에 나타남 → 오디오가 빠름
+            #             → 오디오를 늦춰야 함 → Shift+. (VK_OEM_PERIOD)
+            #   lag < 0 : lip 피크가 aud보다 먼저 나타남 → 오디오가 늦음
+            #             → 오디오를 당겨야 함 → Shift+, (VK_OEM_COMMA)
             sign  = 1 if offset_ms > 0 else -1
             if abs(tms + steps * STEP * sign) > MTM:
                 allowed = MTM - abs(tms)
@@ -515,7 +522,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                            lip_n, aud_n, notify, oped_prompt)
                 time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
                 continue
-            direction = "빠르게" if offset_ms > 0 else "느리게"
+            direction = "빠르게(오디오 늦춤)" if offset_ms > 0 else "느리게(오디오 당김)"
             add_log(f"보정: {direction} ×{steps} ({steps * STEP}ms) [스무딩={offset_ms:.1f}ms]")
             for _ in range(steps):
                 vk = VK_OEM_PERIOD if offset_ms > 0 else VK_OEM_COMMA

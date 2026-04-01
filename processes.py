@@ -126,6 +126,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     CDS   = 180
     MWI   = 15.0
     MMR  = 0.002
+    _qpc_f = qpc_freq()   # QPC 주파수 — aub 타임스탬프(QPC 기준) 비교용
     MMC   = 0.8
     MMF = 0.70
     MCF  = 2
@@ -156,7 +157,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     def is_music_playing():
         if len(aub) < 10:
             return False
-        now    = time.time()
+        now    = qpc_now() / _qpc_f   # [수정] QPC 기준 — aub 타임스탬프와 단위 통일
         cutoff = now - MWI
         vals   = [v for t, v in aub if t >= cutoff]
         if len(vals) < 10:
@@ -180,7 +181,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         buf.append(item)
                 except Exception:
                     break
-        now = time.time()
+        now = qpc_now() / _qpc_f   # [수정] QPC 기준 — aub/lpb 타임스탬프와 단위 통일
         while lpb and now - lpb[0][0] > BUF_SEC:
             lpb.popleft()
         while aub and now - aub[0][0] > MWI:
@@ -393,7 +394,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             if in_zone and cooled:
                 music = is_music_playing()
                 if len(aub) >= 10:
-                    _vals = [v for t, v in aub if t >= time.time() - MWI]
+                    _vals = [v for t, v in aub if t >= qpc_now() / _qpc_f - MWI]
                     if _vals:
                         _arr  = np.array(_vals, dtype=np.float32)
                         _mean = float(_arr.mean())

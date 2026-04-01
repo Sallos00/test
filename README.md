@@ -1,4 +1,5 @@
-# 🎬 Auto Sync
+[README.md](https://github.com/user-attachments/files/26393917/README.md)
+# 🎬 Auto Sinc
 
 팟플레이어 재생 중 화면(입모양)과 오디오를 실시간 분석하여  
 싱크를 자동 보정하는 멀티코어 GUI 프로그램입니다.  
@@ -37,9 +38,10 @@
 |------|------|
 | 상태 카드 | 팟플레이어 연결 / 오디오 장치 / 프로세스 상태 |
 | OFFSET 미터 | 현재 싱크 오프셋(ms) + 진행바 |
+| OP/ED 스킵 버튼 | 지정 초만큼 즉시 스킵 (자동 스킵 ON 시 비활성화) |
 | 하단 정보 | 이미지 샘플 / 오디오 샘플 / 누적 보정값 |
 | 버튼 | ▶ 시작 · ↺ 초기화 · ✕ 종료 |
-| ⚙ 메뉴 | 설정 팝업 / 로그 보기 |
+| ⚙ 메뉴 | 설정 팝업 / 로그 보기 / 녹화 및 캡처 |
 
 ### 테마 / 크기
 
@@ -57,6 +59,31 @@
 | 프로그램 실행 시 자동 시작 | 켜지면 바로 팟플레이어 감지 시작 |
 | 다크 모드 | 다크 / 라이트 테마 전환 |
 | UI 크기 | 소 / 중 / 대 선택 |
+| OP/ED 자동 스킵 | 오프닝·엔딩 구간 자동 감지 후 지정 초 스킵 |
+| 스킵 초 | 자동/수동 스킵 시 이동할 시간(초), 10~600초 설정 가능 |
+
+---
+
+## ⏭️ OP/ED 스킵 기능
+
+싱크 보정이 꺼진 상태에서도 항상 동작합니다.
+
+- **자동 스킵 OFF** : OP/ED 구간 감지 시 팝업으로 스킵 여부 확인
+- **자동 스킵 ON** : 감지 즉시 지정된 초만큼 자동 스킵, 3분 쿨다운 적용
+- OP/ED 감지를 위해 오디오 캡처 프로세스(P2)와 분석 프로세스(P3)를 백그라운드로 별도 구동
+
+---
+
+## 🎬 녹화 및 캡처
+
+⚙ 메뉴 → **녹화 및 캡처**에서 팝업을 열 수 있습니다.
+
+- **OBS 방식 싱크**: 화면·오디오를 동시에 시작한 뒤 ffmpeg로 합산
+  - QPC(QueryPerformanceCounter) 기반 절대 시각 스케줄링으로 프레임 타이밍 오차 제거
+  - WASAPI QPC 타임스탬프 + ASRC(10초 윈도우 clock_ratio 보정)로 오디오 드리프트 제거
+- **구간 녹화**: 시작/종료 시간 지정 가능, 녹화 중에는 입력칸 잠금
+- **오버레이**: 녹화 상태 오버레이가 팟플레이어 창 위에만 표시됨
+- 출력 포맷: MP4 (H.264 + AAC 192k)
 
 ---
 
@@ -66,6 +93,7 @@
 - **동영상 재생 감지** → 시작 여부 확인 팝업 (자동 시작 OFF 시)
 - **재생 종료 감지** → 자동 중지 후 다음 재생 대기
 - **싱크 보정 시작** → 토스트 알림
+- **OP/ED 감지** → 스킵 확인 팝업 (자동 스킵 OFF 시)
 
 ---
 
@@ -76,7 +104,7 @@
 
 | 항목 | 설명 |
 |------|------|
-| Auto Sync 열기 | 창 다시 표시 |
+| Auto Sinc 열기 | 창 다시 표시 |
 | ▶ 싱크 시작 / ⏹ 싱크 중지 | 실행 상태에 따라 토글 |
 | 종료 | 프로그램 완전 종료 |
 
@@ -90,6 +118,8 @@
 [P3] Analyzer     — 싱크 분석 + Win32 보정      (코어 3)
 [P4] GUI          — tkinter 상태창              (코어 4)
 ```
+
+싱크가 꺼진 상태에서도 P2·P3는 OP/ED 감지를 위해 별도 인스턴스로 백그라운드 구동됩니다.
 
 ### 최적화 내용
 
@@ -110,23 +140,33 @@
 | ANALYSIS_INTERVAL | 3.0초 | 싱크 분석 주기 |
 | BUFFER_SEC | 3.0초 | 분석 버퍼 길이 |
 | CAPTURE_FPS | 15fps | 화면 캡처 프레임 |
+| OPED_AUTO_SKIP | false | OP/ED 자동 스킵 기본값 |
+| OPED_SKIP_SEC | 90초 | 스킵 시 이동할 시간 기본값 |
 
 ---
 
 ## 📁 파일 구조
 
 ```
-potplayer_lipsync_mp.py   진입점
-win32_utils.py            Win32 제어 / 설정값
-processes.py              P1·P2·P3 프로세스
-gui_base.py               테마·설정·트레이
-gui_ui.py                 창/UI/팝업 구성
-gui_run.py                실행 제어·인증 팝업
-auth.py                   인증 모듈
-auth_server.gs            Google Apps Script 인증 서버
-lbpcascade_animeface.xml  애니메이션 얼굴 감지 모델
-scripts/make_icon.py      빌드용 아이콘 생성
-scripts/make_version.py   빌드용 버전 정보 생성
+main.py                      진입점 (PyInstaller 엔트리포인트)
+win32_utils.py               Win32 제어 / 설정값 / 팟플레이어 통신
+processes.py                 P1·P2·P3 프로세스 (캡처·오디오·분석)
+audio_com.py                 WASAPI COM 오디오 인터페이스
+audio_capture.py             오디오 캡처 프로세스
+auth.py                      인증 모듈 (서버 통신 / 로컬 저장)
+app_icon.py                  트레이 아이콘 생성
+gui/
+  base.py                    테마 · 설정 · 트레이 믹스인
+  ui.py                      창/UI/팝업 구성 믹스인
+  run.py                     실행 제어 · 프로세스 관리 믹스인
+  auth.py                    인증 팝업 믹스인
+  record_open.py             녹화 팝업 믹스인
+  record_backend.py          화면·오디오 녹화 백엔드 (OBS 방식)
+lbpcascade_animeface.xml     애니메이션 얼굴 감지 모델
+scripts/
+  make_icon.py               빌드용 아이콘 생성
+  make_version.py            빌드용 버전 정보 생성
+  inject_url.py              빌드 시 서버 URL 삽입
 ```
 
 ---
@@ -146,7 +186,7 @@ GitHub Actions로 자동 빌드됩니다.
 `main` 브랜치에 푸시하거나 Actions 탭에서 수동 실행 시 빌드됩니다.
 
 - Python 3.11
-- PyArmor 난독화 적용
+- PyArmor 난독화 적용 (`main.py` 제외 — PyInstaller 진입점)
 - PyInstaller 단일 EXE 패키징
 - Artifact 보관 기간: 3일
 

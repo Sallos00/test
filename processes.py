@@ -187,8 +187,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 except Exception:
                     break
         # [수정] QPC 타임스탬프 기준으로 만료 판정
+        # lpb: BUF_SEC*2 여유 — ANALYSIS_INTERVAL==BUF_SEC 이면
+        # 들어오자마자 만료 판정되어 샘플이 항상 0이 되는 버그 방지
         now_q = _now_qpc()
-        while lpb and now_q - lpb[0][0] > BUF_SEC:
+        while lpb and now_q - lpb[0][0] > BUF_SEC * 2:
             lpb.popleft()
         while aub and now_q - aub[0][0] > MWI:
             aub.popleft()

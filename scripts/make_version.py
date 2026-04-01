@@ -17,12 +17,12 @@ content = """VSVersionInfo(
         [
           StringStruct(u'CompanyName',      u''),
           StringStruct(u'FileDescription',  u'Auto Sinc'),
-          StringStruct(u'FileVersion',      u'2.0.0.0'),
+          StringStruct(u'FileVersion',      u'3.0.0.0'),
           StringStruct(u'InternalName',     u'AutoSinc'),
           StringStruct(u'LegalCopyright',   u'Sinamon'),
           StringStruct(u'OriginalFilename', u'Auto Sinc.exe'),
           StringStruct(u'ProductName',      u'Auto Sinc'),
-          StringStruct(u'ProductVersion',   u'2.0.0.0'),
+          StringStruct(u'ProductVersion',   u'3.0.0.0'),
         ]
       )
     ]),

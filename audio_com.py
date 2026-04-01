@@ -1,6 +1,11 @@
 """
 audio_com.py -- Windows WASAPI ProcessLoopback COM/WinAPI 저수준 구현
 audio_capture.py에서 분리된 COM 인터페이스 코드
+
+변경사항:
+  [QPC싱크] get_buffer() 가 QPC 타임스탬프(qp)도 반환하도록 수정
+            → _AudioRecorder 에서 실제 캡처 시각을 하드웨어 클럭 기준으로 얻음
+  [QPC싱크] qpc_freq() / qpc_now() 헬퍼 추가
 """
 import ctypes
 import ctypes.wintypes
@@ -311,7 +316,16 @@ def get_next_packet_size(cap) -> int:
     _hcheck(fn_type(_vtbl(cap, 5))(cap, ctypes.byref(n)), "GetNextPacketSize")
     return n.value
 
+# ── [QPC싱크] get_buffer — QPC 타임스탬프(qp) 반환 추가 ──────────────────────
 def get_buffer(cap):
+    """
+    IAudioCaptureClient::GetBuffer 래퍼.
+
+    반환: (data, num_frames, flags, qpc_timestamp)
+      qpc_timestamp : QueryPerformanceCounter 틱 단위 하드웨어 타임스탬프.
+                      0 이면 드라이버가 타임스탬프를 지원하지 않음.
+                      초로 변환: qpc_timestamp / qpc_freq()
+    """
     fn_type = ctypes.WINFUNCTYPE(
         ctypes.c_long, ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_uint),
@@ -323,11 +337,30 @@ def get_buffer(cap):
     hr = fn(cap, ctypes.byref(data), ctypes.byref(frames),
             ctypes.byref(flags), ctypes.byref(dp), ctypes.byref(qp))
     _hcheck(hr, "GetBuffer")
-    return data, frames.value, flags.value
+    return data, frames.value, flags.value, qp.value   # ← qp 추가 반환
 
 def release_buffer(cap, n: int):
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint)
     fn_type(_vtbl(cap, 4))(cap, n)
+
+
+# ── [QPC싱크] QPC 헬퍼 ───────────────────────────────────────────────────────
+_qpc_freq_cache: int = 0
+
+def qpc_freq() -> int:
+    """QueryPerformanceFrequency (틱/초). 캐시됨."""
+    global _qpc_freq_cache
+    if not _qpc_freq_cache:
+        f = ctypes.c_ulonglong()
+        _kernel32.QueryPerformanceFrequency(ctypes.byref(f))
+        _qpc_freq_cache = f.value or 1
+    return _qpc_freq_cache
+
+def qpc_now() -> int:
+    """현재 QueryPerformanceCounter 값 (틱)."""
+    v = ctypes.c_ulonglong()
+    _kernel32.QueryPerformanceCounter(ctypes.byref(v))
+    return v.value
 
 
 # ── 전체 루프백 활성화 (빌드 19041 미만 폴백) ─────────────────────────────────

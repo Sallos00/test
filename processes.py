@@ -126,7 +126,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     CDS   = 180
     MWI   = 15.0
     MMR  = 0.002
-    _qpc_f = qpc_freq()   # QPC 주파수 — aub 타임스탬프(QPC 기준) 비교용
     MMC   = 0.8
     MMF = 0.70
     MCF  = 2
@@ -154,11 +153,17 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         import time as _t
         lgl.append(f"[{_t.strftime('%H:%M:%S')}] {msg}")
 
+    # QPC 기준 현재 시각 헬퍼 — time.time() 대신 사용
+    _freq = qpc_freq()
+    def _now_qpc() -> float:
+        return qpc_now() / _freq
+
     def is_music_playing():
         if len(aub) < 10:
             return False
-        now    = qpc_now() / _qpc_f   # [수정] QPC 기준 — aub 타임스탬프와 단위 통일
-        cutoff = now - MWI
+        # [수정] QPC 타임스탬프 기준으로 비교
+        now_q  = _now_qpc()
+        cutoff = now_q - MWI
         vals   = [v for t, v in aub if t >= cutoff]
         if len(vals) < 10:
             return False
@@ -181,10 +186,11 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         buf.append(item)
                 except Exception:
                     break
-        now = qpc_now() / _qpc_f   # [수정] QPC 기준 — aub/lpb 타임스탬프와 단위 통일
-        while lpb and now - lpb[0][0] > BUF_SEC:
+        # [수정] QPC 타임스탬프 기준으로 만료 판정
+        now_q = _now_qpc()
+        while lpb and now_q - lpb[0][0] > BUF_SEC:
             lpb.popleft()
-        while aub and now - aub[0][0] > MWI:
+        while aub and now_q - aub[0][0] > MWI:
             aub.popleft()
 
     # ── [개선] resample_aligned: 공통 시간축 위에서 리샘플 ───────────────────
@@ -394,7 +400,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             if in_zone and cooled:
                 music = is_music_playing()
                 if len(aub) >= 10:
-                    _vals = [v for t, v in aub if t >= qpc_now() / _qpc_f - MWI]
+                    _vals = [v for t, v in aub if t >= _now_qpc() - MWI]
                     if _vals:
                         _arr  = np.array(_vals, dtype=np.float32)
                         _mean = float(_arr.mean())

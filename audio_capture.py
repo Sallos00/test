@@ -151,7 +151,7 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
                 if pkt == 0:
                     break
 
-                data, num_frames, flg = get_buffer(cap)
+                data, num_frames, flg, _qpc = get_buffer(cap)
                 total_packets += 1
 
                 if first_packet:
@@ -227,7 +227,7 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
                         return
                     if pkt == 0:
                         break
-                    data, num_frames, flg = get_buffer(cap)
+                    data, num_frames, flg, _qpc = get_buffer(cap)
                     if first_packet:
                         first_packet = False
                         send_log("✅ 첫 패킷 수신! (전체 루프백)")

@@ -1,6 +1,11 @@
 """
 audio_capture.py -- Windows WASAPI ProcessLoopback 캡처 진입점
-저수준 COM 코드는 audio_com.py 에 분리됨
+
+[개선] OBS 방식 QPC 하드웨어 타임스탬프 적용
+  - get_buffer()가 반환하는 qp(QueryPerformanceCounter 틱)를 실제 타임스탬프로 사용
+  - time.time() 소프트웨어 클럭 대신 qp / qpc_freq() 하드웨어 클럭 기준으로 통일
+  - qp == 0 인 드라이버(타임스탬프 미지원)는 qpc_now()로 폴백
+  - GlobalLoopback도 동일하게 qpc_now() 적용
 """
 import ctypes
 import time
@@ -15,9 +20,9 @@ from audio_com import (
     get_capture_client, get_next_packet_size, get_buffer, release_buffer,
     _com_release, _kernel32, _ole32, AUDCLNT_BUFFERFLAGS_SILENT,
     activate_global_loopback, audio_client_initialize_loopback,
+    qpc_freq, qpc_now,
 )
 
-# 하위 호환 별칭 (gui_record_backend 에서 직접 import 하는 이름)
 _activate_process_loopback = activate_process_loopback
 _audio_client_initialize   = audio_client_initialize
 _audio_client_set_event    = audio_client_set_event
@@ -98,10 +103,21 @@ def _run_capture_session(pid: int, audio_queue: Queue,
 
 def _run_capture_impl(pid: int, audio_queue: Queue,
                       stop_flag: Value, send_log):
-    """실제 캡처 루프."""
+    """
+    실제 캡처 루프.
+
+    [개선] time.time() → QPC 하드웨어 타임스탬프
+      - get_buffer()가 반환하는 qp(QueryPerformanceCounter 틱)를 qpc_freq()로 나눠
+        하드웨어 기준 절대 시각(초)을 산출한다.
+      - qp == 0 이면 드라이버가 타임스탬프를 지원하지 않는 것이므로 qpc_now()로 폴백.
+      - 두 신호(립·오디오) 모두 같은 QPC 클럭 기준을 쓰므로
+        proc_analyzer 에서 공통 시간축 정렬이 가능해진다.
+    """
     client  = None
     cap     = None
     h_event = None
+    _freq   = qpc_freq()
+
     try:
         client  = activate_process_loopback(pid)
         sr, ch  = audio_client_initialize(client)
@@ -151,7 +167,7 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
                 if pkt == 0:
                     break
 
-                data, num_frames, flg, _qpc = get_buffer(cap)
+                data, num_frames, flg, qp = get_buffer(cap)
                 total_packets += 1
 
                 if first_packet:
@@ -159,6 +175,9 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
                     send_log(f"✅ 첫 패킷 수신! frames={num_frames}")
 
                 if num_frames > 0:
+                    # [개선] QPC 하드웨어 타임스탬프 — time.time() 완전 제거
+                    t_hw = (qp / _freq) if qp > 0 else (qpc_now() / _freq)
+
                     if flg & AUDCLNT_BUFFERFLAGS_SILENT:
                         rms = 0.0
                     else:
@@ -171,7 +190,8 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
                             arr = arr.reshape(-1, ch).mean(axis=1)
                         arr = _apply_filter(arr, sos, sosfilt)
                         rms = float(np.sqrt(np.mean(arr ** 2)))
-                    queue_put(audio_queue, (time.time(), rms))
+
+                    queue_put(audio_queue, (t_hw, rms))
 
                 release_buffer(cap, num_frames)
 
@@ -190,11 +210,11 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
             _kernel32.CloseHandle(h_event)
 
 
-# ── 진입점 ────────────────────────────────────────────────────────────────────
+# ── 전체 루프백 세션 (빌드 19041 미만 폴백) ──────────────────────────────────
 def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
     """
-    전체 루프백 캡처 세션 (빌드 19041 미만 폴백).
-    IMMDevice 기본 렌더 디바이스 loopback — 시스템 전체 오디오 캡처.
+    전체 루프백 캡처 세션.
+    [개선] qpc_now() 를 타임스탬프로 사용 — ProcessLoopback 경로와 클럭 기준 통일.
     """
     result_box = [None]
 
@@ -204,6 +224,7 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
         client  = None
         cap     = None
         h_event = None
+        _freq   = qpc_freq()
         try:
             client  = activate_global_loopback()
             sr, ch  = audio_client_initialize_loopback(client)
@@ -227,11 +248,14 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
                         return
                     if pkt == 0:
                         break
-                    data, num_frames, flg, _qpc = get_buffer(cap)
+                    data, num_frames, flg, qp = get_buffer(cap)
                     if first_packet:
                         first_packet = False
                         send_log("✅ 첫 패킷 수신! (전체 루프백)")
                     if num_frames > 0:
+                        # [개선] QPC 타임스탬프 (GlobalLoopback도 동일 기준)
+                        t_hw = (qp / _freq) if qp > 0 else (qpc_now() / _freq)
+
                         if flg & AUDCLNT_BUFFERFLAGS_SILENT:
                             rms = 0.0
                         else:
@@ -244,7 +268,8 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
                                 arr = arr.reshape(-1, ch).mean(axis=1)
                             arr = _apply_filter(arr, sos, sosfilt)
                             rms = float(np.sqrt(np.mean(arr ** 2)))
-                        queue_put(audio_queue, (time.time(), rms))
+
+                        queue_put(audio_queue, (t_hw, rms))
                     release_buffer(cap, num_frames)
             result_box[0] = (True, "")
         except Exception as e:
@@ -287,6 +312,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
         queue_put(audio_queue, ("LOG", full))
 
     send_log(f"ℹ Win build={_WIN_BUILD} | ProcessLoopback={_SUPPORT_PROCESS_LOOPBACK}")
+    send_log("ℹ [개선] QPC 하드웨어 타임스탬프 모드 활성화")
 
     if not _SUPPORT_PROCESS_LOOPBACK:
         send_log(f"⚠ ProcessLoopback 미지원 (빌드 {_WIN_BUILD} < 19041) — 전체 루프백으로 전환.")

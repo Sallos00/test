@@ -297,11 +297,13 @@ class LipSyncGUIRecordOpen:
                     tmp_video = video_result[0]
                     audio_arr, audio_sr, audio_ch = audio_result
 
-                    # ── 싱크 보정: 첫 프레임 시각 vs 첫 오디오 패킷 시각 차이 계산
-                    # offset > 0: 오디오가 영상보다 늦게 시작 (오디오를 뒤로 배치)
-                    # offset < 0: 오디오가 영상보다 일찍 시작 (오디오 앞부분 잘라냄)
-                    _vid_t  = getattr(state["screen_rec"], "_first_frame_time", 0.0)
-                    _aud_t  = getattr(state["audio_rec"],  "_first_audio_time", 0.0)
+                    # ── [QPC싱크] 오프셋 계산: QPC 기반 하드웨어 클럭 사용
+                    # _retiming_audio() 가 드리프트를 이미 보정한 오디오를 반환하므로,
+                    # 여기서는 영상 첫 프레임과 오디오 첫 청크의 시작 시각 차이만 구한다.
+                    # offset > 0: 오디오가 영상보다 늦게 시작 → 오디오를 뒤로 배치
+                    # offset < 0: 오디오가 영상보다 일찍 시작 → 오디오 앞부분 잘라냄
+                    _vid_t = getattr(state["screen_rec"], "_first_frame_qpc_sec", 0.0)
+                    _aud_t = getattr(state["audio_rec"],  "_first_audio_qpc_sec", 0.0)
                     if _vid_t and _aud_t:
                         audio_offset_sec = _aud_t - _vid_t
                     else:

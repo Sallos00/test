@@ -50,14 +50,31 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
     prev = None
     last_roi = None
     frame_count = 0
+    _null_frame_count  = 0
+    _last_diag_time    = 0.0
+    _total_frame_count = 0
 
     while not stop_flag.value:
         t0 = time.perf_counter()
 
-        raw = capture_window(find_potplayer_hwnd())
+        hwnd = find_potplayer_hwnd()
+        raw  = capture_window(hwnd) if hwnd else None
+
+        # 30초마다 진단 로그를 lip_queue에 전송
+        _now_diag = time.time()
+        if _now_diag - _last_diag_time >= 30.0:
+            _last_diag_time = _now_diag
+            diag = (f"[P1 진단] hwnd={bool(hwnd)} total={_total_frame_count} "
+                    f"null={_null_frame_count} "
+                    f"shape={raw.shape if raw is not None else None}")
+            queue_put(lip_queue, ("LOG", diag))
+
         if raw is None:
+            _null_frame_count += 1
             time.sleep(interval)
             continue
+
+        _total_frame_count += 1
 
         # [개선] 캡처 직후 QPC 타임스탬프 기록
         t_hw = qpc_now() / _freq

@@ -22,26 +22,49 @@ ICO_SIZES_TEMP = (16, 24, 32, 48, 64)
 _cached_ico_path: Optional[str] = None
 
 
+def _draw_icon(draw: "ImageDraw.ImageDraw", s: int) -> None:
+    """실제 아이콘 도형을 draw 객체에 그린다 (크기 s 기준)."""
+    bw = max(3, s // 10)
+    # 청록 외곽 원
+    draw.ellipse([0, 0, s - 1, s - 1], fill="#00c8e0")
+    # 검은 내부 원
+    draw.ellipse([bw, bw, s - bw - 1, s - bw - 1], fill="#1e1e1e")
+    # 청록 삼각형
+    t = int(s * 0.22)
+    b = int(s * 0.78)
+    l = int(s * 0.32)
+    r = int(s * 0.75)
+    draw.polygon([(l, t), (l, b), (r, (t + b) // 2)], fill="#00c8e0")
+
+
 def make_frame(size: int, for_ico: bool = False) -> Image.Image:
-    """재생 버튼 스타일 — 원 + 청록 링 + 삼각형.
-    
-    for_ico=True: 어두운 배경(투명 없음) — ICO/탐색기용
+    """재생 버튼 스타일 — 청록 링 + 검은 원 + 청록 삼각형.
+
+    작은 크기(32px 이하)는 슈퍼샘플링(고해상도로 그린 뒤 축소)을 적용해
+    작업 관리자·트레이 등 16px 표시에서도 선명하게 보이도록 한다.
+
+    for_ico=True : 어두운 배경(투명 없음) — ICO/탐색기용  (현재 미사용, 하위 호환)
     for_ico=False: 투명 배경 — iconphoto/트레이용
     """
     s = int(size)
-    bg = (0, 0, 0, 0) if for_ico else (0, 0, 0, 0)
-    img = Image.new("RGBA", (s, s), bg)
-    draw = ImageDraw.Draw(img)
-    bw = max(2, s // 16)
-    draw.ellipse(
-        [bw, bw, s - bw - 1, s - bw - 1],
-        fill="#1e1e1e",
-        outline="#00c8e0",
-        width=bw,
-    )
-    t, b = int(s * 0.22), int(s * 0.78)
-    l, r = int(s * 0.30), int(s * 0.78)
-    draw.polygon([(l, t), (l, b), (r, (t + b) // 2)], fill="#00c8e0")
+
+    # 슈퍼샘플링 배율: 작을수록 크게 그린 뒤 LANCZOS 축소
+    if s <= 16:
+        scale = 8
+    elif s <= 32:
+        scale = 4
+    else:
+        scale = 1  # 48px 이상은 직접 그리기로 충분
+
+    big = s * scale
+    tmp = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    _draw_icon(ImageDraw.Draw(tmp), big)
+
+    if scale > 1:
+        img = tmp.resize((s, s), Image.LANCZOS)
+    else:
+        img = tmp
+
     return img
 
 

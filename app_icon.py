@@ -24,7 +24,7 @@ _cached_ico_path: Optional[str] = None
 
 def _draw_icon(draw: "ImageDraw.ImageDraw", s: int) -> None:
     """실제 아이콘 도형을 draw 객체에 그린다 (크기 s 기준)."""
-    bw = max(3, s // 10)
+    bw = max(2, s // 16)  # 원본과 동일한 링 두께 비율
     # 청록 외곽 원
     draw.ellipse([0, 0, s - 1, s - 1], fill="#00c8e0")
     # 검은 내부 원
@@ -32,8 +32,8 @@ def _draw_icon(draw: "ImageDraw.ImageDraw", s: int) -> None:
     # 청록 삼각형
     t = int(s * 0.22)
     b = int(s * 0.78)
-    l = int(s * 0.32)
-    r = int(s * 0.75)
+    l = int(s * 0.30)
+    r = int(s * 0.78)
     draw.polygon([(l, t), (l, b), (r, (t + b) // 2)], fill="#00c8e0")
 
 

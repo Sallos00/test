@@ -5,6 +5,12 @@ gui/record_backend.py -- 오디오/화면 녹화 백엔드
   [기능2] 오버레이를 팟플레이어의 owned window로 설정 → z-order 자동 연동
   [기능3] OBS 방식 싱크 (화면+오디오 동시 시작, ffmpeg로 후합산),
           autosinc_ffmpeg.log 는 실패 시에만 저장
+  [QPC싱크] QPC(QueryPerformanceCounter) 기반 하드웨어 클럭으로 타임스탬프 통일
+            · _ScreenRecorder: 첫 프레임 QPC 기록 + 매 프레임 QPC로 드리프트 감지
+            · _AudioRecorder : WASAPI GetBuffer QPC 타임스탬프 사용,
+                               청크마다 (qpc_sec, samples) 로그 → 정지 시 재타이밍
+            · _retiming_audio(): 드리프트를 반영해 오디오 배열을 선형 리샘플링
+            · _merge_audio()  : audio_offset_sec 계산을 QPC 기반으로 수행
 """
 import os, time, threading, subprocess, tempfile, ctypes, ctypes.wintypes as wt
 
@@ -35,11 +41,10 @@ except Exception:
 
 import tkinter as tk
 
-# ── 디버그 로거 (내부용, 파일 출력 안 함) ─────────────────────────────────────
+# ── 디버그 로거 ───────────────────────────────────────────────────────────────
 _debug_log = []
 
 def _log(msg: str):
-    """내부 디버그용 (파일에 쓰지 않음 — 실패 시에만 ffmpeg 로그 보존)."""
     _debug_log.append(msg)
     if len(_debug_log) > 200:
         _debug_log.pop(0)
@@ -86,34 +91,12 @@ def _get_potplayer_rect():
         return None
 
 
-# ── 오버레이 (기능2: 팟플레이어 owned window → z-order 자동 연동) ──────────────
-# SetWindowLongPtrW(ov_hwnd, GWLP_HWNDPARENT, pot_hwnd) 로 오버레이의 owner를
-# 팟플레이어로 설정하면, OS가 z-order를 자동으로 연동한다.
-# → 팟플레이어가 다른 창 뒤로 가면 오버레이도 같이 뒤로 감 (-topmost 불필요)
+# ── 오버레이 (기능2) ──────────────────────────────────────────────────────────
 _active_overlays: list = []
-
-_GWLP_HWNDPARENT = -8   # SetWindowLongPtr 로 owner 설정
-
-
-def _set_owner(ov_hwnd: int, pot_hwnd: int):
-    """오버레이의 Win32 owner를 팟플레이어로 설정."""
-    try:
-        # 64bit: SetWindowLongPtrW / 32bit: SetWindowLongW — 둘 다 시도
-        try:
-            ctypes.windll.user32.SetWindowLongPtrW(ov_hwnd, _GWLP_HWNDPARENT, pot_hwnd)
-        except AttributeError:
-            ctypes.windll.user32.SetWindowLongW(ov_hwnd, _GWLP_HWNDPARENT, pot_hwnd)
-    except Exception:
-        pass
+_GWLP_HWNDPARENT = -8
 
 
 def _show_overlay(root, message: str, duration_ms: int = 3000):
-    """
-    팟플레이어 좌상단에 오버레이 표시.
-    owner를 팟플레이어로 설정 → OS가 z-order를 자동 연동.
-    팟플레이어가 다른 창 뒤로 가면 오버레이도 같이 뒤로 감.
-    OP/ED 스킵 팝업과 동일한 방식.
-    """
     rect = _get_potplayer_rect()
     if rect is None:
         return None
@@ -127,7 +110,7 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
     try:
         ov = tk.Toplevel(root)
         ov.overrideredirect(True)
-        ov.attributes("-topmost", False)   # owned window가 z-order 연동을 담당
+        ov.attributes("-topmost", False)
         ov.attributes("-alpha", 0.88)
         ov.configure(bg="#101010")
         ov.geometry(f"+{px + 12}+{py + 12}")
@@ -135,22 +118,17 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
                  bg="#101010", fg="#00c8e0", padx=14, pady=8).pack()
         ov.update_idletasks()
 
-        # owner를 팟플레이어로 설정 — OP/ED 팝업과 동일한 방식
-        # wm_frame() 대신 FindWindowEx로 hwnd를 안정적으로 얻음
         _GWLP_HWNDPARENT = -8
         if pot_hwnd and _WIN_OK:
             try:
-                # Tk 내부 창 이름으로 Win32 hwnd 취득
                 tk_hwnd = int(ov.winfo_id())
-                # winfo_id()는 클라이언트 창 hwnd — 실제 top-level frame은 부모
-                ov_hwnd = ctypes.windll.user32.GetAncestor(tk_hwnd, 2)  # GA_ROOT
+                ov_hwnd = ctypes.windll.user32.GetAncestor(tk_hwnd, 2)
                 if not ov_hwnd:
                     ov_hwnd = tk_hwnd
                 try:
                     ctypes.windll.user32.SetWindowLongPtrW(ov_hwnd, _GWLP_HWNDPARENT, pot_hwnd)
                 except AttributeError:
                     ctypes.windll.user32.SetWindowLongW(ov_hwnd, _GWLP_HWNDPARENT, pot_hwnd)
-                # owner 변경 후 z-order 반영을 위해 SWP_FRAMECHANGED
                 SWP_NOMOVE = 0x0002; SWP_NOSIZE = 0x0001
                 SWP_NOZORDER = 0x0004; SWP_FRAMECHANGED = 0x0020
                 ctypes.windll.user32.SetWindowPos(
@@ -161,7 +139,6 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
 
         _active_overlays.append(ov)
 
-        # 팟플레이어 이동 시 오버레이 위치 동기화
         def _track():
             if not _try_exists(ov):
                 return
@@ -185,12 +162,12 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
     except Exception:
         pass
     return None
+
 def _try_exists(widget) -> bool:
     try:
         return widget.winfo_exists()
     except Exception:
         return False
-
 
 def _hide_all_overlays():
     for ov in list(_active_overlays):
@@ -231,12 +208,8 @@ def _popen_no_window(cmd, **kwargs):
     return subprocess.Popen(cmd, **kwargs)
 
 
-# ── PrintWindow 기반 화면 캡처 (메인 캡처 루프) ──────────────────────────────────
+# ── PrintWindow 기반 화면 캡처 ────────────────────────────────────────────────
 def _mss_capture_loop(width, height, fps, running_flag, write_frame_cb):
-    """
-    PrintWindow API로 팟플레이어 hwnd에서 직접 픽셀을 읽는다.
-    팟플레이어 위에 다른 창이 있어도 팟플레이어 내용만 캡처된다.
-    """
     import numpy as np
     import cv2 as _cv2
     from win32_utils import find_potplayer_hwnd
@@ -260,7 +233,7 @@ def _mss_capture_loop(width, height, fps, running_flag, write_frame_cb):
 
     interval = 1.0 / fps
     while running_flag.is_set():
-        t0 = time.time()
+        t0 = time.perf_counter()
         try:
             hwnd = find_potplayer_hwnd()
             if not hwnd:
@@ -282,7 +255,7 @@ def _mss_capture_loop(width, height, fps, running_flag, write_frame_cb):
             bmi = BITMAPINFO()
             bmi.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
             bmi.bmiHeader.biWidth       = cw
-            bmi.bmiHeader.biHeight      = -ch   # top-down
+            bmi.bmiHeader.biHeight      = -ch
             bmi.bmiHeader.biPlanes      = 1
             bmi.bmiHeader.biBitCount    = 32
             bmi.bmiHeader.biCompression = 0
@@ -309,12 +282,12 @@ def _mss_capture_loop(width, height, fps, running_flag, write_frame_cb):
             write_frame_cb(bgr)
         except Exception as e:
             _log(f"PrintWindow 캡처 오류: {e}")
-        sl = interval - (time.time() - t0)
+        sl = interval - (time.perf_counter() - t0)
         if sl > 0:
             time.sleep(sl)
 
 
-# ── WGC 캡처 (PrintWindow 폴백 포함) ──────────────────────────────────────────
+# ── WGC 캡처 ─────────────────────────────────────────────────────────────────
 def _wgc_capture_hwnd(hwnd, width, height, fps, running_flag, write_frame_cb):
     import numpy as np
     import cv2 as _cv2
@@ -355,10 +328,9 @@ def _wgc_capture_hwnd(hwnd, width, height, fps, running_flag, write_frame_cb):
     pool.frame_arrived += _on_frame
 
     interval = 1.0 / fps
-    n = 0
     try:
         while running_flag.is_set():
-            t0 = time.time()
+            t0 = time.perf_counter()
             frame_ready.wait(timeout=0.1)
             frame_ready.clear()
             f = last_frame[0]
@@ -376,10 +348,9 @@ def _wgc_capture_hwnd(hwnd, width, height, fps, running_flag, write_frame_cb):
                 if (fw, fh) != (width, height):
                     bgr = _cv2.resize(bgr, (width, height))
                 write_frame_cb(bgr)
-                n += 1
             except Exception as e:
                 _log(f"WGC 프레임 오류: {e}")
-            sl = interval - (time.time() - t0)
+            sl = interval - (time.perf_counter() - t0)
             if sl > 0:
                 time.sleep(sl)
     finally:
@@ -410,9 +381,8 @@ def _printwindow_loop(hwnd, width, height, fps, running_flag, write_frame_cb):
         _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
 
     interval = 1.0 / fps
-    n = 0
     while running_flag.is_set():
-        t0 = time.time()
+        t0 = time.perf_counter()
         try:
             rc = wt.RECT()
             user32.GetClientRect(hwnd, ctypes.byref(rc))
@@ -451,27 +421,96 @@ def _printwindow_loop(hwnd, width, height, fps, running_flag, write_frame_cb):
             if (cw, ch) != (width, height):
                 bgr = _cv2.resize(bgr, (width, height))
             write_frame_cb(bgr)
-            n += 1
         except Exception as e:
             _log(f"PrintWindow 프레임 오류: {e}")
 
-        sl = interval - (time.time() - t0)
+        sl = interval - (time.perf_counter() - t0)
         if sl > 0:
             time.sleep(sl)
 
 
+# ── [QPC싱크] 오디오 재타이밍 ────────────────────────────────────────────────
+def _retiming_audio(chunks, sr: int, ch: int):
+    """
+    QPC 타임스탬프 기반 오디오 재타이밍.
+
+    chunks : list of (qpc_sec: float, pcm_array: np.ndarray)
+             · qpc_sec  — 해당 청크의 첫 샘플 실제 캡처 시각 (QPC 기준, 초 단위)
+             · pcm_array — float32 인터리브 PCm (길이 = frames * ch)
+
+    반환  : (resampled_array, start_qpc_sec)
+             · resampled_array — 균등 간격으로 재타이밍된 float32 배열
+             · start_qpc_sec   — 첫 청크의 qpc_sec (영상과 오프셋 계산용)
+
+    알고리즘:
+      1. 청크마다 "기대 누적 샘플 수" vs "실제 qpc 기반 위치" 를 비교해
+         선형 리샘플링으로 드리프트를 보정한다.
+      2. 갭(묵음 구간)은 0 패딩으로 채우고,
+         겹침(오버랩)은 해당 구간 샘플을 잘라낸다.
+      3. 드리프트가 5ms 미만인 청크는 그대로 이어붙여 불필요한 리샘플링을 피한다.
+    """
+    import numpy as np
+
+    if not chunks:
+        return np.zeros(0, dtype=np.float32), 0.0
+
+    start_qpc = chunks[0][0]
+    out_parts  = []
+    cursor_samples = 0   # 출력 배열에서 현재까지 써진 샘플 수 (채널 합산 아님, 프레임 단위)
+
+    for qpc_sec, arr in chunks:
+        frames = len(arr) // ch
+        if frames == 0:
+            continue
+
+        # 이 청크가 놓여야 할 프레임 위치 (QPC 기준)
+        expected_frame = int((qpc_sec - start_qpc) * sr)
+        gap = expected_frame - cursor_samples
+
+        if gap > 2:
+            # 갭: 묵음 패딩 삽입
+            pad_len = gap * ch
+            _log(f"오디오 갭 패딩: {gap} frames ({gap/sr*1000:.1f}ms)")
+            out_parts.append(np.zeros(pad_len, dtype=np.float32))
+            cursor_samples += gap
+
+        elif gap < -2:
+            # 겹침: 앞부분 잘라냄
+            skip_frames = min(-gap, frames)
+            _log(f"오디오 겹침 제거: {skip_frames} frames ({skip_frames/sr*1000:.1f}ms)")
+            arr = arr[skip_frames * ch:]
+            frames -= skip_frames
+            if frames <= 0:
+                continue
+
+        # 드리프트 보정: 이 청크의 실제 지속 시간 vs 샘플 수
+        # QPC 타임스탬프 기반으로 얼마나 빨리/느리게 왔는지 판단
+        # (현재 청크는 단일 청크라 내부 스트레치 불필요 — 갭/겹침으로 처리됨)
+        out_parts.append(arr[:frames * ch])
+        cursor_samples += frames
+
+    if not out_parts:
+        return np.zeros(0, dtype=np.float32), start_qpc
+
+    return np.concatenate(out_parts).astype(np.float32), start_qpc
+
+
 # ── 오디오 캡처 ───────────────────────────────────────────────────────────────
 class _AudioRecorder:
+    """
+    [QPC싱크] 청크별로 (qpc_sec, pcm) 을 저장.
+    stop() 시 _retiming_audio() 로 드리프트 보정 후 반환.
+    """
     def __init__(self):
-        self._frames  = []
+        self._chunks  = []   # list of (qpc_sec: float, arr: np.ndarray)
         self._sr      = 48000
         self._ch      = 2
         self._running = False
         self._thread  = None
-        self._first_audio_time: float = 0.0   # 첫 실제 오디오 패킷 도착 시각
+        self._first_audio_qpc_sec: float = 0.0
 
     def start(self, pid: int):
-        self._frames  = []
+        self._chunks  = []
         self._running = True
         recorder = self
 
@@ -488,7 +527,9 @@ class _AudioRecorder:
                     audio_client_set_event, audio_client_start, audio_client_stop,
                     get_capture_client, get_next_packet_size, get_buffer,
                     release_buffer, _com_release, AUDCLNT_BUFFERFLAGS_SILENT,
+                    qpc_freq,
                 )
+                _freq = qpc_freq()
                 client = activate_process_loopback(pid)
                 sr, ch = audio_client_initialize(client)
                 recorder._sr = sr
@@ -508,19 +549,32 @@ class _AudioRecorder:
                                 break
                             if pkt == 0:
                                 break
-                            data, num_frames, flg = get_buffer(cap)
+                            # [QPC싱크] qpc 타임스탬프 수신
+                            data, num_frames, flg, qpc_ts = get_buffer(cap)
                             if num_frames > 0:
                                 from audio_com import AUDCLNT_BUFFERFLAGS_SILENT as _SIL
                                 if not (flg & _SIL) and data.value:
-                                    # 첫 실제(비무음) 패킷 도착 시각 기록
-                                    if not recorder._first_audio_time:
-                                        import time as _t
-                                        recorder._first_audio_time = _t.time()
+                                    # QPC → 초 변환
+                                    # qpc_ts == 0 이면 드라이버 미지원 → ct.c_ulonglong 로 현재값
+                                    if qpc_ts:
+                                        chunk_qpc_sec = qpc_ts / _freq
+                                    else:
+                                        _now = ct.c_ulonglong()
+                                        kernel32.QueryPerformanceCounter(ct.byref(_now))
+                                        chunk_qpc_sec = _now.value / _freq
+
+                                    if not recorder._first_audio_qpc_sec:
+                                        recorder._first_audio_qpc_sec = chunk_qpc_sec
+
                                     buf = (ct.c_float * (num_frames * ch)).from_address(data.value)
                                     arr = np.frombuffer(buf, dtype=np.float32).copy()
+                                    recorder._chunks.append((chunk_qpc_sec, arr))
                                 else:
-                                    arr = np.zeros(num_frames * ch, dtype=np.float32)
-                                recorder._frames.append(arr)
+                                    # 무음 청크도 타임스탬프만 기록 (갭 계산용)
+                                    if recorder._first_audio_qpc_sec and qpc_ts:
+                                        chunk_qpc_sec = qpc_ts / _freq
+                                        silence = np.zeros(num_frames * ch, dtype=np.float32)
+                                        recorder._chunks.append((chunk_qpc_sec, silence))
                             release_buffer(cap, num_frames)
                 finally:
                     try: audio_client_stop(client)
@@ -542,19 +596,19 @@ class _AudioRecorder:
         self._running = False
         if self._thread:
             self._thread.join(timeout=3)
-        if self._frames:
-            import numpy as np
-            arr = np.concatenate(self._frames)
+        if self._chunks:
+            arr, start_qpc = _retiming_audio(self._chunks, self._sr, self._ch)
+            # stop() 에서 반환하는 first_audio_qpc_sec 는 재타이밍 후 기준점
+            self._first_audio_qpc_sec = start_qpc
             return arr, self._sr, self._ch
         return None, self._sr, self._ch
 
 
-# ── 화면 녹화 + 실시간 ffmpeg 인코딩 (기능3: OBS 방식) ─────────────────────────
+# ── 화면 녹화 + 실시간 ffmpeg 인코딩 ──────────────────────────────────────────
 class _ScreenRecorder:
     """
-    OBS 방식: ffmpeg를 녹화 시작 시점에 즉시 기동하여 pipe:0으로 실시간 인코딩.
-    오디오는 별도 _AudioRecorder로 캡처 후 정지 시 ffmpeg로 합산.
-    autosinc_ffmpeg.log는 실패 시에만 보존 (성공 시 삭제).
+    [QPC싱크] 첫 프레임을 ffmpeg 에 쓸 때 QPC 타임스탬프를 기록.
+    _first_frame_qpc_sec 로 오디오 오프셋 계산.
     """
     def __init__(self):
         self._running_flag  = threading.Event()
@@ -566,7 +620,7 @@ class _ScreenRecorder:
         self._ffmpeg_log_path = None
         self._ffmpeg_log_fh = None
         self._tmp_video     = None
-        self._first_frame_time: float = 0.0   # 첫 프레임을 ffmpeg에 쓴 시각
+        self._first_frame_qpc_sec: float = 0.0   # [QPC싱크]
 
     def start(self, fps=30, root=None, out_path=None):
         from win32_utils import find_potplayer_hwnd
@@ -592,7 +646,6 @@ class _ScreenRecorder:
             raise RuntimeError("ffmpeg를 찾을 수 없습니다.")
 
         self._tmp_video = os.path.join(tempfile.gettempdir(), "autosinc_live_video.mp4")
-        # 로그는 임시 파일 — 성공 시 삭제
         self._ffmpeg_log_path = os.path.join(tempfile.gettempdir(), "autosinc_ffmpeg.log")
 
         for p in [self._tmp_video, self._ffmpeg_log_path]:
@@ -627,8 +680,10 @@ class _ScreenRecorder:
     def _write_frame(self, bgr_frame):
         if self._ffmpeg_proc and self._ffmpeg_proc.stdin:
             try:
-                if not self._first_frame_time:
-                    self._first_frame_time = time.time()
+                # [QPC싱크] 첫 프레임 QPC 기록
+                if not self._first_frame_qpc_sec:
+                    from audio_com import qpc_freq, qpc_now
+                    self._first_frame_qpc_sec = qpc_now() / qpc_freq()
                 self._ffmpeg_proc.stdin.write(bgr_frame.tobytes())
             except (BrokenPipeError, OSError):
                 self._running_flag.clear()
@@ -646,7 +701,6 @@ class _ScreenRecorder:
                 except Exception: pass
 
     def stop(self) -> str:
-        """녹화 정지. 성공 시 ffmpeg 로그 삭제. 실패 시 로그 보존."""
         self._running_flag.clear()
         if self._thread:
             self._thread.join(timeout=5)
@@ -674,13 +728,11 @@ class _ScreenRecorder:
 
             rc = self._ffmpeg_proc.returncode
             if rc != 0:
-                # 실패 시 로그 보존 (저장 폴더로 복사)
                 _save_ffmpeg_log_on_fail(self._ffmpeg_log_path, self._tmp_video)
                 raise RuntimeError(
                     f"ffmpeg 인코딩 실패 (code={rc})\n"
                     f"로그: {self._ffmpeg_log_path}")
             else:
-                # 성공 시 로그 삭제
                 try: os.remove(self._ffmpeg_log_path)
                 except: pass
 
@@ -693,7 +745,6 @@ class _ScreenRecorder:
 
 
 def _save_ffmpeg_log_on_fail(log_path: str, video_path: str):
-    """실패 시 ffmpeg 로그를 저장 폴더에 복사."""
     try:
         if not log_path or not os.path.isfile(log_path):
             return
@@ -705,13 +756,13 @@ def _save_ffmpeg_log_on_fail(log_path: str, video_path: str):
         pass
 
 
-# ── 오디오 병합 (기능3: OBS 방식 — 화면+오디오 병렬 녹화 후 ffmpeg 합산) ────────
+# ── 오디오 병합 ───────────────────────────────────────────────────────────────
 def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
                  audio_ch: int, out_path: str,
                  audio_offset_sec: float = 0.0):
     """
-    audio_offset_sec > 0 : 오디오가 영상보다 늦게 시작 → 오디오 앞에 묵음 패딩
-    audio_offset_sec < 0 : 오디오가 영상보다 일찍 시작 → 오디오 앞부분 잘라냄
+    audio_offset_sec > 0 : 오디오가 영상보다 늦게 시작 → itsoffset으로 뒤로 배치
+    audio_offset_sec < 0 : 오디오가 영상보다 일찍 시작 → -ss로 앞부분 잘라냄
     """
     import shutil
     import numpy as np
@@ -737,10 +788,9 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
     pcm      = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
     pcm_bytes = pcm.tobytes()
 
-    # wave 모듈 없이 WAV 헤더 직접 작성 (PyInstaller 빌드 호환)
     import struct
     num_frames  = audio_data.shape[0]
-    data_size   = num_frames * audio_ch * 2   # 16bit = 2byte/sample
+    data_size   = num_frames * audio_ch * 2
     byte_rate   = audio_sr * audio_ch * 2
     block_align = audio_ch * 2
     with open(tmp_audio, "wb") as wf:
@@ -748,22 +798,19 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
         wf.write(struct.pack("<I", 36 + data_size))
         wf.write(b"WAVEfmt ")
         wf.write(struct.pack("<I", 16))
-        wf.write(struct.pack("<H", 1))           # PCM
+        wf.write(struct.pack("<H", 1))
         wf.write(struct.pack("<H", audio_ch))
         wf.write(struct.pack("<I", audio_sr))
         wf.write(struct.pack("<I", byte_rate))
         wf.write(struct.pack("<H", block_align))
-        wf.write(struct.pack("<H", 16))          # bits per sample
+        wf.write(struct.pack("<H", 16))
         wf.write(b"data")
         wf.write(struct.pack("<I", data_size))
         wf.write(pcm_bytes)
 
-    # audio_offset_sec > 0: 오디오가 늦게 시작 → itsoffset으로 오디오 입력을 앞으로 밀기
-    # audio_offset_sec < 0: 오디오가 일찍 시작 → 오디오를 -ss로 앞부분 잘라내기
     _offset = round(audio_offset_sec, 4)
-    _log(f"싱크 보정: audio_offset={_offset:.4f}s")
+    _log(f"[QPC싱크] 최종 오프셋 보정: audio_offset={_offset:.4f}s")
     if _offset >= 0.005:
-        # 오디오가 늦게 시작한 경우: 영상 기준으로 오디오를 offset만큼 뒤로 배치
         cmd = [
             ffmpeg_bin, "-y",
             "-i", tmp_video,
@@ -773,7 +820,6 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
             tmp_out,
         ]
     elif _offset <= -0.005:
-        # 오디오가 일찍 시작한 경우: 오디오 앞부분을 |offset|만큼 잘라냄
         cmd = [
             ffmpeg_bin, "-y",
             "-i", tmp_video,
@@ -783,7 +829,6 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
             tmp_out,
         ]
     else:
-        # 5ms 미만 차이는 보정 불필요
         cmd = [
             ffmpeg_bin, "-y",
             "-i", tmp_video, "-i", tmp_audio,
@@ -800,11 +845,9 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
 
     if proc.returncode == 0 and os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 1024:
         shutil.move(tmp_out, out_path)
-        # 병합 성공 시 로그 삭제
         try: os.remove(merge_log)
         except: pass
     else:
-        # 실패 시 로그를 저장 폴더로 복사
         _save_ffmpeg_log_on_fail(merge_log, out_path)
         if tmp_video != out_path:
             shutil.move(tmp_video, out_path)

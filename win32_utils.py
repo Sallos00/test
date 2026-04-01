@@ -154,76 +154,96 @@ def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
     return new_pos, True
 
 def capture_window(hwnd):
-    """특정 창의 내용을 캡처하여 numpy 배열로 반환한다."""
+    """
+    팟플레이어 창을 캡처하여 numpy BGRA 배열로 반환한다.
+
+    시도 순서:
+      1) PrintWindow(PW_RENDERFULLCONTENT=2)  — D3D/GPU 렌더링 지원
+      2) PrintWindow(플래그=0)                 — 구형 GDI 폴백
+      3) BitBlt                               — 최후 폴백 (최소화 창 불가)
+    """
     if not hwnd:
         return None
-    
+
+    import numpy as np
+    gdi32  = ctypes.windll.gdi32
+    user32 = ctypes.windll.user32
+
+    # 창 크기
+    rect = ctypes.wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    width  = rect.right  - rect.left
+    height = rect.bottom - rect.top
+    if width <= 0 or height <= 0:
+        return None
+
+    # BITMAPINFOHEADER (DIB, 32bpp, top-down)
+    class _BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize",          ctypes.c_uint32),
+            ("biWidth",         ctypes.c_int32),
+            ("biHeight",        ctypes.c_int32),
+            ("biPlanes",        ctypes.c_uint16),
+            ("biBitCount",      ctypes.c_uint16),
+            ("biCompression",   ctypes.c_uint32),
+            ("biSizeImage",     ctypes.c_uint32),
+            ("biXPelsPerMeter", ctypes.c_int32),
+            ("biYPelsPerMeter", ctypes.c_int32),
+            ("biClrUsed",       ctypes.c_uint32),
+            ("biClrImportant",  ctypes.c_uint32),
+        ]
+
+    bmi        = _BITMAPINFOHEADER()
+    bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+    bmi.biWidth        =  width
+    bmi.biHeight       = -height   # 음수 = top-down (flipud 불필요)
+    bmi.biPlanes       = 1
+    bmi.biBitCount     = 32
+    bmi.biCompression  = 0
+
+    hdc_screen = user32.GetDC(None)
+    hdc_mem    = gdi32.CreateCompatibleDC(hdc_screen)
+    pBits      = ctypes.c_void_p()
+    hbmp = gdi32.CreateDIBSection(
+        hdc_mem, ctypes.byref(bmi), 0,
+        ctypes.byref(pBits), None, 0)
+
+    if not hbmp or not pBits.value:
+        gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(None, hdc_screen)
+        return None
+
+    old_bmp = gdi32.SelectObject(hdc_mem, hbmp)
+
+    PW_RENDERFULLCONTENT = 2
+    captured = False
+
+    # 시도 1: PW_RENDERFULLCONTENT (D3D/GPU 지원)
+    if user32.PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT):
+        captured = True
+
+    # 시도 2: 플래그 0 (구형 GDI)
+    if not captured and user32.PrintWindow(hwnd, hdc_mem, 0):
+        captured = True
+
+    # 시도 3: BitBlt (창이 화면에 보여야 동작)
+    if not captured:
+        hdc_win = user32.GetWindowDC(hwnd)
+        if hdc_win:
+            gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_win, 0, 0, 0x00CC0020)
+            user32.ReleaseDC(hwnd, hdc_win)
+            captured = True
+
     try:
-        # 창의 DC 가져오기
-        hdc_window = ctypes.windll.user32.GetWindowDC(hwnd)
-        if not hdc_window:
+        if not captured or not pBits.value:
             return None
-        
-        # 창 크기 가져오기 (전체 창 영역)
-        rect = ctypes.wintypes.RECT()
-        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        width = rect.right - rect.left
-        height = rect.bottom - rect.top
-        
-        if width <= 0 or height <= 0:
-            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
-            return None
-        
-        # 메모리 DC 생성
-        hdc_mem = ctypes.windll.gdi32.CreateCompatibleDC(hdc_window)
-        if not hdc_mem:
-            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
-            return None
-        
-        # 비트맵 생성
-        hbitmap = ctypes.windll.gdi32.CreateCompatibleBitmap(hdc_window, width, height)
-        if not hbitmap:
-            ctypes.windll.gdi32.DeleteDC(hdc_mem)
-            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
-            return None
-        
-        # 비트맵 선택
-        hbitmap_old = ctypes.windll.gdi32.SelectObject(hdc_mem, hbitmap)
-        
-        # 창 내용 복사 (전체 창)
-        if not ctypes.windll.user32.PrintWindow(hwnd, hdc_mem, 0):
-            ctypes.windll.gdi32.SelectObject(hdc_mem, hbitmap_old)
-            ctypes.windll.gdi32.DeleteObject(hbitmap)
-            ctypes.windll.gdi32.DeleteDC(hdc_mem)
-            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
-            return None
-        
-        # 비트맵 정보 가져오기
-        bmi = ctypes.create_string_buffer(40)  # BITMAPINFOHEADER
-        bmi_header = (ctypes.c_int * 11)(40, width, height, 1, 32, 0, width * height * 4, 0, 0, 0, 0)
-        ctypes.memmove(bmi, ctypes.addressof(bmi_header), 40)
-        
-        # 픽셀 데이터 가져오기
-        pixels = ctypes.create_string_buffer(width * height * 4)
-        if ctypes.windll.gdi32.GetDIBits(hdc_mem, hbitmap, 0, height, pixels, bmi, 0) == 0:
-            ctypes.windll.gdi32.SelectObject(hdc_mem, hbitmap_old)
-            ctypes.windll.gdi32.DeleteObject(hbitmap)
-            ctypes.windll.gdi32.DeleteDC(hdc_mem)
-            ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
-            return None
-        
-        # numpy 배열로 변환 (BGRA -> RGBA)
-        import numpy as np
-        arr = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 4))
-        arr = np.flipud(arr)  # Y축 뒤집기
-        
-        # 정리
-        ctypes.windll.gdi32.SelectObject(hdc_mem, hbitmap_old)
-        ctypes.windll.gdi32.DeleteObject(hbitmap)
-        ctypes.windll.gdi32.DeleteDC(hdc_mem)
-        ctypes.windll.user32.ReleaseDC(hwnd, hdc_window)
-        
+        buf = (ctypes.c_uint8 * (width * height * 4)).from_address(pBits.value)
+        arr = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 4).copy()
         return arr
-    
     except Exception:
         return None
+    finally:
+        gdi32.SelectObject(hdc_mem, old_bmp)
+        gdi32.DeleteObject(hbmp)
+        gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(None, hdc_screen)

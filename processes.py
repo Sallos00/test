@@ -13,6 +13,9 @@ from win32_utils import (
     _user32, WM_USER, POT_SET_CURRENT_TIME, capture_window,
 )
 from audio_capture import proc_audio_capture
+from audio_com import qpc_freq, qpc_now
+
+
 def _load_saved_setting(key, default):
     try:
         path = os.path.join(os.environ.get("APPDATA", ""), "AutoSync", "settings.json")
@@ -20,27 +23,45 @@ def _load_saved_setting(key, default):
             return json.load(f).get(key, default)
     except Exception:
         return default
+
+
 def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
+    """
+    립 캡처 프로세스.
+
+    [개선] QPC 하드웨어 타임스탬프 적용
+      - time.time() 대신 qpc_now() / qpc_freq() 사용
+      - 오디오 캡처와 동일한 QPC 클럭 기준으로 통일
+      → proc_analyzer 에서 resample_aligned()로 공통 시간축 정렬 가능
+    """
     import cv2
     import sys
     if getattr(sys, 'frozen', False):
         base = sys._MEIPASS
     else:
         base = os.path.dirname(os.path.abspath(__file__))
+
     cascade_path = os.path.join(base, 'lbpcascade_animeface.xml')
     cascade = cv2.CascadeClassifier(cascade_path)
+
+    _freq    = qpc_freq()   # QPC 주파수 (한 번만 조회)
     interval = 1.0 / cfg["CAPTURE_FPS"]
     DETECT_EVERY_N = 5
     prev = None
     last_roi = None
     frame_count = 0
+
     while not stop_flag.value:
         t0 = time.perf_counter()
+
         raw = capture_window(find_potplayer_hwnd())
         if raw is None:
             time.sleep(interval)
             continue
-        # 마진 적용 (전체 창의 10% 마진)
+
+        # [개선] 캡처 직후 QPC 타임스탬프 기록
+        t_hw = qpc_now() / _freq
+
         h, w = raw.shape[:2]
         margin_x = int(w * 0.10)
         margin_y = int(h * 0.10)
@@ -48,6 +69,7 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
         gray = cv2.cvtColor(roi, cv2.COLOR_BGRA2GRAY)
         frame_count += 1
         motion = 0.0
+
         if frame_count % DETECT_EVERY_N == 1 or last_roi is None:
             faces = cascade.detectMultiScale(
                 cv2.equalizeHist(gray),
@@ -61,6 +83,7 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
             else:
                 last_roi = None
                 prev     = None
+
         if last_roi is not None:
             x, y, fw, fh = last_roi
             h_img, w_img  = gray.shape
@@ -74,16 +97,22 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
                     diff   = cv2.absdiff(small, prev)
                     motion = float(diff.mean())
                 prev = small
-        queue_put(lip_queue, (time.time(), motion))
+
+        # [개선] t_hw(QPC 기반) 사용 — time.time() 제거
+        queue_put(lip_queue, (t_hw, motion))
+
         elapsed = time.perf_counter() - t0
         sleep_t = interval - elapsed
         if sleep_t > 0:
             time.sleep(sleep_t)
+
+
 def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                   state_queue: Queue, cmd_queue: Queue,
                   stop_flag: Value, cfg: dict,
                   shared_pos=None, shared_dur=None):
     from scipy.signal import correlate
+
     BUF_SEC      = cfg["BUFFER_SEC"]
     FPS          = cfg["CAPTURE_FPS"]
     THRESH       = cfg["SYNC_THRESHOLD_MS"]
@@ -96,10 +125,18 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     OZM   = 180 * 1000
     CDS   = 180
     MWI   = 15.0
-    MMR  = 0.002   # 최소 RMS (오프닝 음악은 0.007 수준도 있음)
+    MMR  = 0.002
     MMC   = 0.8
     MMF = 0.70
     MCF  = 2
+
+    # ── [개선] EMA 스무딩 파라미터 ──────────────────────────────────────────
+    # OBS 버퍼 보정에서 착안: 측정값을 지수이동평균으로 스무딩한 뒤 보정 결정.
+    # alpha가 낮을수록 안정적(느린 반응), 높을수록 빠른 반응.
+    EMA_ALPHA       = 0.25
+    smoothed_offset = 0.0   # EMA 누적값
+    EMA_INIT        = False  # 첫 측정값은 그대로 초기화
+
     lpb   = collections.deque()
     aub   = collections.deque()
     tms  = 0
@@ -108,14 +145,15 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     mco = 0
     lat = 0.0
     pst   = False
-    lcd   = 0.0   # 마지막 쿨다운 로그 시각 (30초 throttle)
-    lrd   = 0.0   # 마지막 rms 진단 로그 시각 (30초 throttle)
-    pending_prompt = [None]   # GUI 확인 전까지 반복 전송할 oped_prompt
+    lcd   = 0.0
+    lrd   = 0.0
+    pending_prompt = [None]
+
     def add_log(msg):
         import time as _t
         lgl.append(f"[{_t.strftime('%H:%M:%S')}] {msg}")
+
     def is_music_playing():
-        """최근 MWI 초 오디오 RMS로 음악 여부 판별."""
         if len(aub) < 10:
             return False
         now    = time.time()
@@ -128,8 +166,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         if mean_rms < MMR:
             return False
         cv   = float(arr.std() / mean_rms) if mean_rms > 1e-9 else 999.0
-        fill = float((arr > mean_rms * 0.5).sum()) / len(arr)  # 동적 임계값
+        fill = float((arr > mean_rms * 0.5).sum()) / len(arr)
         return cv < MMC and fill > MMF
+
     def drain_queues():
         for q, buf, tag in [(lip_queue, lpb, "👁"), (audio_queue, aub, "🔊")]:
             while True:
@@ -146,37 +185,73 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             lpb.popleft()
         while aub and now - aub[0][0] > MWI:
             aub.popleft()
-    def resample(tvs, fps=15):
-        if len(tvs) < 2: return None
-        ts = np.array([x[0] for x in tvs])
-        vs = np.array([x[1] for x in tvs])
-        t_grid = np.linspace(ts[-1] - BUF_SEC, ts[-1], int(BUF_SEC * fps))
-        return np.interp(t_grid, ts, vs)
+
+    # ── [개선] resample_aligned: 공통 시간축 위에서 리샘플 ───────────────────
+    # 기존 resample()은 각 버퍼를 독립된 시간축 기준으로 처리해
+    # 두 신호의 시작점이 달라지는 문제가 있었다.
+    # OBS의 "video-triggers-audio" 방식에서 착안:
+    # 두 버퍼의 공통 시간 구간만 사용해 동일한 t_grid 위에 올린다.
+    def resample_aligned(lip_buf, aud_buf, fps=15):
+        """
+        두 버퍼를 공통 시간축 위에서 리샘플.
+
+        Returns
+        -------
+        (lip_sig, aud_sig) : 같은 길이의 numpy 배열 또는 (None, None)
+        """
+        if len(lip_buf) < 2 or len(aud_buf) < 2:
+            return None, None
+
+        lip_ts = np.array([x[0] for x in lip_buf])
+        aud_ts = np.array([x[0] for x in aud_buf])
+        lip_vs = np.array([x[1] for x in lip_buf])
+        aud_vs = np.array([x[1] for x in aud_buf])
+
+        # 공통 시간 구간 계산
+        t_start = max(lip_ts[0], aud_ts[0])
+        t_end   = min(lip_ts[-1], aud_ts[-1])
+
+        if t_end - t_start < 1.0:   # 공통 구간이 1초 미만이면 데이터 부족
+            return None, None
+
+        n_samples = int((t_end - t_start) * fps)
+        if n_samples < fps:          # 최소 1초치 샘플 필요
+            return None, None
+
+        t_grid = np.linspace(t_start, t_end, n_samples)
+        lip_sig = np.interp(t_grid, lip_ts, lip_vs)
+        aud_sig = np.interp(t_grid, aud_ts, aud_vs)
+        return lip_sig, aud_sig
+
     def to_binary(signal, ratio=0.3):
         median = np.median(signal)
         thresh = median + ratio * signal.std()
         return (signal > thresh).astype(np.float32)
+
     def compute_offset(lip, aud):
         def norm(x):
             x = x - x.mean()
             s = x.std()
             return x / s if s > 1e-9 else x
+
         lip_bin = to_binary(lip, ratio=0.5)
         lip_sig = norm(lip_bin) if lip_bin.std() >= 1e-9 else norm(lip)
         aud_diff = np.abs(np.diff(aud, prepend=aud[0]))
         aud_bin  = to_binary(aud_diff, ratio=0.5)
         aud_sig  = norm(aud_bin) if aud_bin.std() >= 1e-9 else norm(aud_diff)
+
         corr = correlate(lip_sig, aud_sig, mode="full")
         lag  = np.argmax(corr) - (len(aud_sig) - 1)
         return lag / FPS * 1000, lip_bin.std(), aud_bin.std(), lip.mean(), aud.mean()
+
     _last_log_snapshot = [None]
+
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
                    notify=None, oped_prompt=None):
         snap = _last_log_snapshot[0]
         if snap is None or len(snap) != len(logs) or (logs and snap[-1] != logs[-1]):
             snap = list(logs)
             _last_log_snapshot[0] = snap
-        # oped_prompt 가 새로 세팅되면 pending 에 저장, 없으면 pending 을 계속 전송
         if oped_prompt is not None:
             pending_prompt[0] = oped_prompt
         queue_put(state_queue, dict(
@@ -186,8 +261,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             notify=notify,
             oped_prompt=pending_prompt[0],
         ))
+
     def execute_skip():
-        """shared_pos 기준으로 OSS 초 앞으로 이동."""
         hwnd = find_potplayer_hwnd()
         if not hwnd:
             add_log("⚠ 스킵 실패: 팟플레이어 미감지")
@@ -206,12 +281,16 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         except Exception as e:
             add_log(f"⚠ 스킵 실패: {e}")
             return False
+
     time.sleep(BUF_SEC)
     adt   = False
     aws = False
     dgc       = 0
+
     while not stop_flag.value:
         t0 = time.perf_counter()
+
+        # ── 커맨드 처리 ─────────────────────────────────────────────────────
         while True:
             try:
                 cmd = cmd_queue.get_nowait()
@@ -222,7 +301,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         time.sleep(0.05)
                         post_key_to_potplayer(hwnd, 0x6F, shift=True)
                         tms = 0
-                        add_log("↺ 싱크 초기화")
+                        # [개선] 리셋 시 EMA도 초기화
+                        smoothed_offset = 0.0
+                        EMA_INIT        = False
+                        add_log("↺ 싱크 초기화 (EMA 리셋)")
                     else:
                         add_log("⚠ 팟플레이어 미감지")
                 elif cmd == "oped_skip":
@@ -252,11 +334,14 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     return
             except Exception:
                 break
+
         drain_queues()
+
         hwnd   = find_potplayer_hwnd()
         pot_ok = bool(hwnd)
         lip_n  = len(lpb)
         aud_n  = len(aub)
+
         if hwnd:
             try:
                 tbuf = ctypes.create_unicode_buffer(512)
@@ -274,28 +359,37 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     lcd = 0.0
                     pst   = False
                     pending_prompt[0] = None
-                    add_log("🔄 영상 변경 → 싱크 + OP/ED 상태 초기화")
+                    # [개선] 영상 변경 시 EMA도 초기화
+                    smoothed_offset = 0.0
+                    EMA_INIT        = False
+                    add_log("🔄 영상 변경 → 싱크 + OP/ED + EMA 초기화")
                 pvt = cur_title
             except Exception:
                 pass
+
         if aud_n == 0 and lip_n > 10 and not aws:
             aws = True
             add_log("⚠ 오디오 미감지 — 팟플레이어 재생 중인지 확인하세요")
+
         notify      = None
         oped_prompt = None
+
         if not adt and aud_n > 5:
             adt = True
             notify = ("🎬 동영상 재생 감지",
                       "팟플레이어에서 동영상 재생이 감지되었습니다.\n싱크 분석을 시작합니다.")
             add_log("🎬 동영상 재생 감지")
+
         pos = shared_pos.value if shared_pos else -1
         dur = shared_dur.value if shared_dur else -1
+
         if pos >= 0 and dur > 0:
             in_op      = pos < OZM
             in_ed      = pos > (dur - OZM)
             in_zone    = in_op or in_ed
             zone_label = "오프닝" if in_op else "엔딩"
             cooled     = (time.time() - lat) > CDS
+
             if in_zone and cooled:
                 music = is_music_playing()
                 if len(aub) >= 10:
@@ -333,30 +427,56 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     lcd = _now_cd
                     remain = int(CDS - (_now_cd - lat))
                     add_log(f"⏳ {zone_label} 쿨다운 {remain}초 남음")
+
         _has_prompt = oped_prompt is not None or pending_prompt[0] is not None
+
         if aud_n < 10 or (lip_n < 10 and not _has_prompt):
             push_state("데이터 수집 중", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
-        lip_sig = resample(lpb, FPS)
-        aud_sig = resample(aub, FPS)
+
+        # ── [개선] resample_aligned: 공통 시간축 위에서 리샘플 ───────────────
+        # 기존: 각자 독립된 시간축 기준 → 두 신호 시작점 불일치 가능
+        # 개선: 공통 구간만 사용 → OBS video-triggers-audio 방식과 동일
+        lip_sig, aud_sig = resample_aligned(lpb, aub, FPS)
+
         if lip_sig is None or aud_sig is None:
             if _has_prompt:
                 push_state("데이터 수집 중", 0, tms, lgl, pot_ok,
                            lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
-        n = min(len(lip_sig), len(aud_sig))
-        offset_ms, _, _, lip_mean, aud_mean = compute_offset(lip_sig[-n:], aud_sig[-n:])
+
+        raw_offset_ms, _, _, lip_mean, aud_mean = compute_offset(lip_sig, aud_sig)
+
         if dgc < 3:
             dgc += 1
-            add_log(f"📊 offset={offset_ms:.0f}ms lip={lip_mean:.3f} aud={aud_mean:.3f}")
+            add_log(f"📊 raw_offset={raw_offset_ms:.0f}ms lip={lip_mean:.3f} aud={aud_mean:.3f}")
+
         if lip_mean < 1e-6:
             push_state("미감지", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(1.0)
             continue
+
+        # ── [개선] EMA 스무딩 ────────────────────────────────────────────────
+        # OBS 버퍼 보정 방식에서 착안:
+        # raw correlation 값을 그대로 쓰면 프레임마다 흔들려 과보정이 생긴다.
+        # EMA로 스무딩한 뒤 임계값을 초과할 때만 보정 실행.
+        #   smoothed = alpha * raw + (1-alpha) * smoothed_prev
+        # alpha=0.25 → 약 4 사이클에 걸쳐 수렴 (안정적이면서 반응도 빠름)
+        if not EMA_INIT:
+            smoothed_offset = raw_offset_ms
+            EMA_INIT        = True
+        else:
+            smoothed_offset = EMA_ALPHA * raw_offset_ms + (1.0 - EMA_ALPHA) * smoothed_offset
+
+        offset_ms = smoothed_offset   # 이후 보정 결정은 스무딩된 값 사용
+
+        if dgc <= 3:
+            add_log(f"📈 smoothed_offset={offset_ms:.1f}ms (EMA α={EMA_ALPHA})")
+
         if abs(offset_ms) >= THRESH and hwnd:
             steps = min(int(abs(offset_ms) / STEP), MAX_STEPS)
             sign  = 1 if offset_ms > 0 else -1
@@ -370,7 +490,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
                 continue
             direction = "빠르게" if offset_ms > 0 else "느리게"
-            add_log(f"보정: {direction} ×{steps} ({steps * STEP}ms)")
+            add_log(f"보정: {direction} ×{steps} ({steps * STEP}ms) [스무딩={offset_ms:.1f}ms]")
             for _ in range(steps):
                 vk = VK_OEM_PERIOD if offset_ms > 0 else VK_OEM_COMMA
                 post_key_to_potplayer(hwnd, vk, shift=True)
@@ -381,6 +501,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             status = "팟플레이어 미감지"
         else:
             status = "정상"
+
         push_state(status, offset_ms, tms, lgl, pot_ok,
                    lip_n, aud_n, notify, oped_prompt)
         time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

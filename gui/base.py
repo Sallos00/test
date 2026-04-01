@@ -76,7 +76,6 @@ class LipSyncGUIBase:
         self._refresh()
         self.root.after(0, self._ensure_settings_file)
         self.root.after(0, self._check_auth_on_start)
-        self.root.after(500, self._start_oped_monitor)  # 앱 시작 시 오디오 모니터 즉시 가동
 
     def _build_cfg(self):
         try:

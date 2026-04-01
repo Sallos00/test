@@ -468,6 +468,7 @@ class _AudioRecorder:
         self._ch      = 2
         self._running = False
         self._thread  = None
+        self._first_audio_time: float = 0.0   # 첫 실제 오디오 패킷 도착 시각
 
     def start(self, pid: int):
         self._frames  = []
@@ -511,6 +512,10 @@ class _AudioRecorder:
                             if num_frames > 0:
                                 from audio_com import AUDCLNT_BUFFERFLAGS_SILENT as _SIL
                                 if not (flg & _SIL) and data.value:
+                                    # 첫 실제(비무음) 패킷 도착 시각 기록
+                                    if not recorder._first_audio_time:
+                                        import time as _t
+                                        recorder._first_audio_time = _t.time()
                                     buf = (ct.c_float * (num_frames * ch)).from_address(data.value)
                                     arr = np.frombuffer(buf, dtype=np.float32).copy()
                                 else:
@@ -561,6 +566,7 @@ class _ScreenRecorder:
         self._ffmpeg_log_path = None
         self._ffmpeg_log_fh = None
         self._tmp_video     = None
+        self._first_frame_time: float = 0.0   # 첫 프레임을 ffmpeg에 쓴 시각
 
     def start(self, fps=30, root=None, out_path=None):
         from win32_utils import find_potplayer_hwnd
@@ -621,6 +627,8 @@ class _ScreenRecorder:
     def _write_frame(self, bgr_frame):
         if self._ffmpeg_proc and self._ffmpeg_proc.stdin:
             try:
+                if not self._first_frame_time:
+                    self._first_frame_time = time.time()
                 self._ffmpeg_proc.stdin.write(bgr_frame.tobytes())
             except (BrokenPipeError, OSError):
                 self._running_flag.clear()
@@ -699,7 +707,12 @@ def _save_ffmpeg_log_on_fail(log_path: str, video_path: str):
 
 # ── 오디오 병합 (기능3: OBS 방식 — 화면+오디오 병렬 녹화 후 ffmpeg 합산) ────────
 def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
-                 audio_ch: int, out_path: str):
+                 audio_ch: int, out_path: str,
+                 audio_offset_sec: float = 0.0):
+    """
+    audio_offset_sec > 0 : 오디오가 영상보다 늦게 시작 → 오디오 앞에 묵음 패딩
+    audio_offset_sec < 0 : 오디오가 영상보다 일찍 시작 → 오디오 앞부분 잘라냄
+    """
     import shutil
     import numpy as np
 
@@ -745,13 +758,39 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
         wf.write(struct.pack("<I", data_size))
         wf.write(pcm_bytes)
 
-    cmd = [
-        ffmpeg_bin, "-y",
-        "-i", tmp_video, "-i", tmp_audio,
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-        "-shortest", "-movflags", "+faststart",
-        tmp_out,
-    ]
+    # audio_offset_sec > 0: 오디오가 늦게 시작 → itsoffset으로 오디오 입력을 앞으로 밀기
+    # audio_offset_sec < 0: 오디오가 일찍 시작 → 오디오를 -ss로 앞부분 잘라내기
+    _offset = round(audio_offset_sec, 4)
+    _log(f"싱크 보정: audio_offset={_offset:.4f}s")
+    if _offset >= 0.005:
+        # 오디오가 늦게 시작한 경우: 영상 기준으로 오디오를 offset만큼 뒤로 배치
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", tmp_video,
+            "-itsoffset", str(_offset), "-i", tmp_audio,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", "-movflags", "+faststart",
+            tmp_out,
+        ]
+    elif _offset <= -0.005:
+        # 오디오가 일찍 시작한 경우: 오디오 앞부분을 |offset|만큼 잘라냄
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", tmp_video,
+            "-ss", str(-_offset), "-i", tmp_audio,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", "-movflags", "+faststart",
+            tmp_out,
+        ]
+    else:
+        # 5ms 미만 차이는 보정 불필요
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", tmp_video, "-i", tmp_audio,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", "-movflags", "+faststart",
+            tmp_out,
+        ]
     with open(merge_log, "wb") as lf:
         proc = _popen_no_window(cmd, stdout=subprocess.DEVNULL, stderr=lf)
         try:
@@ -776,6 +815,7 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
 
 
 def _save_mp4(tmp_video: str, audio_arr, audio_sr: int,
-              audio_ch: int, out_path: str):
+              audio_ch: int, out_path: str,
+              audio_offset_sec: float = 0.0):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    _merge_audio(tmp_video, audio_arr, audio_sr, audio_ch, out_path)
+    _merge_audio(tmp_video, audio_arr, audio_sr, audio_ch, out_path, audio_offset_sec)

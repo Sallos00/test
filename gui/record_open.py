@@ -443,43 +443,94 @@ class LipSyncGUIRecordOpen:
                     cap_status.config(text="⚠ 창 크기 오류", fg="#e0a03c")
                     return
 
-                # BitBlt: 창에 메시지를 보내지 않으므로 팟플레이어 z-order에 영향 없음
-                hdc_win = user32.GetDC(target)
-                hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
-                hbmp    = gdi32.CreateCompatibleBitmap(hdc_win, cw, ch)
-                old     = gdi32.SelectObject(hdc_mem, hbmp)
-                SRCCOPY = 0x00CC0020
-                gdi32.BitBlt(hdc_mem, 0, 0, cw, ch, hdc_win, 0, 0, SRCCOPY)
-
+                # ── DIB Section 공통 헬퍼 ─────────────────────────────────
                 class BITMAPINFOHEADER(ctypes.Structure):
                     _fields_ = [
-                        ("biSize",          ctypes.c_uint32), ("biWidth",       ctypes.c_int32),
-                        ("biHeight",        ctypes.c_int32),  ("biPlanes",      ctypes.c_uint16),
-                        ("biBitCount",      ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                        ("biSize",          ctypes.c_uint32), ("biWidth",         ctypes.c_int32),
+                        ("biHeight",        ctypes.c_int32),  ("biPlanes",        ctypes.c_uint16),
+                        ("biBitCount",      ctypes.c_uint16), ("biCompression",   ctypes.c_uint32),
                         ("biSizeImage",     ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
-                        ("biYPelsPerMeter", ctypes.c_int32),  ("biClrUsed",     ctypes.c_uint32),
+                        ("biYPelsPerMeter", ctypes.c_int32),  ("biClrUsed",       ctypes.c_uint32),
                         ("biClrImportant",  ctypes.c_uint32),
                     ]
                 class BITMAPINFO(ctypes.Structure):
                     _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
 
-                bmi = BITMAPINFO()
-                bmi.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
-                bmi.bmiHeader.biWidth       = cw
-                bmi.bmiHeader.biHeight      = -ch
-                bmi.bmiHeader.biPlanes      = 1
-                bmi.bmiHeader.biBitCount    = 32
-                bmi.bmiHeader.biCompression = 0
-                buf_size = cw * ch * 4
-                buf = (ctypes.c_uint8 * buf_size)()
-                gdi32.GetDIBits(hdc_mem, hbmp, 0, ch, buf, ctypes.byref(bmi), 0)
+                def _make_dib_section(w, h):
+                    """32bpp top-down DIB Section 생성. (hdc_s, hdc_m, hbmp, pBits, old) 반환."""
+                    bmi_ = BITMAPINFO()
+                    bmi_.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
+                    bmi_.bmiHeader.biWidth       = w
+                    bmi_.bmiHeader.biHeight      = -h   # top-down
+                    bmi_.bmiHeader.biPlanes      = 1
+                    bmi_.bmiHeader.biBitCount    = 32
+                    bmi_.bmiHeader.biCompression = 0
+                    hdc_s = user32.GetDC(None)
+                    hdc_m = gdi32.CreateCompatibleDC(hdc_s)
+                    pb    = ctypes.c_void_p()
+                    hb    = gdi32.CreateDIBSection(hdc_m, ctypes.byref(bmi_), 0,
+                                                   ctypes.byref(pb), None, 0)
+                    if not hb or not pb.value:
+                        gdi32.DeleteDC(hdc_m)
+                        user32.ReleaseDC(None, hdc_s)
+                        return None
+                    ob = gdi32.SelectObject(hdc_m, hb)
+                    return hdc_s, hdc_m, hb, pb, ob
 
-                gdi32.SelectObject(hdc_mem, old)
-                gdi32.DeleteObject(hbmp)
-                gdi32.DeleteDC(hdc_mem)
-                user32.ReleaseDC(target, hdc_win)
+                def _free_dib(hdc_s, hdc_m, hb, ob):
+                    gdi32.SelectObject(hdc_m, ob)
+                    gdi32.DeleteObject(hb)
+                    gdi32.DeleteDC(hdc_m)
+                    user32.ReleaseDC(None, hdc_s)
 
-                arr = np.frombuffer(buf, dtype=np.uint8).reshape(ch, cw, 4)
+                def _read_pixels(pb, w, h):
+                    raw = (ctypes.c_uint8 * (w * h * 4)).from_address(pb.value)
+                    return np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4).copy()
+
+                def _is_black(a):
+                    return bool(a[..., :3].mean() < 1.0)
+
+                # ── 방법 1: PrintWindow(PW_RENDERFULLCONTENT)
+                #    다른 창에 가려도 GPU/D3D 렌더러까지 캡처 가능 (Vista+)
+                # ── 방법 2: PrintWindow(플래그=0) — 구형 GDI 렌더러 (XP+)
+                # ── 방법 3: BitBlt — 창이 화면에 보일 때 항상 동작 (Win2000+)
+                PW_RENDERFULLCONTENT = 0x00000002
+                arr = None
+
+                for pw_flag in (PW_RENDERFULLCONTENT, 0):
+                    dib = _make_dib_section(cw, ch)
+                    if dib is None:
+                        continue
+                    hdc_s, hdc_m, hb, pb, ob = dib
+                    try:
+                        user32.PrintWindow(target, hdc_m, pw_flag)
+                        candidate = _read_pixels(pb, cw, ch)
+                        if not _is_black(candidate):
+                            arr = candidate
+                    finally:
+                        _free_dib(hdc_s, hdc_m, hb, ob)
+                    if arr is not None:
+                        break
+
+                if arr is None:
+                    # BitBlt 폴백: 창이 화면에 보이기만 하면 동작
+                    dib = _make_dib_section(cw, ch)
+                    if dib is not None:
+                        hdc_s, hdc_m, hb, pb, ob = dib
+                        try:
+                            hdc_win = user32.GetWindowDC(target)
+                            if hdc_win:
+                                gdi32.BitBlt(hdc_m, 0, 0, cw, ch, hdc_win, 0, 0, 0x00CC0020)
+                                user32.ReleaseDC(target, hdc_win)
+                            candidate = _read_pixels(pb, cw, ch)
+                            if not _is_black(candidate):
+                                arr = candidate
+                        finally:
+                            _free_dib(hdc_s, hdc_m, hb, ob)
+
+                if arr is None:
+                    cap_status.config(text="⚠ 캡처 실패: 검은 화면 (팟플레이어가 가려져 있거나 GPU 렌더러 문제)", fg="#e0a03c")
+                    return
                 img = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
                 ts  = _t.strftime("%Y%m%d_%H%M%S")
                 out = os.path.join(ensure_subdir("Screenshot"), f"capture_{ts}.png")

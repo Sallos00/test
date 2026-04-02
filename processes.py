@@ -150,7 +150,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     # ── [개선] EMA 스무딩 파라미터 ──────────────────────────────────────────
     # OBS 버퍼 보정에서 착안: 측정값을 지수이동평균으로 스무딩한 뒤 보정 결정.
     # alpha가 낮을수록 안정적(느린 반응), 높을수록 빠른 반응.
-    EMA_ALPHA       = 0.25
+    # [수정1] 0.25 → 0.5: 반응 속도를 높여 이미 보정된 후에도 EMA가
+    # 느리게 따라와 과보정이 반복되는 문제 해결.
+    EMA_ALPHA       = 0.5
     smoothed_offset = 0.0   # EMA 누적값
     EMA_INIT        = False  # 첫 측정값은 그대로 초기화
 
@@ -204,10 +206,11 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 except Exception:
                     break
         # [수정] QPC 타임스탬프 기준으로 만료 판정
-        # lpb: BUF_SEC*2 여유 — ANALYSIS_INTERVAL==BUF_SEC 이면
-        # 들어오자마자 만료 판정되어 샘플이 항상 0이 되는 버그 방지
+        # [수정2] BUF_SEC*2 → BUF_SEC*3: ANALYSIS_INTERVAL==BUF_SEC==3.0 환경에서
+        # BUF_SEC*2(6초) 기준이면 새로 들어온 샘플이 다음 사이클(3초 후)에
+        # 바로 만료 판정될 수 있어 샘플 손실 발생. 3배로 여유를 확보.
         now_q = _now_qpc()
-        while lpb and now_q - lpb[0][0] > BUF_SEC * 2:
+        while lpb and now_q - lpb[0][0] > BUF_SEC * 3:
             lpb.popleft()
         while aub and now_q - aub[0][0] > MWI:
             aub.popleft()
@@ -529,6 +532,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 post_key_to_potplayer(hwnd, vk, shift=True)
                 time.sleep(0.05)
             tms += steps * STEP * sign
+            # [수정4] 보정 직후 쿨다운: 팟플레이어가 싱크 키 입력을 실제로
+            # 반영하기 전에 다음 사이클이 돌아 과보정이 반복되는 문제 방지.
+            # 보정 후 2초 대기 → EMA가 새 상태를 반영할 시간 확보.
+            time.sleep(2.0)
             status = "보정 완료"
         elif not hwnd:
             status = "팟플레이어 미감지"

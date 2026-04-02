@@ -139,8 +139,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     MTM = cfg["MAX_TOTAL_SYNC_MS"]
     OAS = bool(cfg.get("OAS", cfg.get("OPED_AUTO_SKIP", False)))
     OSS  = int(cfg.get("OSS", cfg.get("OPED_SKIP_SEC", 90)))
-    OZM   = 180 * 1000
-    CDS   = 180
+    OZM   = 90 * 1000   # 탐지 구간: 앞뒤 90초
+    CDS   = 90          # 쿨다운: 90초
     MWI   = 15.0
     MMR  = 0.002
     MMC   = 0.8
@@ -161,9 +161,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     tms  = 0
     lgl = collections.deque(maxlen=100)
     pvt = ""
-    mco = 0
-    lat = 0.0
-    pst   = False
+    # ── [버그수정] 오프닝/엔딩 상태를 구간별 dict로 분리 ──────────────────
+    # 기존 단일 변수(mco, lat, pst)는 오프닝에서 소진되면
+    # 엔딩에서 감지/팝업/자동스킵이 모두 차단되는 버그가 있었음.
+    mco = {"오프닝": 0,   "엔딩": 0}
+    lat = {"오프닝": 0.0, "엔딩": 0.0}
+    pst = {"오프닝": False, "엔딩": False}
     lcd   = 0.0
     lrd   = 0.0
     pending_prompt = [None]
@@ -345,24 +348,23 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         add_log("⚠ 팟플레이어 미감지")
                 elif cmd == "oped_skip":
                     execute_skip()
-                    mco = 0
-                    lat = time.time()
-                    lcd = 0.0
-                    pst   = False
+                    zone = pending_prompt[0].get("zone", "오프닝") if pending_prompt[0] else "오프닝"
+                    mco[zone] = 0
+                    lat[zone] = time.time()
+                    pst[zone] = False
                     pending_prompt[0] = None
-                    add_log("⏭ 스킵 완료 → 쿨다운 3분")
+                    add_log(f"⏭ {zone} 스킵 완료 → 쿨다운 {CDS}초")
                 elif cmd == "oped_no_skip":
-                    mco = 0
-                    lat = time.time()
-                    lcd = 0.0
-                    pst   = False
+                    zone = pending_prompt[0].get("zone", "오프닝") if pending_prompt[0] else "오프닝"
+                    mco[zone] = 0
+                    lat[zone] = time.time()
+                    pst[zone] = False
                     pending_prompt[0] = None
-                    add_log("✖ 스킵 건너뜀 → 쿨다운 3분")
+                    add_log(f"✖ {zone} 스킵 건너뜀 → 쿨다운 {CDS}초")
                 elif cmd == "oped_reset":
-                    mco = 0
-                    lat = 0.0
-                    lcd = 0.0
-                    pst   = False
+                    mco = {"오프닝": 0,   "엔딩": 0}
+                    lat = {"오프닝": 0.0, "엔딩": 0.0}
+                    pst = {"오프닝": False, "엔딩": False}
                     pending_prompt[0] = None
                     add_log("↺ OP/ED 상태 초기화")
                 elif cmd == "stop":
@@ -390,10 +392,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     tms      = 0
                     lpb.clear()
                     aub.clear()
-                    mco = 0
-                    lat = 0.0
+                    mco = {"오프닝": 0,   "엔딩": 0}
+                    lat = {"오프닝": 0.0, "엔딩": 0.0}
+                    pst = {"오프닝": False, "엔딩": False}
                     lcd = 0.0
-                    pst   = False
                     pending_prompt[0] = None
                     # [개선] 영상 변경 시 EMA도 초기화
                     smoothed_offset = 0.0
@@ -420,11 +422,13 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         dur = shared_dur.value if shared_dur else -1
 
         if pos >= 0 and dur > 0:
-            in_op      = pos < OZM
-            in_ed      = pos > (dur - OZM)
+            # [버그수정] 짧은 영상에서 in_op/in_ed 동시 True 방지
+            # pos <= dur//2 이면 오프닝, pos > dur//2 이면 엔딩으로만 판정
+            in_op      = pos < OZM and pos <= dur // 2
+            in_ed      = pos > (dur - OZM) and pos > dur // 2
             in_zone    = in_op or in_ed
             zone_label = "오프닝" if in_op else "엔딩"
-            cooled     = (time.time() - lat) > CDS
+            cooled     = (time.time() - lat[zone_label]) > CDS
 
             if in_zone and cooled:
                 music = is_music_playing()
@@ -438,30 +442,30 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         _now_rd = time.time()
                         if _now_rd - lrd >= 30:
                             lrd = _now_rd
-                            add_log(f"🔍 {zone_label} rms={_mean:.4f} cv={_cv:.2f} fill={_fill:.2f} music={music} mco={mco} OAS={OAS}")
+                            add_log(f"🔍 {zone_label} rms={_mean:.4f} cv={_cv:.2f} fill={_fill:.2f} music={music} mco={mco[zone_label]} OAS={OAS}")
                 if music:
-                    mco += 1
-                    add_log(f"🎵 {zone_label} 음악 감지 ({mco}/{MCF}회)")
-                    if mco >= MCF:
+                    mco[zone_label] += 1
+                    add_log(f"🎵 {zone_label} 음악 감지 ({mco[zone_label]}/{MCF}회)")
+                    if mco[zone_label] >= MCF:
                         if OAS:
                             if execute_skip():
-                                mco = 0
-                                lat = time.time()
+                                mco[zone_label] = 0
+                                lat[zone_label] = time.time()
                                 lcd = 0.0
-                                add_log(f"⏭ {zone_label} 자동스킵 완료 → 쿨다운 3분")
+                                add_log(f"⏭ {zone_label} 자동스킵 완료 → 쿨다운 {CDS}초")
                         else:
-                            if not pst:
+                            if not pst[zone_label]:
                                 oped_prompt = {"zone": zone_label, "skip_sec": OSS}
-                                pst = True
+                                pst[zone_label] = True
                                 add_log(f"🎵 {zone_label} 팝업 전송")
                 else:
-                    if mco > 0:
-                        mco -= 1
+                    if mco[zone_label] > 0:
+                        mco[zone_label] -= 1
             elif in_zone and not cooled:
                 _now_cd = time.time()
                 if _now_cd - lcd >= 30:
                     lcd = _now_cd
-                    remain = int(CDS - (_now_cd - lat))
+                    remain = int(CDS - (_now_cd - lat[zone_label]))
                     add_log(f"⏳ {zone_label} 쿨다운 {remain}초 남음")
 
         _has_prompt = oped_prompt is not None or pending_prompt[0] is not None

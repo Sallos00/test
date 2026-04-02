@@ -91,7 +91,7 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
             faces = cascade.detectMultiScale(
                 cv2.equalizeHist(gray),
                 scaleFactor=1.1,
-                minNeighbors=7,
+                minNeighbors=10,
                 minSize=(60, 60),
             )
             if len(faces) > 0:
@@ -481,7 +481,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 f"lip_mean={lip_mean:.3f} aud_mean={aud_mean:.3f} "
                 f"n={len(lip_sig)}")
 
-        if lip_mean < 1e-6:
+        if lip_mean < 0.3:
             push_state("미감지", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(1.0)

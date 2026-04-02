@@ -306,11 +306,26 @@ class LipSyncGUIRun:
                 self.cmd_queue.put_nowait("oped_reset")
             except Exception:
                 pass
+            # [버그수정] state_queue에 이미 쌓인 oped_prompt 포함 메시지를
+            # 즉시 드레인. oped_reset이 P3에서 처리되기 전에
+            # _refresh()가 구버전 oped_prompt를 꺼내 팝업을 재호출하는
+            # 타이밍 버그를 방지한다.
+            try:
+                while True:
+                    self.state_queue.get_nowait()
+            except Exception:
+                pass
             return
         # 싱크 OFF: oped 모니터에 oped_reset 전송 + 팟플레이어 직접 초기화
         if getattr(self, "_oped_monitor_running", False):
             try:
                 self._om_cmd_queue.put_nowait("oped_reset")
+            except Exception:
+                pass
+            # [버그수정] oped 모니터 state_queue도 동일하게 드레인
+            try:
+                while True:
+                    self._om_state_queue.get_nowait()
             except Exception:
                 pass
         hwnd = find_potplayer_hwnd()

@@ -6,6 +6,12 @@ audio_capture.py -- Windows WASAPI ProcessLoopback 캡처 진입점
   - time.time() 소프트웨어 클럭 대신 qp / qpc_freq() 하드웨어 클럭 기준으로 통일
   - qp == 0 인 드라이버(타임스탬프 미지원)는 qpc_now()로 폴백
   - GlobalLoopback도 동일하게 qpc_now() 적용
+
+[개선] VAD + RMS 이중 신호 출력
+  - audio_queue에 (t_hw, rms, vad) 튜플로 전송
+  - vad: 외부 라이브러리 없이 주파수 에너지 기반으로 사람 목소리 구간(0/1) 판별
+      · 300~3400Hz 대역 에너지 vs 전체 에너지 비율로 음성 여부 판단
+      · 싱크 보정에는 vad, OP/ED 감지에는 rms를 각각 사용
 """
 import ctypes
 import time
@@ -76,6 +82,45 @@ def _apply_filter(arr, sos, sosfilt):
         except Exception:
             pass
     return arr
+
+
+# ── VAD (Voice Activity Detection) ────────────────────────────────────────────
+# 외부 라이브러리 없이 주파수 에너지 비율로 음성 구간을 판별한다.
+# 사람 목소리의 핵심 대역(300~3400Hz)의 에너지가
+# 전체 에너지 대비 일정 비율 이상이면 음성(1), 아니면 비음성(0).
+# - 음악: 전 대역에 고르게 에너지가 분포 → 비율이 낮음 → 0
+# - 말소리: 300~3400Hz 집중 → 비율이 높음 → 1
+# - 무음: 전체 에너지 자체가 낮음 → 0
+_VAD_VOICE_RATIO  = 0.55   # 음성 대역 에너지가 전체의 55% 이상이면 음성으로 판정
+_VAD_MIN_ENERGY   = 1e-6   # 이 이하는 무음으로 간주
+
+def _compute_vad(arr: np.ndarray, sr: int) -> float:
+    """
+    arr: 모노 float32 PCM 샘플 배열
+    sr : 샘플레이트
+
+    반환: 1.0 (음성 있음) 또는 0.0 (음성 없음)
+    """
+    if len(arr) < 16:
+        return 0.0
+
+    total_energy = float(np.mean(arr ** 2))
+    if total_energy < _VAD_MIN_ENERGY:
+        return 0.0
+
+    # FFT로 주파수별 에너지 계산
+    fft_mag = np.abs(np.fft.rfft(arr)) ** 2
+    freqs   = np.fft.rfftfreq(len(arr), d=1.0 / sr)
+
+    voice_mask   = (freqs >= 300) & (freqs <= 3400)
+    voice_energy = float(fft_mag[voice_mask].sum())
+    total_fft    = float(fft_mag.sum())
+
+    if total_fft < 1e-12:
+        return 0.0
+
+    ratio = voice_energy / total_fft
+    return 1.0 if ratio >= _VAD_VOICE_RATIO else 0.0
 
 # ── 캡처 세션 ─────────────────────────────────────────────────────────────────
 def _run_capture_session(pid: int, audio_queue: Queue,
@@ -180,6 +225,7 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
 
                     if flg & AUDCLNT_BUFFERFLAGS_SILENT:
                         rms = 0.0
+                        vad = 0.0
                     else:
                         if not data.value:
                             release_buffer(cap, num_frames)
@@ -188,10 +234,14 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
                         arr = np.frombuffer(buf, dtype=np.float32).copy()
                         if ch > 1:
                             arr = arr.reshape(-1, ch).mean(axis=1)
-                        arr = _apply_filter(arr, sos, sosfilt)
+                        # RMS: 원본 신호 기준 (OP/ED 감지용 — 필터 전)
                         rms = float(np.sqrt(np.mean(arr ** 2)))
+                        # VAD: 필터 적용 후 주파수 에너지 비율 기반 (싱크 보정용)
+                        arr_filtered = _apply_filter(arr, sos, sosfilt)
+                        vad = _compute_vad(arr_filtered, sr)
 
-                    queue_put(audio_queue, (t_hw, rms))
+                    # (t_hw, rms, vad) 튜플로 전송
+                    queue_put(audio_queue, (t_hw, rms, vad))
 
                 release_buffer(cap, num_frames)
 
@@ -258,6 +308,7 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
 
                         if flg & AUDCLNT_BUFFERFLAGS_SILENT:
                             rms = 0.0
+                            vad = 0.0
                         else:
                             if not data.value:
                                 release_buffer(cap, num_frames)
@@ -266,10 +317,14 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
                             arr = np.frombuffer(buf, dtype=np.float32).copy()
                             if ch > 1:
                                 arr = arr.reshape(-1, ch).mean(axis=1)
-                            arr = _apply_filter(arr, sos, sosfilt)
+                            # RMS: 원본 신호 기준 (OP/ED 감지용)
                             rms = float(np.sqrt(np.mean(arr ** 2)))
+                            # VAD: 필터 적용 후 주파수 에너지 비율 기반 (싱크 보정용)
+                            arr_filtered = _apply_filter(arr, sos, sosfilt)
+                            vad = _compute_vad(arr_filtered, sr)
 
-                        queue_put(audio_queue, (t_hw, rms))
+                        # (t_hw, rms, vad) 튜플로 전송
+                        queue_put(audio_queue, (t_hw, rms, vad))
                     release_buffer(cap, num_frames)
             result_box[0] = (True, "")
         except Exception as e:

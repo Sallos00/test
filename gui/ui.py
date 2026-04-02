@@ -244,7 +244,12 @@ class LipSyncGUIUI:
         popup.title("로그")
         popup.resizable(False, True)
         popup.configure(bg=self.BG)
-        popup.grab_set()
+        # [버그수정] grab_set() 제거.
+        # grab_set()은 self.root로 향하는 tkinter 이벤트를 독점하여
+        # self.root.after()로 등록된 _refresh() 콜백 실행을 막는다.
+        # _refresh()가 멈추면 state_queue에서 oped_prompt를 꺼내지 못해
+        # OP/ED 스킵 팝업이 아예 등장하지 않는 버그가 발생한다.
+        # 로그 팝업은 읽기 전용이므로 입력 독점이 불필요하다.
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw = round(320*r); ph = round(280*r)
         self._place_popup(popup, pw, ph)

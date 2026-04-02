@@ -181,9 +181,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         if len(aub) < 10:
             return False
         # [수정] QPC 타임스탬프 기준으로 비교
+        # aub 튜플: (t_hw, rms, vad) — OP/ED 감지는 rms(index 1) 사용
         now_q  = _now_qpc()
         cutoff = now_q - MWI
-        vals   = [v for t, v in aub if t >= cutoff]
+        vals   = [item[1] for item in aub if item[0] >= cutoff]   # rms
         if len(vals) < 10:
             return False
         arr      = np.array(vals, dtype=np.float32)
@@ -216,17 +217,16 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             aub.popleft()
 
     # ── [개선] resample_aligned: 공통 시간축 위에서 리샘플 ───────────────────
-    # 기존 resample()은 각 버퍼를 독립된 시간축 기준으로 처리해
-    # 두 신호의 시작점이 달라지는 문제가 있었다.
-    # OBS의 "video-triggers-audio" 방식에서 착안:
-    # 두 버퍼의 공통 시간 구간만 사용해 동일한 t_grid 위에 올린다.
+    # aub 튜플: (t_hw, rms, vad)
+    # 싱크 보정에는 vad(index 2)를 사용 — 이진 신호끼리 correlate하므로
+    # RMS 대비 lag 피크가 선명하고 부호 반전이 줄어든다.
     def resample_aligned(lip_buf, aud_buf, fps=15):
         """
         두 버퍼를 공통 시간축 위에서 리샘플.
 
         Returns
         -------
-        (lip_sig, aud_sig) : 같은 길이의 numpy 배열 또는 (None, None)
+        (lip_sig, aud_vad_sig) : 같은 길이의 numpy 배열 또는 (None, None)
         """
         if len(lip_buf) < 2 or len(aud_buf) < 2:
             return None, None
@@ -234,7 +234,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         lip_ts = np.array([x[0] for x in lip_buf])
         aud_ts = np.array([x[0] for x in aud_buf])
         lip_vs = np.array([x[1] for x in lip_buf])
-        aud_vs = np.array([x[1] for x in aud_buf])
+        aud_vs = np.array([x[2] for x in aud_buf])   # vad (index 2)
 
         # 공통 시간 구간 계산
         t_start = max(lip_ts[0], aud_ts[0])
@@ -247,7 +247,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         if n_samples < fps:          # 최소 1초치 샘플 필요
             return None, None
 
-        t_grid = np.linspace(t_start, t_end, n_samples)
+        t_grid  = np.linspace(t_start, t_end, n_samples)
         lip_sig = np.interp(t_grid, lip_ts, lip_vs)
         aud_sig = np.interp(t_grid, aud_ts, aud_vs)
         return lip_sig, aud_sig
@@ -258,6 +258,13 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         return (signal > thresh).astype(np.float32)
 
     def compute_offset(lip, aud):
+        """
+        lip: 립 모션 신호 (연속값)
+        aud: VAD 신호 (0/1 이진값) — 이미 이진 신호이므로 추가 이진화 불필요
+
+        두 신호 모두 이진화 후 정규화하여 correlate.
+        VAD가 이진 신호이므로 RMS 대비 lag 피크가 선명하고 부호 안정성이 높다.
+        """
         def norm(x):
             x = x - x.mean()
             s = x.std()
@@ -265,13 +272,13 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         lip_bin = to_binary(lip, ratio=0.5)
         lip_sig = norm(lip_bin) if lip_bin.std() >= 1e-9 else norm(lip)
-        aud_diff = np.abs(np.diff(aud, prepend=aud[0]))
-        aud_bin  = to_binary(aud_diff, ratio=0.5)
-        aud_sig  = norm(aud_bin) if aud_bin.std() >= 1e-9 else norm(aud_diff)
+
+        # aud는 VAD 이진 신호 — diff 없이 직접 정규화
+        aud_sig = norm(aud) if aud.std() >= 1e-9 else aud
 
         corr = correlate(lip_sig, aud_sig, mode="full")
         lag  = np.argmax(corr) - (len(aud_sig) - 1)
-        return lag / FPS * 1000, lip_bin.std(), aud_bin.std(), lip.mean(), aud.mean()
+        return lag / FPS * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean()
 
     _last_log_snapshot = [None]
 
@@ -422,7 +429,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             if in_zone and cooled:
                 music = is_music_playing()
                 if len(aub) >= 10:
-                    _vals = [v for t, v in aub if t >= _now_qpc() - MWI]
+                    _vals = [item[1] for item in aub if item[0] >= _now_qpc() - MWI]  # rms
                     if _vals:
                         _arr  = np.array(_vals, dtype=np.float32)
                         _mean = float(_arr.mean())
@@ -480,8 +487,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         raw_offset_ms, lip_std, aud_std, lip_mean, aud_mean = compute_offset(lip_sig, aud_sig)
 
         # 매 사이클 진단 로그
-        add_log(f"📊 raw={raw_offset_ms:.0f}ms lip_std={lip_std:.3f} aud_std={aud_std:.3f} "
-                f"lip_mean={lip_mean:.3f} aud_mean={aud_mean:.3f} "
+        add_log(f"📊 raw={raw_offset_ms:.0f}ms lip_std={lip_std:.3f} aud_vad_std={aud_std:.3f} "
+                f"lip_mean={lip_mean:.3f} aud_vad_mean={aud_mean:.3f} "
                 f"n={len(lip_sig)}")
 
         if lip_mean < 0.3:
@@ -491,8 +498,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             continue
 
         # lip_std 또는 aud_std가 너무 낮으면 신호가 flat → correlation 신뢰 불가
+        # aud_std: VAD 신호의 편차 — 0/1이 전혀 바뀌지 않으면(항상 무음 or 항상 음성) 낮아짐
         if lip_std < 0.05 or aud_std < 0.05:
-            add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_std={aud_std:.3f}) → 건너뜀")
+            add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_vad_std={aud_std:.3f}) → 건너뜀")
             push_state("신호 부족", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

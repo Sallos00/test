@@ -293,12 +293,18 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             _last_log_snapshot[0] = snap
         if oped_prompt is not None:
             pending_prompt[0] = oped_prompt
+        # [버그수정] 전송 후 즉시 None으로 클리어.
+        # 기존에는 pending_prompt[0]을 매 사이클 그대로 재전송해서
+        # _refresh()가 oped_prompt를 반복 수신, _reset() 이후에도
+        # 큐에 남은 메시지로 팝업이 재호출되는 문제가 있었음.
+        prompt_to_send    = pending_prompt[0]
+        pending_prompt[0] = None
         queue_put(state_queue, dict(
             status=status, offset_ms=offset, correction_ms=correction,
             log_lines=snap, potplayer_ok=pot_ok,
             lip_samples=lip_n, audio_samples=aud_n,
             notify=notify,
-            oped_prompt=pending_prompt[0],
+            oped_prompt=prompt_to_send,
         ))
 
     def execute_skip():

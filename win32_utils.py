@@ -10,7 +10,7 @@ import queue
 
 # ── 설정값 ──
 CFG = dict(
-    CAPTURE_FPS         = 15,
+    CAPTURE_FPS         = 30,
     AUDIO_SR            = 16000,
     BUFFER_SEC          = 3.0,
     ANALYSIS_INTERVAL   = 3.0,

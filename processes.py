@@ -103,7 +103,7 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
 
         _total_frame_count += 1
 
-        # [개선] 캡처 직후 QPC 타임스탬프 기록
+        # QPC 타임스탬프 기록
         t_hw = qpc_now() / _freq
 
         h, w = raw.shape[:2]
@@ -124,7 +124,6 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
             if len(faces) > 0:
                 x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
                 last_roi = (x, y, fw, fh)
-                # [개선] 30프레임마다 입술 위치 비율을 동적으로 갱신
                 _lip_ratio_update_n += 1
                 if _lip_ratio_update_n % 30 == 1:
                     h_img, w_img = gray.shape
@@ -138,7 +137,6 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
         if last_roi is not None:
             x, y, fw, fh = last_roi
             h_img, w_img = gray.shape
-            # [개선] 동적으로 추정된 비율로 입술 영역 결정
             lip_y1 = min(y + int(fh * _lip_y_ratio),       h_img - 1)
             lip_y2 = min(y + int(fh * (_lip_y_ratio + 0.25)), h_img)
             lip_x1 = x
@@ -146,7 +144,6 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
             lip_roi = gray[lip_y1:lip_y2, lip_x1:lip_x2]
             if lip_roi.size > 0:
                 small = cv2.resize(lip_roi, (64, 16))
-                # [개선] 세로 방향 밝기 분산으로 개구 신호 측정
                 # 입이 열리면 치아(밝음)/입술(어두움) 대비로 열 분산이 커짐
                 col_means = small.mean(axis=0)          # 각 열의 평균 밝기
                 vert_var  = float(small.var(axis=0).mean())  # 열별 세로 분산 평균
@@ -235,7 +232,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     def is_music_playing():
         if len(aub) < 10:
             return False
-        # [수정] QPC 타임스탬프 기준으로 비교
         # aub 튜플: (t_hw, rms, vad) — OP/ED 감지는 rms(index 1) 사용
         now_q  = _now_qpc()
         cutoff = now_q - MWI
@@ -261,51 +257,41 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         buf.append(item)
                 except Exception:
                     break
-        # [수정] QPC 타임스탬프 기준으로 만료 판정
-        # [수정2] BUF_SEC*2 → BUF_SEC*3: ANALYSIS_INTERVAL==BUF_SEC==3.0 환경에서
-        # BUF_SEC*2(6초) 기준이면 새로 들어온 샘플이 다음 사이클(3초 후)에
-        # 바로 만료 판정될 수 있어 샘플 손실 발생. 3배로 여유를 확보.
         now_q = _now_qpc()
         while lpb and now_q - lpb[0][0] > BUF_SEC * 3:
             lpb.popleft()
         while aub and now_q - aub[0][0] > MWI:
             aub.popleft()
 
-    # ── [개선] resample_aligned: 공통 시간축 위에서 리샘플 ───────────────────
     # aub 튜플: (t_hw, rms, vad)
-    # 싱크 보정에는 rms(index 1)를 사용
-    # — VAD는 애니메이션 특성상(BGM·효과음 위주) 거의 항상 0이 되어 신호 불충분 오류 발생.
-    #   rms는 OP/ED 스킵에서도 이미 정상 동작이 검증된 신호이므로 싱크 보정에도 사용.
+    # 싱크 보정: rms의 1차 미분 사용
+    #   - BGM이 항상 깔리는 애니 특성상 VAD(주파수 비율)는 항상 0, rms 절대값도 flat
+    #   - diff(rms)는 대사 시작/끝에서 뾰족하게 튀어 lip 모션 신호와 상관이 잘 맞음
     def resample_aligned(lip_buf, aud_buf, fps=30):
-        """
-        두 버퍼를 공통 시간축 위에서 리샘플.
-
-        Returns
-        -------
-        (lip_sig, aud_vad_sig) : 같은 길이의 numpy 배열 또는 (None, None)
-        """
+        """두 버퍼를 공통 시간축 위에서 리샘플. (lip_sig, aud_diff_sig) 반환"""
         if len(lip_buf) < 2 or len(aud_buf) < 2:
             return None, None
 
         lip_ts = np.array([x[0] for x in lip_buf])
         aud_ts = np.array([x[0] for x in aud_buf])
         lip_vs = np.array([x[1] for x in lip_buf])
-        aud_vs = np.array([x[1] for x in aud_buf])   # rms (index 1) — vad 대신 사용
+        aud_vs = np.array([x[1] for x in aud_buf])   # rms
 
-        # 공통 시간 구간 계산
         t_start = max(lip_ts[0], aud_ts[0])
         t_end   = min(lip_ts[-1], aud_ts[-1])
 
-        if t_end - t_start < 1.0:   # 공통 구간이 1초 미만이면 데이터 부족
+        if t_end - t_start < 1.0:
             return None, None
 
         n_samples = int((t_end - t_start) * fps)
-        if n_samples < fps:          # 최소 1초치 샘플 필요
+        if n_samples < fps:
             return None, None
 
         t_grid  = np.linspace(t_start, t_end, n_samples)
         lip_sig = np.interp(t_grid, lip_ts, lip_vs)
-        aud_sig = np.interp(t_grid, aud_ts, aud_vs)
+        aud_raw = np.interp(t_grid, aud_ts, aud_vs)
+        # rms 1차 미분 → 대사 시작/끝 이벤트 타이밍 추출
+        aud_sig = np.abs(np.diff(aud_raw, prepend=aud_raw[0]))
         return lip_sig, aud_sig
 
     def to_binary(signal, ratio=0.3):
@@ -354,10 +340,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             _last_log_snapshot[0] = snap
         if oped_prompt is not None:
             pending_prompt[0] = oped_prompt
-        # [버그수정] 전송 후 즉시 None으로 클리어.
-        # 기존에는 pending_prompt[0]을 매 사이클 그대로 재전송해서
-        # _refresh()가 oped_prompt를 반복 수신, _reset() 이후에도
-        # 큐에 남은 메시지로 팝업이 재호출되는 문제가 있었음.
+        # 전송 후 즉시 클리어 — 큐 잔류로 팝업 재호출 방지
         prompt_to_send    = pending_prompt[0]
         pending_prompt[0] = None
         queue_put(state_queue, dict(
@@ -407,8 +390,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         time.sleep(0.05)
                         post_key_to_potplayer(hwnd, 0x6F, shift=True)
                         tms = 0
-                        # [개선] 리셋 시 EMA, 모션 버퍼, 쿨다운도 초기화
-                        smoothed_offset    = 0.0
+                            smoothed_offset    = 0.0
                         EMA_INIT           = False
                         _offset_buf.clear()
                         _last_correction_t = 0.0
@@ -466,7 +448,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     pst = {"오프닝": False, "엔딩": False}
                     lcd = 0.0
                     pending_prompt[0] = None
-                    # [개선] 영상 변경 시 EMA, 모션 버퍼, 쿨다운도 초기화
                     smoothed_offset    = 0.0
                     EMA_INIT           = False
                     _offset_buf.clear()
@@ -547,9 +528,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        # ── [개선] resample_aligned: 공통 시간축 위에서 리샘플 ───────────────
-        # 기존: 각자 독립된 시간축 기준 → 두 신호 시작점 불일치 가능
-        # 개선: 공통 구간만 사용 → OBS video-triggers-audio 방식과 동일
         lip_sig, aud_sig = resample_aligned(lpb, aub, fps=30)
 
         if lip_sig is None or aud_sig is None:
@@ -559,9 +537,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        # ── [방향3] compute_offset 호출 전 신호 품질 선체크 ─────────────────
-        # flat 신호가 correlate에 들어가면 np.argmax가 인덱스 0을 반환해
-        # 버퍼 길이만큼 음수 lag(-8900ms 등)가 찍히는 버그를 근본 차단.
+        # flat 신호가 correlate에 들어가면 bogus lag 방지
         _pre_lip_std = float(lip_sig.std())
         _pre_aud_std = float(aud_sig.std())
         if _pre_lip_std < 0.05 or _pre_aud_std < 0.05:
@@ -574,8 +550,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         raw_offset_ms, lip_std, aud_std, lip_mean, aud_mean = compute_offset(lip_sig, aud_sig)
 
         # 매 사이클 진단 로그
-        add_log(f"📊 raw={raw_offset_ms:.0f}ms lip_std={lip_std:.3f} aud_vad_std={aud_std:.3f} "
-                f"lip_mean={lip_mean:.3f} aud_vad_mean={aud_mean:.3f} "
+        add_log(f"📊 raw={raw_offset_ms:.0f}ms lip_std={lip_std:.3f} aud_diff_std={aud_std:.3f} "
+                f"lip_mean={lip_mean:.3f} aud_diff_mean={aud_mean:.3f} "
                 f"n={len(lip_sig)}")
 
         if lip_mean < 0.4:
@@ -586,17 +562,13 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         # 이진화 후 2차 신호 품질 체크
         if lip_std < 0.05 or aud_std < 0.05:
-            add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_vad_std={aud_std:.3f}) → 건너뜀")
+            add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_diff_std={aud_std:.3f}) → 건너뜀")
             push_state("신호 부족", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        # ── [버그3 수정] raw → 버퍼 → 버퍼 평균 → EMA 순서로 변경 ─────────
-        # 기존: EMA 먼저 업데이트 → 버퍼에 EMA값 넣음
-        #   → 버퍼 수집 중에도 EMA가 계속 갱신되어 오염된 평균이 보정에 쓰임
-        # 수정: raw를 버퍼에 넣고 버퍼가 다 찬 후 평균을 EMA에 반영
-        #   → 3회 측정값의 평균이 EMA 입력이 되므로 노이즈 내성이 높아짐
+        # raw → 버퍼 → 버퍼 평균 → EMA 순서로 노이즈 내성 확보
         _offset_buf.append(raw_offset_ms)
         if len(_offset_buf) < MOTION_BUF_SIZE:
             add_log(f"📦 버퍼 수집 중 ({len(_offset_buf)}/{MOTION_BUF_SIZE}) raw={raw_offset_ms:.0f}ms")
@@ -652,7 +624,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 post_key_to_potplayer(hwnd, vk, shift=True)
                 time.sleep(0.05)
             tms += steps * STEP * sign
-            # [개선] 보정 후 10초 쿨다운 설정 + 버퍼 클리어
+            # 보정 후 쿨다운 + 버퍼 클리어
             # 연속 보정으로 인한 큰 어긋남을 방지하고
             # 팟플레이어가 싱크를 반영할 시간 확보.
             _last_correction_t = time.time()

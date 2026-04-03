@@ -91,8 +91,8 @@ def _apply_filter(arr, sos, sosfilt):
 # - 음악: 전 대역에 고르게 에너지가 분포 → 비율이 낮음 → 0
 # - 말소리: 300~3400Hz 집중 → 비율이 높음 → 1
 # - 무음: 전체 에너지 자체가 낮음 → 0
-_VAD_VOICE_RATIO  = 0.55   # 음성 대역 에너지가 전체의 55% 이상이면 음성으로 판정
-_VAD_MIN_ENERGY   = 1e-6   # 이 이하는 무음으로 간주
+_VAD_VOICE_RATIO  = 0.40   # 음성 대역 에너지가 전체의 40% 이상이면 음성으로 판정 (완화)
+_VAD_MIN_ENERGY   = 1e-8   # 이 이하는 무음으로 간주 (완화)
 
 def _compute_vad(arr: np.ndarray, sr: int) -> float:
     """

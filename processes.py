@@ -593,30 +593,31 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        # ── [방향3] EMA — 신뢰값만 업데이트, 불량 사이클은 기존값 유지 ───────
-        # 신호 품질 체크를 모두 통과한 raw값만 EMA에 반영.
-        # 무음/미감지 구간이 길어도 마지막 신뢰값을 그대로 유지.
-        if not EMA_INIT:
-            smoothed_offset = raw_offset_ms
-            EMA_INIT        = True
-        else:
-            smoothed_offset = EMA_ALPHA * raw_offset_ms + (1.0 - EMA_ALPHA) * smoothed_offset
-
-        offset_ms = smoothed_offset
-        add_log(f"📈 smoothed={offset_ms:.1f}ms (EMA α={EMA_ALPHA})")
-
-        # ── [개선] 모션값 3개 평균 버퍼 ────────────────────────────────────
-        # 연속 3 사이클의 smoothed_offset 평균을 내어 보정 여부 결정.
-        # 버퍼가 채워지기 전까지는 보정을 보류해 단발 노이즈로 인한 오보정 방지.
-        _offset_buf.append(offset_ms)
+        # ── [버그3 수정] raw → 버퍼 → 버퍼 평균 → EMA 순서로 변경 ─────────
+        # 기존: EMA 먼저 업데이트 → 버퍼에 EMA값 넣음
+        #   → 버퍼 수집 중에도 EMA가 계속 갱신되어 오염된 평균이 보정에 쓰임
+        # 수정: raw를 버퍼에 넣고 버퍼가 다 찬 후 평균을 EMA에 반영
+        #   → 3회 측정값의 평균이 EMA 입력이 되므로 노이즈 내성이 높아짐
+        _offset_buf.append(raw_offset_ms)
         if len(_offset_buf) < MOTION_BUF_SIZE:
-            add_log(f"📦 버퍼 수집 중 ({len(_offset_buf)}/{MOTION_BUF_SIZE})")
-            push_state("버퍼 수집 중", offset_ms, tms, lgl, pot_ok,
+            add_log(f"📦 버퍼 수집 중 ({len(_offset_buf)}/{MOTION_BUF_SIZE}) raw={raw_offset_ms:.0f}ms")
+            push_state("버퍼 수집 중", raw_offset_ms, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
-        avg_offset_ms = float(np.mean(_offset_buf))
-        add_log(f"📦 버퍼 평균={avg_offset_ms:.1f}ms (최근 {MOTION_BUF_SIZE}회)")
+
+        buf_avg = float(np.mean(_offset_buf))
+        add_log(f"📦 버퍼 평균={buf_avg:.1f}ms (최근 {MOTION_BUF_SIZE}회)")
+
+        # 버퍼 평균을 EMA에 반영 — 신뢰값만 업데이트, 불량 사이클은 기존값 유지
+        if not EMA_INIT:
+            smoothed_offset = buf_avg
+            EMA_INIT        = True
+        else:
+            smoothed_offset = EMA_ALPHA * buf_avg + (1.0 - EMA_ALPHA) * smoothed_offset
+
+        avg_offset_ms = smoothed_offset
+        add_log(f"📈 smoothed={avg_offset_ms:.1f}ms (EMA α={EMA_ALPHA})")
 
         # ── [개선] 싱크 보정 후 쿨다운 체크 ────────────────────────────────
         _now_t = time.time()

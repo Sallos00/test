@@ -93,6 +93,7 @@ def _apply_filter(arr, sos, sosfilt):
 # - 무음: 전체 에너지 자체가 낮음 → 0
 _VAD_VOICE_RATIO  = 0.40   # 음성 대역 에너지가 전체의 40% 이상이면 음성으로 판정 (완화)
 _VAD_MIN_ENERGY   = 1e-8   # 이 이하는 무음으로 간주 (완화)
+_VAD_DEBUG_COUNT  = 0      # 디버그 로그 출력 카운터 (50패킷마다 출력)
 
 def _compute_vad(arr: np.ndarray, sr: int) -> float:
     """
@@ -101,11 +102,19 @@ def _compute_vad(arr: np.ndarray, sr: int) -> float:
 
     반환: 1.0 (음성 있음) 또는 0.0 (음성 없음)
     """
+    global _VAD_DEBUG_COUNT
+    _VAD_DEBUG_COUNT += 1
+    _do_debug = (_VAD_DEBUG_COUNT % 50 == 1)   # 50패킷마다 1회 출력
+
     if len(arr) < 16:
+        if _do_debug:
+            print(f"[VAD-DBG] arr too short: len={len(arr)}", flush=True)
         return 0.0
 
     total_energy = float(np.mean(arr ** 2))
     if total_energy < _VAD_MIN_ENERGY:
+        if _do_debug:
+            print(f"[VAD-DBG] silent: total_energy={total_energy:.2e} < {_VAD_MIN_ENERGY:.2e}", flush=True)
         return 0.0
 
     # FFT로 주파수별 에너지 계산
@@ -117,10 +126,15 @@ def _compute_vad(arr: np.ndarray, sr: int) -> float:
     total_fft    = float(fft_mag.sum())
 
     if total_fft < 1e-12:
+        if _do_debug:
+            print(f"[VAD-DBG] total_fft too small: {total_fft:.2e}", flush=True)
         return 0.0
 
     ratio = voice_energy / total_fft
-    return 1.0 if ratio >= _VAD_VOICE_RATIO else 0.0
+    result = 1.0 if ratio >= _VAD_VOICE_RATIO else 0.0
+    if _do_debug:
+        print(f"[VAD-DBG] energy={total_energy:.2e} ratio={ratio:.3f} thresh={_VAD_VOICE_RATIO} → vad={result}", flush=True)
+    return result
 
 # ── 캡처 세션 ─────────────────────────────────────────────────────────────────
 def _run_capture_session(pid: int, audio_queue: Queue,

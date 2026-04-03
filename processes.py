@@ -567,6 +567,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         _pre_aud_std = float(aud_sig.std())
         if _pre_lip_std < 0.05 or _pre_aud_std < 0.05:
             add_log(f"⚠ 신호 불충분 (pre_lip={_pre_lip_std:.3f} pre_aud={_pre_aud_std:.3f}) → compute_offset 생략")
+            # lip은 정상인데 aud VAD만 0인 경우 별도 안내 후 건너뜀
+            if _pre_lip_std >= 0.05 and _pre_aud_std < 0.05:
+                add_log("ℹ aud VAD 신호만 부족 — 오디오 캡처 또는 VAD 임계값 확인 필요")
             push_state("신호 부족", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

@@ -390,7 +390,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         time.sleep(0.05)
                         post_key_to_potplayer(hwnd, 0x6F, shift=True)
                         tms = 0
-                            smoothed_offset    = 0.0
+                        smoothed_offset    = 0.0
                         EMA_INIT           = False
                         _offset_buf.clear()
                         _last_correction_t = 0.0

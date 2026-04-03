@@ -33,6 +33,14 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
       - time.time() 대신 qpc_now() / qpc_freq() 사용
       - 오디오 캡처와 동일한 QPC 클럭 기준으로 통일
       → proc_analyzer 에서 resample_aligned()로 공통 시간축 정렬 가능
+
+    [개선] 입술 감지 정밀화
+      1. 동적 입술 위치 추정:
+         얼굴 ROI 하위 절반에서 수평 방향 평균 밝기가 가장 낮은 띠를
+         입술 위치로 동적 추정. 고정 비율(fh*0.6) 대비 캐릭터별 편차 감소.
+      2. 세로 방향 밝기 분산으로 개구(開口) 신호 측정:
+         입이 열리면 치아(밝음)와 입술(어두움)의 대비로 세로 분산이 커짐.
+         absdiff 픽셀 변화량 대비 단순 움직임과 실제 개구의 구분이 개선됨.
     """
     import cv2
     import sys
@@ -47,12 +55,30 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
     _freq    = qpc_freq()   # QPC 주파수 (한 번만 조회)
     interval = 1.0 / cfg["CAPTURE_FPS"]
     DETECT_EVERY_N = 5
-    prev = None
     last_roi = None
     frame_count = 0
     _null_frame_count  = 0
     _last_diag_time    = 0.0
     _total_frame_count = 0
+    # 동적 입술 위치 캐시 (얼굴 높이 대비 비율로 저장)
+    _lip_y_ratio = 0.70   # 초기값: 얼굴 70% 지점
+    _lip_ratio_update_n = 0
+
+    def _estimate_lip_y_ratio(face_gray, fh):
+        """
+        얼굴 ROI 하위 절반에서 수평 평균 밝기가 가장 낮은 행을 입술 중심으로 추정.
+        반환: 얼굴 높이 대비 입술 시작 비율 (0.5 ~ 0.85 범위로 클램프)
+        """
+        h = face_gray.shape[0]
+        search_start = int(h * 0.5)
+        search_end   = int(h * 0.92)
+        if search_end <= search_start:
+            return 0.70
+        region = face_gray[search_start:search_end, :]
+        row_means = region.mean(axis=1)
+        darkest   = int(np.argmin(row_means))
+        ratio = (search_start + darkest) / h
+        return float(np.clip(ratio - 0.05, 0.50, 0.85))
 
     while not stop_flag.value:
         t0 = time.perf_counter()
@@ -66,7 +92,8 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
             _last_diag_time = _now_diag
             diag = (f"[P1 진단] hwnd={bool(hwnd)} total={_total_frame_count} "
                     f"null={_null_frame_count} "
-                    f"shape={raw.shape if raw is not None else None}")
+                    f"shape={raw.shape if raw is not None else None} "
+                    f"lip_y_ratio={_lip_y_ratio:.2f}")
             queue_put(lip_queue, ("LOG", diag))
 
         if raw is None:
@@ -97,23 +124,33 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
             if len(faces) > 0:
                 x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
                 last_roi = (x, y, fw, fh)
+                # [개선] 30프레임마다 입술 위치 비율을 동적으로 갱신
+                _lip_ratio_update_n += 1
+                if _lip_ratio_update_n % 30 == 1:
+                    h_img, w_img = gray.shape
+                    fy2 = min(y + fh, h_img)
+                    face_crop = gray[y:fy2, x:min(x + fw, w_img)]
+                    if face_crop.size > 0:
+                        _lip_y_ratio = _estimate_lip_y_ratio(face_crop, fh)
             else:
                 last_roi = None
-                prev     = None
 
         if last_roi is not None:
             x, y, fw, fh = last_roi
-            h_img, w_img  = gray.shape
-            lip_y1 = min(y + int(fh * 0.6), h_img - 1)
-            lip_y2 = min(y + fh, h_img)
+            h_img, w_img = gray.shape
+            # [개선] 동적으로 추정된 비율로 입술 영역 결정
+            lip_y1 = min(y + int(fh * _lip_y_ratio),       h_img - 1)
+            lip_y2 = min(y + int(fh * (_lip_y_ratio + 0.25)), h_img)
+            lip_x1 = x
             lip_x2 = min(x + fw, w_img)
-            lip_roi = gray[lip_y1:lip_y2, x:lip_x2]
+            lip_roi = gray[lip_y1:lip_y2, lip_x1:lip_x2]
             if lip_roi.size > 0:
-                small = cv2.resize(lip_roi, (64, 20))
-                if prev is not None:
-                    diff   = cv2.absdiff(small, prev)
-                    motion = float(diff.mean())
-                prev = small
+                small = cv2.resize(lip_roi, (64, 16))
+                # [개선] 세로 방향 밝기 분산으로 개구 신호 측정
+                # 입이 열리면 치아(밝음)/입술(어두움) 대비로 열 분산이 커짐
+                col_means = small.mean(axis=0)          # 각 열의 평균 밝기
+                vert_var  = float(small.var(axis=0).mean())  # 열별 세로 분산 평균
+                motion    = vert_var / 255.0            # 0~1 정규화
 
         # [개선] t_hw(QPC 기반) 사용 — time.time() 제거
         queue_put(lip_queue, (t_hw, motion))
@@ -155,6 +192,18 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     EMA_ALPHA       = 0.5
     smoothed_offset = 0.0   # EMA 누적값
     EMA_INIT        = False  # 첫 측정값은 그대로 초기화
+
+    # ── [개선] 모션값 3개 평균 버퍼 ─────────────────────────────────────────
+    # 단일 사이클의 raw_offset_ms는 노이즈가 크므로
+    # 연속 3개 측정값의 평균을 내어 보정 여부를 결정한다.
+    # 3개가 모이기 전까지는 보정을 보류하여 오탐 방지.
+    MOTION_BUF_SIZE  = 3
+    _offset_buf      = collections.deque(maxlen=MOTION_BUF_SIZE)
+
+    # ── [개선] 싱크 보정 후 쿨다운 ──────────────────────────────────────────
+    # 보정 직후 10초간 추가 보정을 차단해 연속 보정으로 인한 큰 어긋남 방지.
+    SYNC_COOLDOWN_SEC = 10.0
+    _last_correction_t = 0.0   # 마지막 보정 시각 (time.time() 기준)
 
     lpb   = collections.deque()
     aub   = collections.deque()
@@ -346,10 +395,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         time.sleep(0.05)
                         post_key_to_potplayer(hwnd, 0x6F, shift=True)
                         tms = 0
-                        # [개선] 리셋 시 EMA도 초기화
-                        smoothed_offset = 0.0
-                        EMA_INIT        = False
-                        add_log("↺ 싱크 초기화 (EMA 리셋)")
+                        # [개선] 리셋 시 EMA, 모션 버퍼, 쿨다운도 초기화
+                        smoothed_offset    = 0.0
+                        EMA_INIT           = False
+                        _offset_buf.clear()
+                        _last_correction_t = 0.0
+                        add_log("↺ 싱크 초기화 (EMA·버퍼·쿨다운 리셋)")
                     else:
                         add_log("⚠ 팟플레이어 미감지")
                 elif cmd == "oped_skip":
@@ -403,10 +454,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     pst = {"오프닝": False, "엔딩": False}
                     lcd = 0.0
                     pending_prompt[0] = None
-                    # [개선] 영상 변경 시 EMA도 초기화
-                    smoothed_offset = 0.0
-                    EMA_INIT        = False
-                    add_log("🔄 영상 변경 → 싱크 + OP/ED + EMA 초기화")
+                    # [개선] 영상 변경 시 EMA, 모션 버퍼, 쿨다운도 초기화
+                    smoothed_offset    = 0.0
+                    EMA_INIT           = False
+                    _offset_buf.clear()
+                    _last_correction_t = 0.0
+                    add_log("🔄 영상 변경 → 싱크 + OP/ED + EMA + 버퍼 초기화")
                 pvt = cur_title
             except Exception:
                 pass
@@ -526,40 +579,65 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         offset_ms = smoothed_offset
         add_log(f"📈 smoothed={offset_ms:.1f}ms (EMA α={EMA_ALPHA})")
 
-        if abs(offset_ms) >= THRESH and hwnd:
-            steps = min(int(abs(offset_ms) / STEP), MAX_STEPS)
+        # ── [개선] 모션값 3개 평균 버퍼 ────────────────────────────────────
+        # 연속 3 사이클의 smoothed_offset 평균을 내어 보정 여부 결정.
+        # 버퍼가 채워지기 전까지는 보정을 보류해 단발 노이즈로 인한 오보정 방지.
+        _offset_buf.append(offset_ms)
+        if len(_offset_buf) < MOTION_BUF_SIZE:
+            add_log(f"📦 버퍼 수집 중 ({len(_offset_buf)}/{MOTION_BUF_SIZE})")
+            push_state("버퍼 수집 중", offset_ms, tms, lgl, pot_ok,
+                       lip_n, aud_n, notify, oped_prompt)
+            time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
+            continue
+        avg_offset_ms = float(np.mean(_offset_buf))
+        add_log(f"📦 버퍼 평균={avg_offset_ms:.1f}ms (최근 {MOTION_BUF_SIZE}회)")
+
+        # ── [개선] 싱크 보정 후 쿨다운 체크 ────────────────────────────────
+        _now_t = time.time()
+        _cooldown_remain = SYNC_COOLDOWN_SEC - (_now_t - _last_correction_t)
+        if _cooldown_remain > 0:
+            add_log(f"⏳ 보정 쿨다운 {_cooldown_remain:.1f}초 남음 → 건너뜀")
+            push_state("쿨다운 중", avg_offset_ms, tms, lgl, pot_ok,
+                       lip_n, aud_n, notify, oped_prompt)
+            time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
+            continue
+
+        if abs(avg_offset_ms) >= THRESH and hwnd:
+            steps = min(int(abs(avg_offset_ms) / STEP), MAX_STEPS)
             # correlate(lip, aud) lag 부호 해석:
             #   lag > 0 : lip 피크가 aud보다 나중에 나타남 → 오디오가 빠름
             #             → 오디오를 늦춰야 함 → Shift+. (VK_OEM_PERIOD)
             #   lag < 0 : lip 피크가 aud보다 먼저 나타남 → 오디오가 늦음
             #             → 오디오를 당겨야 함 → Shift+, (VK_OEM_COMMA)
-            sign  = 1 if offset_ms > 0 else -1
+            sign  = 1 if avg_offset_ms > 0 else -1
             if abs(tms + steps * STEP * sign) > MTM:
                 allowed = MTM - abs(tms)
                 steps   = max(0, int(allowed / STEP))
             if steps == 0:
                 add_log(f"⚠ 싱크 상한 도달 (±{MTM}ms)")
-                push_state("상한 도달", offset_ms, tms, lgl, pot_ok,
+                push_state("상한 도달", avg_offset_ms, tms, lgl, pot_ok,
                            lip_n, aud_n, notify, oped_prompt)
                 time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
                 continue
-            direction = "빠르게(오디오 늦춤)" if offset_ms > 0 else "느리게(오디오 당김)"
-            add_log(f"보정: {direction} ×{steps} ({steps * STEP}ms) [스무딩={offset_ms:.1f}ms]")
+            direction = "빠르게(오디오 늦춤)" if avg_offset_ms > 0 else "느리게(오디오 당김)"
+            add_log(f"보정: {direction} ×{steps} ({steps * STEP}ms) [평균={avg_offset_ms:.1f}ms]")
             for _ in range(steps):
-                vk = VK_OEM_PERIOD if offset_ms > 0 else VK_OEM_COMMA
+                vk = VK_OEM_PERIOD if avg_offset_ms > 0 else VK_OEM_COMMA
                 post_key_to_potplayer(hwnd, vk, shift=True)
                 time.sleep(0.05)
             tms += steps * STEP * sign
-            # [수정4] 보정 직후 쿨다운: 팟플레이어가 싱크 키 입력을 실제로
-            # 반영하기 전에 다음 사이클이 돌아 과보정이 반복되는 문제 방지.
-            # 보정 후 2초 대기 → EMA가 새 상태를 반영할 시간 확보.
-            time.sleep(2.0)
+            # [개선] 보정 후 10초 쿨다운 설정 + 버퍼 클리어
+            # 연속 보정으로 인한 큰 어긋남을 방지하고
+            # 팟플레이어가 싱크를 반영할 시간 확보.
+            _last_correction_t = time.time()
+            _offset_buf.clear()
+            add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
             status = "보정 완료"
         elif not hwnd:
             status = "팟플레이어 미감지"
         else:
             status = "정상"
 
-        push_state(status, offset_ms, tms, lgl, pot_ok,
+        push_state(status, avg_offset_ms, tms, lgl, pot_ok,
                    lip_n, aud_n, notify, oped_prompt)
         time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

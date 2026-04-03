@@ -272,7 +272,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     # aub 튜플: (t_hw, rms, vad)
     # 싱크 보정에는 vad(index 2)를 사용 — 이진 신호끼리 correlate하므로
     # RMS 대비 lag 피크가 선명하고 부호 반전이 줄어든다.
-    def resample_aligned(lip_buf, aud_buf, fps=15):
+    def resample_aligned(lip_buf, aud_buf, fps=30):
         """
         두 버퍼를 공통 시간축 위에서 리샘플.
 
@@ -328,9 +328,19 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         # aud는 VAD 이진 신호 — diff 없이 직접 정규화
         aud_sig = norm(aud) if aud.std() >= 1e-9 else aud
 
-        corr = correlate(lip_sig, aud_sig, mode="full")
-        lag  = np.argmax(corr) - (len(aud_sig) - 1)
-        return lag / FPS * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean()
+        corr     = correlate(lip_sig, aud_sig, mode="full")
+        peak_idx = int(np.argmax(corr))
+
+        # 파라볼라 보간 — 정수 lag보다 정밀한 서브샘플 위치 추정
+        if 0 < peak_idx < len(corr) - 1:
+            y0, y1, y2 = corr[peak_idx - 1], corr[peak_idx], corr[peak_idx + 1]
+            denom = 2 * y1 - y0 - y2
+            sub = 0.5 * (y2 - y0) / denom if abs(denom) > 1e-9 else 0.0
+            lag = (peak_idx + sub) - (len(aud_sig) - 1)
+        else:
+            lag = peak_idx - (len(aud_sig) - 1)
+
+        return lag / 30 * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean()
 
     _last_log_snapshot = [None]
 
@@ -538,7 +548,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         # ── [개선] resample_aligned: 공통 시간축 위에서 리샘플 ───────────────
         # 기존: 각자 독립된 시간축 기준 → 두 신호 시작점 불일치 가능
         # 개선: 공통 구간만 사용 → OBS video-triggers-audio 방식과 동일
-        lip_sig, aud_sig = resample_aligned(lpb, aub, FPS)
+        lip_sig, aud_sig = resample_aligned(lpb, aub, fps=30)
 
         if lip_sig is None or aud_sig is None:
             if _has_prompt:
@@ -554,7 +564,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 f"lip_mean={lip_mean:.3f} aud_vad_mean={aud_mean:.3f} "
                 f"n={len(lip_sig)}")
 
-        if lip_mean < 0.3:
+        if lip_mean < 0.4:
             push_state("미감지", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(1.0)

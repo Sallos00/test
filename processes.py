@@ -273,8 +273,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     # ── [개선] resample_aligned: 공통 시간축 위에서 리샘플 ───────────────────
     # aub 튜플: (t_hw, rms, vad)
-    # 싱크 보정에는 vad(index 2)를 사용 — 이진 신호끼리 correlate하므로
-    # RMS 대비 lag 피크가 선명하고 부호 반전이 줄어든다.
+    # 싱크 보정에는 rms(index 1)를 사용
+    # — VAD는 애니메이션 특성상(BGM·효과음 위주) 거의 항상 0이 되어 신호 불충분 오류 발생.
+    #   rms는 OP/ED 스킵에서도 이미 정상 동작이 검증된 신호이므로 싱크 보정에도 사용.
     def resample_aligned(lip_buf, aud_buf, fps=30):
         """
         두 버퍼를 공통 시간축 위에서 리샘플.
@@ -289,7 +290,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         lip_ts = np.array([x[0] for x in lip_buf])
         aud_ts = np.array([x[0] for x in aud_buf])
         lip_vs = np.array([x[1] for x in lip_buf])
-        aud_vs = np.array([x[2] for x in aud_buf])   # vad (index 2)
+        aud_vs = np.array([x[1] for x in aud_buf])   # rms (index 1) — vad 대신 사용
 
         # 공통 시간 구간 계산
         t_start = max(lip_ts[0], aud_ts[0])
@@ -315,10 +316,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     def compute_offset(lip, aud):
         """
         lip: 립 모션 신호 (연속값)
-        aud: VAD 신호 (0/1 이진값) — 이미 이진 신호이므로 추가 이진화 불필요
-
-        두 신호 모두 이진화 후 정규화하여 correlate.
-        VAD가 이진 신호이므로 RMS 대비 lag 피크가 선명하고 부호 안정성이 높다.
+        aud: RMS 신호 (연속값) — 이진화 후 정규화하여 correlate.
         """
         def norm(x):
             x = x - x.mean()
@@ -328,8 +326,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         lip_bin = to_binary(lip, ratio=0.5)
         lip_sig = norm(lip_bin) if lip_bin.std() >= 1e-9 else norm(lip)
 
-        # aud는 VAD 이진 신호 — diff 없이 직접 정규화
-        aud_sig = norm(aud) if aud.std() >= 1e-9 else aud
+        # aud는 RMS 연속 신호 — to_binary 후 정규화
+        aud_bin = to_binary(aud, ratio=0.3)
+        aud_sig = norm(aud_bin) if aud_bin.std() >= 1e-9 else norm(aud)
 
         corr     = correlate(lip_sig, aud_sig, mode="full")
         peak_idx = int(np.argmax(corr))
@@ -343,7 +342,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         else:
             lag = peak_idx - (len(aud_sig) - 1)
 
-        return lag / 30 * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean()
+        return lag / 30 * 1000, lip_bin.std(), aud_bin.std(), lip.mean(), aud.mean()
 
     _last_log_snapshot = [None]
 
@@ -567,9 +566,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         _pre_aud_std = float(aud_sig.std())
         if _pre_lip_std < 0.05 or _pre_aud_std < 0.05:
             add_log(f"⚠ 신호 불충분 (pre_lip={_pre_lip_std:.3f} pre_aud={_pre_aud_std:.3f}) → compute_offset 생략")
-            # lip은 정상인데 aud VAD만 0인 경우 별도 안내 후 건너뜀
-            if _pre_lip_std >= 0.05 and _pre_aud_std < 0.05:
-                add_log("ℹ aud VAD 신호만 부족 — 오디오 캡처 또는 VAD 임계값 확인 필요")
             push_state("신호 부족", 0, tms, lgl, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

@@ -152,8 +152,11 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
                 vert_var  = float(small.var(axis=0).mean())  # 열별 세로 분산 평균
                 motion    = vert_var / 255.0            # 0~1 정규화
 
-        # [개선] t_hw(QPC 기반) 사용 — time.time() 제거
-        queue_put(lip_queue, (t_hw, motion))
+        # 얼굴 감지된 프레임만 큐에 넣음
+        # 미감지 프레임의 motion=0.0이 섞이면 상관 신호가 오염되어
+        # 재생 중에도 엉뚱한 raw값이 나와 싱크 보정 방향이 틀어지는 문제 방지
+        if last_roi is not None:
+            queue_put(lip_queue, (t_hw, motion))
 
         elapsed = time.perf_counter() - t0
         sleep_t = interval - elapsed
@@ -557,6 +560,18 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
+        # ── [방향3] compute_offset 호출 전 신호 품질 선체크 ─────────────────
+        # flat 신호가 correlate에 들어가면 np.argmax가 인덱스 0을 반환해
+        # 버퍼 길이만큼 음수 lag(-8900ms 등)가 찍히는 버그를 근본 차단.
+        _pre_lip_std = float(lip_sig.std())
+        _pre_aud_std = float(aud_sig.std())
+        if _pre_lip_std < 0.05 or _pre_aud_std < 0.05:
+            add_log(f"⚠ 신호 불충분 (pre_lip={_pre_lip_std:.3f} pre_aud={_pre_aud_std:.3f}) → compute_offset 생략")
+            push_state("신호 부족", 0, tms, lgl, pot_ok,
+                       lip_n, aud_n, notify, oped_prompt)
+            time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
+            continue
+
         raw_offset_ms, lip_std, aud_std, lip_mean, aud_mean = compute_offset(lip_sig, aud_sig)
 
         # 매 사이클 진단 로그
@@ -570,8 +585,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(1.0)
             continue
 
-        # lip_std 또는 aud_std가 너무 낮으면 신호가 flat → correlation 신뢰 불가
-        # aud_std: VAD 신호의 편차 — 0/1이 전혀 바뀌지 않으면(항상 무음 or 항상 음성) 낮아짐
+        # 이진화 후 2차 신호 품질 체크
         if lip_std < 0.05 or aud_std < 0.05:
             add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_vad_std={aud_std:.3f}) → 건너뜀")
             push_state("신호 부족", 0, tms, lgl, pot_ok,
@@ -579,7 +593,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        # ── [개선] EMA 스무딩 ────────────────────────────────────────────────
+        # ── [방향3] EMA — 신뢰값만 업데이트, 불량 사이클은 기존값 유지 ───────
+        # 신호 품질 체크를 모두 통과한 raw값만 EMA에 반영.
+        # 무음/미감지 구간이 길어도 마지막 신뢰값을 그대로 유지.
         if not EMA_INIT:
             smoothed_offset = raw_offset_ms
             EMA_INIT        = True

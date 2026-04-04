@@ -16,7 +16,6 @@ from win32_utils import (
 from audio_capture import proc_audio_capture
 from audio_com import qpc_freq, qpc_now
 
-
 def _load_saved_setting(key, default):
     try:
         path = os.path.join(os.environ.get("APPDATA", ""), "AutoSync", "settings.json")
@@ -25,12 +24,13 @@ def _load_saved_setting(key, default):
     except Exception:
         return default
 
-
-def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
+def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_anchor=None):
     """
     팟플레이어 화면을 캡처해 입술 개구(開口) 신호를 추출하는 프로세스.
 
-    타임스탬프: qpc_now() / qpc_freq() — 오디오 캡처와 동일한 QPC 클럭 기준.
+    타임스탬프: 오디오 스트림 기준 위치(초) — proc_audio_capture와 동일한 기준점.
+                stream_anchor[qp_origin, sr, freq]를 읽어 qpc_now()를 변환.
+                기준점 미확립 시 qpc_now() / freq 로 폴백.
     입술 위치:  얼굴 ROI 하위 절반에서 수평 평균 밝기가 가장 낮은 행을 동적 추정.
     개구 신호:  입술 ROI를 64×16으로 축소 후 열(列)별 세로 분산의 평균으로 계산.
                 입이 열리면 치아(밝음)와 입술(어두움)의 대비로 분산이 커짐.
@@ -68,7 +68,20 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
     while not stop_flag.value:
         t0   = time.perf_counter()
         hwnd = find_potplayer_hwnd()
+
+        # 캡처 시작 직전에 QPC 틱 기록
+        qp_now_val = qpc_now()
         raw  = capture_window(hwnd) if hwnd else None
+
+        # stream_anchor 기준점이 확립되면 오디오와 동일한 스트림 위치(초)로 변환
+        # 미확립 시 qpc_now() / freq 로 폴백 (오디오 첫 패킷 전 구간)
+        if stream_anchor is not None and stream_anchor[0] > 0:
+            qp_origin = stream_anchor[0]
+            sr_anc    = stream_anchor[1]
+            freq_anc  = stream_anchor[2]
+            t_hw = (qp_now_val - qp_origin) / freq_anc
+        else:
+            t_hw = qp_now_val / _freq
 
         # 30초마다 진단 로그 전송
         now = time.time()
@@ -86,7 +99,6 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
             continue
 
         total_frame_count += 1
-        t_hw = qpc_now() / _freq
 
         h, w  = raw.shape[:2]
         mx    = int(w * 0.10)
@@ -131,7 +143,6 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict):
         if sleep_t > 0:
             time.sleep(sleep_t)
 
-
 def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                   state_queue: Queue, cmd_queue: Queue,
                   stop_flag: Value, cfg: dict,
@@ -172,9 +183,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     MUSIC_MIN_FILL    = 0.70     # RMS > 평균×0.5 비율 하한
     MUSIC_CONFIRM     = 2        # 연속 감지 횟수 기준
 
-    EMA_ALPHA         = 0.5      # EMA 계수 (높을수록 빠른 반응)
-    OFFSET_BUF_SIZE   = 3        # 평균 낼 연속 측정 횟수
-    SYNC_COOLDOWN_SEC = 10.0     # 보정 후 재보정 억제 시간
+    EMA_ALPHA          = 0.5      # EMA 계수 (높을수록 빠른 반응)
+    OFFSET_BUF_SIZE    = 3        # 평균 낼 연속 측정 횟수
+    SYNC_COOLDOWN_SEC  = 10.0     # 보정 후 재보정 억제 시간
+    CONFIDENCE_THRESH  = 0.25     # 교차상관 신뢰도 하한 (이 미만이면 해당 사이클 skip)
 
     # ── 상태 변수 ─────────────────────────────────────────────────────────────
     lpb = collections.deque()
@@ -285,26 +297,37 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     def compute_offset(lip, vad, fps):
         """
-        lip·vad 신호를 이진화·정규화 후 교차상관으로 lag(ms) 추정.
+        lip·vad 신호를 정규화 후 교차상관으로 lag(ms) 추정.
         파라볼라 보간으로 서브샘플 정밀도 확보.
+
+        lip: 연속값 → to_binary로 이진화
+        vad: 이미 0/1 이진 신호 → round()로 스냅 (to_binary 재적용 시 신호 왜곡)
 
         lag > 0: 오디오가 립보다 빠름 → 오디오 늦춰야 함 (Shift+.)
         lag < 0: 오디오가 립보다 느림 → 오디오 당겨야 함 (Shift+,)
-        반환: (lag_ms, lip_bin_std, vad_bin_std, lip_mean, vad_mean)
+        반환: (lag_ms, lip_bin_std, vad_std, lip_mean, vad_mean, confidence)
+               confidence: 정규화 상관계수 peak값 (0~1), 낮으면 신뢰 불가
         """
         lip_bin = to_binary(lip, ratio=0.5)
         lip_sig = normalize(lip_bin) if lip_bin.std() >= 1e-9 else normalize(lip)
 
-        vad_bin = to_binary(vad, ratio=0.3)
-        vad_sig = normalize(vad_bin) if vad_bin.std() >= 1e-9 else normalize(vad)
+        # vad는 interp로 생긴 0~1 중간값을 반올림해 이진으로 복원 후 정규화
+        vad_snapped = np.round(vad).astype(np.float32)
+        vad_sig     = normalize(vad_snapped) if vad_snapped.std() >= 1e-9 else normalize(vad)
 
         # 탐색 범위를 MAX_TOTAL_SYNC_MS 이내로 제한해 노이즈 peak 방지
         max_lag_samples = int(MTM / 1000.0 * fps)
-        corr     = correlate(lip_sig, vad_sig, mode="full")
-        center   = len(vad_sig) - 1
-        lo       = max(0, center - max_lag_samples)
-        hi       = min(len(corr), center + max_lag_samples + 1)
-        peak_idx = int(np.argmax(corr[lo:hi])) + lo
+        corr   = correlate(lip_sig, vad_sig, mode="full")
+        center = len(vad_sig) - 1
+        lo     = max(0, center - max_lag_samples)
+        hi     = min(len(corr), center + max_lag_samples + 1)
+
+        sub_corr = corr[lo:hi]
+        peak_idx = int(np.argmax(sub_corr)) + lo
+
+        # 정규화 상관계수로 신뢰도 산출 (신호 에너지 대비 peak 크기)
+        energy    = np.sqrt(np.sum(lip_sig**2) * np.sum(vad_sig**2))
+        confidence = float(corr[peak_idx] / energy) if energy > 1e-9 else 0.0
 
         if lo < peak_idx < hi - 1:
             y0, y1, y2 = corr[peak_idx-1], corr[peak_idx], corr[peak_idx+1]
@@ -314,7 +337,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         else:
             lag = peak_idx - center
 
-        return lag / fps * 1000, lip_bin.std(), vad_bin.std(), lip.mean(), vad.mean()
+        return lag / fps * 1000, lip_bin.std(), vad_snapped.std(), lip.mean(), vad.mean(), confidence
 
     # ── 상태 큐 전송 ──────────────────────────────────────────────────────────
     _last_log_snapshot = [None]
@@ -541,10 +564,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        raw_ms, lip_std, vad_std, lip_mean, vad_mean = compute_offset(lip_sig, vad_sig, video_fps)
+        raw_ms, lip_std, vad_std, lip_mean, vad_mean, confidence = compute_offset(lip_sig, vad_sig, video_fps)
 
         add_log(f"📊 raw={raw_ms:.0f}ms lip_std={lip_std:.3f} vad_std={vad_std:.3f} "
-                f"lip_mean={lip_mean:.3f} vad_mean={vad_mean:.3f} n={len(lip_sig)}")
+                f"lip_mean={lip_mean:.3f} vad_mean={vad_mean:.3f} conf={confidence:.3f} n={len(lip_sig)}")
 
         # 얼굴은 잡혔지만 입 움직임이 없는 구간 (대사 없음)
         if lip_mean < 0.4:
@@ -557,6 +580,14 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         if lip_std < 0.05 or vad_std < 0.05:
             add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} vad_std={vad_std:.3f}) → 건너뜀")
             push_state("신호 부족", 0, total_correction_ms, log_lines, pot_ok,
+                       lip_n, aud_n, notify, oped_prompt)
+            time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
+            continue
+
+        # 상관 신뢰도 체크 — peak가 낮으면 lip·vad 패턴이 맞지 않는 구간
+        if confidence < CONFIDENCE_THRESH:
+            add_log(f"⚠ 상관 신뢰도 낮음 (conf={confidence:.3f}) → 건너뜀")
+            push_state("신뢰도 부족", 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
@@ -610,7 +641,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             add_log(f"보정: {direction} ×{steps} ({steps*STEP}ms) [평균={smoothed_offset:.1f}ms]")
             for _ in range(steps):
                 post_key_to_potplayer(hwnd, vk, shift=True)
-                time.sleep(0.05)
+                time.sleep(0.01)
 
             total_correction_ms += steps * STEP * sign
             last_correction_t    = time.time()

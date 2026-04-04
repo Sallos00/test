@@ -148,20 +148,13 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                   stop_flag: Value, cfg: dict,
                   shared_pos=None, shared_dur=None):
     """
-    립 모션 신호와 오디오 VAD 신호를 교차상관(cross-correlation)으로 비교해
-    싱크 오프셋을 추정하고 팟플레이어 오디오 딜레이를 자동 보정하는 프로세스.
+    립 모션(lip)과 오디오 VAD를 교차상관으로 비교해 싱크 오프셋을 추정하고
+    팟플레이어 오디오 딜레이를 자동 보정하는 프로세스.
 
-    신호 흐름:
-        proc_lip_capture   → lip_queue   → lpb (립 버퍼)
-        proc_audio_capture → audio_queue → aub (오디오 버퍼)
-        resample_aligned() → 공통 시간축 정렬
-        compute_offset()   → 교차상관 → lag(ms)
-        EMA 스무딩 → 3회 평균 → 임계값 초과 시 팟플레이어 키 입력으로 보정
-
-    오디오 신호 (aub 튜플: t_hw, rms, vad):
-        싱크 보정 — vad(index 2): 300~3400Hz 에너지 비율 기반 이진(0/1) 신호.
-                    BGM 구간=0, 대사 구간=1 로 구분되어 lip 신호와 상관이 잘 맞음.
-        OP/ED 감지 — rms(index 1): 음악 재생 여부 판단에 사용.
+    aub 튜플: (t_stream, rms, vad)
+      t_stream: 오디오 스트림 기준 위치(초) — lip과 동일 기준축
+      rms: OP/ED 음악 감지에 사용
+      vad: 싱크 보정에 사용 (ZCR 기반 이진 신호)
     """
     from scipy.signal import correlate
 
@@ -213,11 +206,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
 
-    _freq = qpc_freq()
-
-    def _now_qpc() -> float:
-        return qpc_now() / _freq
-
     def add_log(msg: str):
         log_lines.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
@@ -225,8 +213,10 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     def is_music_playing() -> bool:
         if len(aub) < 10:
             return False
-        cutoff = _now_qpc() - MUSIC_WINDOW_SEC
-        vals   = [x[1] for x in aub if x[0] >= cutoff]   # rms
+        # aub 타임스탬프는 스트림 위치 기준 — 최신 항목에서 윈도우만큼 이전
+        latest_t = aub[-1][0]
+        cutoff   = latest_t - MUSIC_WINDOW_SEC
+        vals     = [x[1] for x in aub if x[0] >= cutoff]   # rms
         if len(vals) < 10:
             return False
         arr      = np.array(vals, dtype=np.float32)
@@ -249,11 +239,14 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                         buf.append(item)
                 except Exception:
                     break
-        now_q = _now_qpc()
-        while lpb and now_q - lpb[0][0] > MUSIC_WINDOW_SEC:
-            lpb.popleft()
-        while aub and now_q - aub[0][0] > MUSIC_WINDOW_SEC:
-            aub.popleft()
+        if lpb:
+            latest_lip = lpb[-1][0]
+            while lpb and latest_lip - lpb[0][0] > MUSIC_WINDOW_SEC:
+                lpb.popleft()
+        if aub:
+            latest_aud = aub[-1][0]
+            while aub and latest_aud - aub[0][0] > MUSIC_WINDOW_SEC:
+                aub.popleft()
 
     # ── 립·오디오 버퍼를 공통 시간축으로 리샘플 ──────────────────────────────
     def resample_aligned(lip_buf, aud_buf, fps):
@@ -504,7 +497,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     now_rd = time.time()
                     if now_rd - last_rms_log >= 30:
                         last_rms_log = now_rd
-                        vals = [x[1] for x in aub if x[0] >= _now_qpc() - MUSIC_WINDOW_SEC]
+                        vals = [x[1] for x in aub if x[0] >= aub[-1][0] - MUSIC_WINDOW_SEC]
                         if vals:
                             arr  = np.array(vals, dtype=np.float32)
                             mean = float(arr.mean())

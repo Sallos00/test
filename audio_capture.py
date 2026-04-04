@@ -80,7 +80,7 @@ def _compute_vad(arr: np.ndarray, sr: int) -> float:
 
 # ── PCM 버퍼 처리 공통 로직 ───────────────────────────────────────────────────
 
-def _process_buffer(data, num_frames, flg, qp, ch, _freq):
+def _process_buffer(data, num_frames, flg, qp, ch, sr, _freq):
     """버퍼에서 (t_hw, rms, vad) 튜플을 계산해 반환."""
     t_hw = (qp / _freq) if qp > 0 else (qpc_now() / _freq)
 
@@ -93,7 +93,7 @@ def _process_buffer(data, num_frames, flg, qp, ch, _freq):
         arr = arr.reshape(-1, ch).mean(axis=1)
 
     rms = float(np.sqrt(np.mean(arr ** 2)))
-    vad = _compute_vad(arr, 0)   # sr 불필요 — ZCR은 비율로 계산
+    vad = _compute_vad(arr, sr)
     return t_hw, rms, vad
 
 
@@ -183,7 +183,7 @@ def _run_capture_impl(pid: int, audio_queue: Queue, stop_flag: Value, send_log):
                     send_log(f"✅ 첫 패킷 수신! frames={num_frames}")
 
                 if num_frames > 0:
-                    t_hw, rms, vad = _process_buffer(data, num_frames, flg, qp, ch, _freq)
+                    t_hw, rms, vad = _process_buffer(data, num_frames, flg, qp, ch, sr, _freq)
                     queue_put(audio_queue, (t_hw, rms, vad))
 
                 release_buffer(cap, num_frames)
@@ -244,7 +244,7 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
                         send_log("✅ 첫 패킷 수신! (전체 루프백)")
 
                     if num_frames > 0:
-                        t_hw, rms, vad = _process_buffer(data, num_frames, flg, qp, ch, _freq)
+                        t_hw, rms, vad = _process_buffer(data, num_frames, flg, qp, ch, sr, _freq)
                         queue_put(audio_queue, (t_hw, rms, vad))
 
                     release_buffer(cap, num_frames)

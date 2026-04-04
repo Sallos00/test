@@ -1,13 +1,13 @@
 """
 audio_capture.py -- Windows WASAPI ProcessLoopback 캡처 진입점
 
-audio_queue에 (t_hw, rms, vad) 튜플을 전송한다.
-  t_hw : QPC 하드웨어 타임스탬프 (초) — proc_analyzer와 동일한 클럭 기준
-  rms  : 원본 신호 RMS — OP/ED 음악 감지에 사용
-  vad  : 음성 감지 이진값 (0.0 / 1.0) — 싱크 보정에 사용
-         ZCR + RMS 조합으로 BGM과 대사를 구분
-           · ZCR 1000~3500 /sec + RMS > 5e-3 → 음성(1)
-           · 그 외 (BGM, 무음) → 비음성(0)
+audio_queue에 (t_stream, rms, vad) 튜플을 전송한다.
+  t_stream : 오디오 스트림 기준 위치(초) — 립 캡처와 공통 기준점
+             첫 패킷의 (qp_origin, dp_origin, sr)로 확립한 선형 관계로 변환
+             lip_capture도 qpc_now()를 동일 공식으로 변환해 기준 통일
+  rms      : 원본 신호 RMS — OP/ED 음악 감지에 사용
+  vad      : 음성 감지 이진값 (0.0 / 1.0) — 싱크 보정에 사용
+             ZCR + RMS 조합으로 BGM과 대사를 구분
 """
 import ctypes
 import time
@@ -63,29 +63,40 @@ _VAD_ZCR_HIGH = 3500    # 음성 ZCR 상한 (crosses/sec)
 _VAD_MIN_RMS  = 5e-3    # 이 이하는 무음으로 판정
 
 def _compute_vad(arr: np.ndarray, sr: int) -> float:
-    """
-    모노 float32 PCM 배열에서 음성 여부를 판별.
-    반환: 1.0 (음성) / 0.0 (BGM·무음)
-    """
+    """모노 float32 PCM 배열에서 음성 여부를 판별. 반환: 1.0 (음성) / 0.0 (BGM·무음)"""
     if len(arr) < 16:
         return 0.0
-
     rms = float(np.sqrt(np.mean(arr ** 2)))
     if rms < _VAD_MIN_RMS:
         return 0.0
-
     zcr = float(np.sum(np.abs(np.diff(np.sign(arr)))) / 2) / (len(arr) / sr)
     return 1.0 if _VAD_ZCR_LOW <= zcr <= _VAD_ZCR_HIGH else 0.0
 
 
-# ── PCM 버퍼 처리 공통 로직 ───────────────────────────────────────────────────
+# ── 스트림 기준 타임스탬프 변환 ───────────────────────────────────────────────
+# 오디오의 qp(DAC 출력 QPC틱)와 립의 qpc_now()는 같은 QPC 클럭이지만
+# 가리키는 사건이 달라 계통 오차가 발생한다.
+# 첫 패킷의 (qp_origin, dp_origin)으로 선형 변환식을 확립하면
+# 임의의 QPC 틱 → 스트림 위치(초)로 통일할 수 있다:
+#   t_stream = (qp - qp_origin) / freq + dp_origin / sr
+# 립도 동일 공식으로 변환하면 두 신호가 완전히 같은 기준축을 갖는다.
 
-def _process_buffer(data, num_frames, flg, qp, ch, sr, _freq):
-    """버퍼에서 (t_hw, rms, vad) 튜플을 계산해 반환."""
-    t_hw = (qp / _freq) if qp > 0 else (qpc_now() / _freq)
+def _make_stream_converter(dp_origin: int, qp_origin: int, sr: int, freq: int):
+    """QPC 틱 → 스트림 위치(초) 변환 함수를 반환."""
+    dp_offset = dp_origin / sr   # 스트림 시작 기준 오프셋(초)
+    def convert(qp: int) -> float:
+        return (qp - qp_origin) / freq + dp_offset
+    return convert
+
+
+# ── PCM 버퍼 처리 ─────────────────────────────────────────────────────────────
+
+def _process_buffer(data, num_frames, flg, qp, ch, sr, freq, to_stream_t):
+    """버퍼에서 (t_stream, rms, vad) 튜플을 계산해 반환."""
+    t_stream = to_stream_t(qp) if qp > 0 else to_stream_t(qpc_now())
 
     if flg & AUDCLNT_BUFFERFLAGS_SILENT or not data.value:
-        return t_hw, 0.0, 0.0
+        return t_stream, 0.0, 0.0
 
     buf = (ctypes.c_float * (num_frames * ch)).from_address(data.value)
     arr = np.frombuffer(buf, dtype=np.float32).copy()
@@ -94,12 +105,12 @@ def _process_buffer(data, num_frames, flg, qp, ch, sr, _freq):
 
     rms = float(np.sqrt(np.mean(arr ** 2)))
     vad = _compute_vad(arr, sr)
-    return t_hw, rms, vad
+    return t_stream, rms, vad
 
 
 # ── ProcessLoopback 캡처 세션 ─────────────────────────────────────────────────
 
-def _run_capture_session(pid: int, audio_queue: Queue, stop_flag: Value, send_log):
+def _run_capture_session(pid, audio_queue, stop_flag, send_log, stream_anchor):
     """MTA 스레드에서 ProcessLoopback 캡처를 실행하는 래퍼."""
     import threading
     result_box = [None]
@@ -108,7 +119,7 @@ def _run_capture_session(pid: int, audio_queue: Queue, stop_flag: Value, send_lo
         hr_co = _ole32.CoInitializeEx(None, 0x0)
         co_ok = hr_co in (0, 1)
         try:
-            result_box[0] = _run_capture_impl(pid, audio_queue, stop_flag, send_log)
+            result_box[0] = _run_capture_impl(pid, audio_queue, stop_flag, send_log, stream_anchor)
         except Exception as e:
             result_box[0] = (False, f"예외(MTA): {e}")
         finally:
@@ -121,11 +132,11 @@ def _run_capture_session(pid: int, audio_queue: Queue, stop_flag: Value, send_lo
     return result_box[0] if result_box[0] is not None else (False, "MTA 스레드 비정상 종료")
 
 
-def _run_capture_impl(pid: int, audio_queue: Queue, stop_flag: Value, send_log):
+def _run_capture_impl(pid, audio_queue, stop_flag, send_log, stream_anchor):
     client  = None
     cap     = None
     h_event = None
-    _freq   = qpc_freq()
+    freq    = qpc_freq()
 
     try:
         client  = activate_process_loopback(pid)
@@ -143,6 +154,7 @@ def _run_capture_impl(pid: int, audio_queue: Queue, stop_flag: Value, send_log):
         cur_pid       = pid
         first_packet  = True
         total_packets = 0
+        to_stream_t   = None   # 첫 패킷에서 확립
 
         while not stop_flag.value:
             now = time.time()
@@ -175,7 +187,7 @@ def _run_capture_impl(pid: int, audio_queue: Queue, stop_flag: Value, send_log):
                 if pkt == 0:
                     break
 
-                data, num_frames, flg, qp = get_buffer(cap)
+                data, num_frames, flg, dp, qp = get_buffer(cap)
                 total_packets += 1
 
                 if first_packet:
@@ -183,8 +195,20 @@ def _run_capture_impl(pid: int, audio_queue: Queue, stop_flag: Value, send_log):
                     send_log(f"✅ 첫 패킷 수신! frames={num_frames}")
 
                 if num_frames > 0:
-                    t_hw, rms, vad = _process_buffer(data, num_frames, flg, qp, ch, sr, _freq)
-                    queue_put(audio_queue, (t_hw, rms, vad))
+                    # 첫 유효 패킷에서 스트림 기준점 확립
+                    if to_stream_t is None and qp > 0:
+                        to_stream_t = _make_stream_converter(dp, qp, sr, freq)
+                        # 공유 앵커에 기준점 저장 (lip_capture가 읽어감)
+                        stream_anchor[0] = qp   # qp_origin
+                        stream_anchor[1] = sr    # sample rate
+                        stream_anchor[2] = freq  # qpc_freq
+                        send_log(f"⚓ 스트림 기준점 확립: qp_origin={qp} sr={sr}")
+                    if to_stream_t is None:
+                        to_stream_t = lambda q: qpc_now() / freq
+
+                    t_stream, rms, vad = _process_buffer(
+                        data, num_frames, flg, qp, ch, sr, freq, to_stream_t)
+                    queue_put(audio_queue, (t_stream, rms, vad))
 
                 release_buffer(cap, num_frames)
 
@@ -205,7 +229,7 @@ def _run_capture_impl(pid: int, audio_queue: Queue, stop_flag: Value, send_log):
 
 # ── GlobalLoopback 캡처 세션 (빌드 19041 미만 폴백) ──────────────────────────
 
-def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
+def _run_global_loopback_session(audio_queue, stop_flag, send_log, stream_anchor):
     """MTA 스레드에서 전체 루프백 캡처를 실행하는 래퍼."""
     result_box = [None]
 
@@ -215,7 +239,7 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
         client  = None
         cap     = None
         h_event = None
-        _freq   = qpc_freq()
+        freq    = qpc_freq()
         try:
             client  = activate_global_loopback()
             sr, ch  = audio_client_initialize_loopback(client)
@@ -226,6 +250,8 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
             send_log(f"🎙 [GlobalLoopback] sr={sr} ch={ch}")
 
             first_packet = True
+            to_stream_t  = None
+
             while not stop_flag.value:
                 _kernel32.WaitForSingleObject(h_event, 10)
                 while not stop_flag.value:
@@ -238,14 +264,24 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
                     if pkt == 0:
                         break
 
-                    data, num_frames, flg, qp = get_buffer(cap)
+                    data, num_frames, flg, dp, qp = get_buffer(cap)
                     if first_packet:
                         first_packet = False
                         send_log("✅ 첫 패킷 수신! (전체 루프백)")
 
                     if num_frames > 0:
-                        t_hw, rms, vad = _process_buffer(data, num_frames, flg, qp, ch, sr, _freq)
-                        queue_put(audio_queue, (t_hw, rms, vad))
+                        if to_stream_t is None and qp > 0:
+                            to_stream_t = _make_stream_converter(dp, qp, sr, freq)
+                            stream_anchor[0] = qp
+                            stream_anchor[1] = sr
+                            stream_anchor[2] = freq
+                            send_log(f"⚓ 스트림 기준점 확립 (GlobalLoopback): qp_origin={qp}")
+                        if to_stream_t is None:
+                            to_stream_t = lambda q: qpc_now() / freq
+
+                        t_stream, rms, vad = _process_buffer(
+                            data, num_frames, flg, qp, ch, sr, freq, to_stream_t)
+                        queue_put(audio_queue, (t_stream, rms, vad))
 
                     release_buffer(cap, num_frames)
 
@@ -273,12 +309,21 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 
-def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queue=None):
+def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict,
+                       log_queue=None, stream_anchor=None):
+    """
+    stream_anchor: [qp_origin, sr, freq] 공유 리스트 (multiprocessing.Manager().list())
+                   첫 패킷에서 기준점을 기록, proc_lip_capture가 읽어서 동일 기준 사용.
+                   None이면 기준점 공유 없이 동작 (하위 호환).
+    """
     import sys, os
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w")
+
+    if stream_anchor is None:
+        stream_anchor = [0, 48000, qpc_freq()]  # 더미 — 공유 안 됨
 
     def send_log(msg: str):
         full = f"[{time.strftime('%H:%M:%S')}] {msg}"
@@ -297,7 +342,8 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
         _retry = 0
         while not stop_flag.value:
             try:
-                ok, reason = _run_global_loopback_session(audio_queue, stop_flag, send_log)
+                ok, reason = _run_global_loopback_session(
+                    audio_queue, stop_flag, send_log, stream_anchor)
             except Exception as e:
                 ok, reason = False, f"예외: {e}"
             if ok:
@@ -324,7 +370,8 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
             continue
 
         try:
-            ok, reason = _run_capture_session(pid, audio_queue, stop_flag, send_log)
+            ok, reason = _run_capture_session(
+                pid, audio_queue, stop_flag, send_log, stream_anchor)
         except Exception as e:
             ok, reason = False, f"예외: {e}"
 

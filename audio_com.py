@@ -337,7 +337,7 @@ def get_buffer(cap):
     hr = fn(cap, ctypes.byref(data), ctypes.byref(frames),
             ctypes.byref(flags), ctypes.byref(dp), ctypes.byref(qp))
     _hcheck(hr, "GetBuffer")
-    return data, frames.value, flags.value, qp.value   # ← qp 추가 반환
+    return data, frames.value, flags.value, dp.value, qp.value   # ← qp 추가 반환
 
 def release_buffer(cap, n: int):
     fn_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint)

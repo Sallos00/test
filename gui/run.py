@@ -20,7 +20,6 @@ from win32_utils import (
 )
 from processes import proc_lip_capture, proc_audio_capture, proc_analyzer
 
-
 class LipSyncGUIRun:
 
     # ── OP/ED 백그라운드 모니터 (싱크 OFF 상태에서도 동작) ───────────────────
@@ -37,7 +36,7 @@ class LipSyncGUIRun:
 
             self._om_lip_queue   = Queue(maxsize=qsize)
             self._om_audio_queue = Queue(maxsize=qsize)
-            self._om_log_queue   = Queue(maxsize=200)   # P2 전용 로그 큐
+            self._om_log_queue   = Queue(maxsize=200)
             self._om_state_queue = Queue(maxsize=20)
             self._om_cmd_queue   = Queue(maxsize=10)
             self._om_stop_flag   = Value("b", False)
@@ -46,6 +45,9 @@ class LipSyncGUIRun:
             self._om_shared_pos  = Value(ctypes.c_longlong, -1)
             self._om_shared_dur  = Value(ctypes.c_longlong, -1)
 
+            from multiprocessing import Manager
+            self._om_stream_anchor = Manager().list([0, 48000, 1])
+
             self._om_processes = []
             for target, args in [
                 (proc_audio_capture, (
@@ -53,6 +55,7 @@ class LipSyncGUIRun:
                     self._om_stop_flag,
                     runtime_cfg,
                     self._om_log_queue,
+                    self._om_stream_anchor,
                 )),
                 (proc_analyzer, (
                     self._om_lip_queue,
@@ -122,7 +125,6 @@ class LipSyncGUIRun:
                 target=self._monitor_for_popup,
                 kwargs={"wait_for_exit": True},
                 daemon=True).start()
-
 
     # ── Windows 토스트 알림 ───────────────────────────────────────────────────
     @staticmethod
@@ -265,13 +267,19 @@ class LipSyncGUIRun:
         self._shared_pos = Value(ctypes.c_longlong, -1)
         self._shared_dur = Value(ctypes.c_longlong, -1)
 
+        # 오디오 스트림 기준점 — P2가 첫 패킷에서 기록, P1이 읽어서 타임스탬프 통일
+        # [qp_origin, sr, freq] : 0이면 미확립
+        from multiprocessing import Manager
+        self._stream_anchor = Manager().list([0, 48000, 1])
+
         # 싱크 ON 상태 전용 로그 큐 (P2 → GUI 직접 전달)
         self._main_log_queue = Queue(maxsize=200)
 
         for target, args in [
-            (proc_lip_capture,   (self._lip_queue,   self.stop_flag, runtime_cfg)),
+            (proc_lip_capture,   (self._lip_queue,   self.stop_flag, runtime_cfg,
+                                  self._stream_anchor)),
             (proc_audio_capture, (self._audio_queue, self.stop_flag, runtime_cfg,
-                                  self._main_log_queue)),   # log_queue 전달
+                                  self._main_log_queue, self._stream_anchor)),
             (proc_analyzer,      (self._lip_queue, self._audio_queue,
                                   self.state_queue, self.cmd_queue,
                                   self.stop_flag, runtime_cfg,
@@ -306,7 +314,6 @@ class LipSyncGUIRun:
                 self.cmd_queue.put_nowait("oped_reset")
             except Exception:
                 pass
-            # [버그수정] state_queue에 이미 쌓인 oped_prompt 포함 메시지를
             # 즉시 드레인. oped_reset이 P3에서 처리되기 전에
             # _refresh()가 구버전 oped_prompt를 꺼내 팝업을 재호출하는
             # 타이밍 버그를 방지한다.
@@ -322,7 +329,6 @@ class LipSyncGUIRun:
                 self._om_cmd_queue.put_nowait("oped_reset")
             except Exception:
                 pass
-            # [버그수정] oped 모니터 state_queue도 동일하게 드레인
             try:
                 while True:
                     self._om_state_queue.get_nowait()
@@ -336,7 +342,6 @@ class LipSyncGUIRun:
             post_key_to_potplayer(hwnd, VK_OEM_2, shift=True)
             time.sleep(0.05)
             post_key_to_potplayer(hwnd, 0x6F, shift=True)
-            # 버그2 수정: 싱크 OFF 상태에서도 누적 보정 수치 UI 초기화
             self._corr_lbl.config(text="+0 ms")
             self._proc_lbl.config(text="수동 초기화 완료", fg=self.ACCENT3)
         except Exception:

@@ -1,17 +1,13 @@
 """
 audio_capture.py -- Windows WASAPI ProcessLoopback 캡처 진입점
 
-[개선] OBS 방식 QPC 하드웨어 타임스탬프 적용
-  - get_buffer()가 반환하는 qp(QueryPerformanceCounter 틱)를 실제 타임스탬프로 사용
-  - time.time() 소프트웨어 클럭 대신 qp / qpc_freq() 하드웨어 클럭 기준으로 통일
-  - qp == 0 인 드라이버(타임스탬프 미지원)는 qpc_now()로 폴백
-  - GlobalLoopback도 동일하게 qpc_now() 적용
-
-[개선] VAD + RMS 이중 신호 출력
-  - audio_queue에 (t_hw, rms, vad) 튜플로 전송
-  - vad: 외부 라이브러리 없이 주파수 에너지 기반으로 사람 목소리 구간(0/1) 판별
-      · 300~3400Hz 대역 에너지 vs 전체 에너지 비율로 음성 여부 판단
-      · 싱크 보정에는 vad, OP/ED 감지에는 rms를 각각 사용
+audio_queue에 (t_hw, rms, vad) 튜플을 전송한다.
+  t_hw : QPC 하드웨어 타임스탬프 (초) — proc_analyzer와 동일한 클럭 기준
+  rms  : 원본 신호 RMS — OP/ED 음악 감지에 사용
+  vad  : 음성 감지 이진값 (0.0 / 1.0) — 싱크 보정에 사용
+         ZCR + RMS 조합으로 BGM과 대사를 구분
+           · ZCR 1000~3500 /sec + RMS > 5e-3 → 음성(1)
+           · 그 외 (BGM, 무음) → 비음성(0)
 """
 import ctypes
 import time
@@ -29,17 +25,7 @@ from audio_com import (
     qpc_freq, qpc_now,
 )
 
-_activate_process_loopback = activate_process_loopback
-_audio_client_initialize   = audio_client_initialize
-_audio_client_set_event    = audio_client_set_event
-_audio_client_start        = audio_client_start
-_audio_client_stop         = audio_client_stop
-_get_capture_client        = get_capture_client
-_get_next_packet_size      = get_next_packet_size
-_get_buffer                = get_buffer
-_release_buffer            = release_buffer
-
-# ── Windows 빌드 확인 ─────────────────────────────────────────────────────────
+# Windows 빌드 확인 — ProcessLoopback은 빌드 19041(20H1) 이상에서만 지원
 def _windows_build() -> int:
     try:
         return int(platform.version().split(".")[-1])
@@ -49,7 +35,7 @@ def _windows_build() -> int:
 _WIN_BUILD                = _windows_build()
 _SUPPORT_PROCESS_LOOPBACK = (_WIN_BUILD >= 19041)
 
-# ── 팟플레이어 PID 탐색 ────────────────────────────────────────────────────────
+# 팟플레이어 PID 탐색 (0.5초 캐시)
 _pid_cache = [None, 0.0]
 
 def _find_potplayer_pid():
@@ -57,8 +43,7 @@ def _find_potplayer_pid():
     if _pid_cache[0] is not None and now - _pid_cache[1] < 0.5:
         return _pid_cache[0]
     for p in psutil.process_iter(["pid", "name"]):
-        n = p.info["name"].lower()
-        if "potplayer" in n or "pot player" in n:
+        if "potplayer" in p.info["name"].lower():
             _pid_cache[0] = p.info["pid"]
             _pid_cache[1] = now
             return _pid_cache[0]
@@ -66,80 +51,56 @@ def _find_potplayer_pid():
     _pid_cache[1] = now
     return None
 
-# ── 밴드패스 필터 ─────────────────────────────────────────────────────────────
-def _make_bandpass(sr: int):
-    try:
-        from scipy.signal import butter, sosfilt as _sf
-        sos = butter(4, [300, 3400], btype="bandpass", fs=sr, output="sos")
-        return sos, _sf
-    except Exception:
-        return None, None
-
-def _apply_filter(arr, sos, sosfilt):
-    if sos is not None and sosfilt is not None:
-        try:
-            return sosfilt(sos, arr)
-        except Exception:
-            pass
-    return arr
-
 
 # ── VAD (Voice Activity Detection) ────────────────────────────────────────────
-# 외부 라이브러리 없이 주파수 에너지 비율로 음성 구간을 판별한다.
-# 사람 목소리의 핵심 대역(300~3400Hz)의 에너지가
-# 전체 에너지 대비 일정 비율 이상이면 음성(1), 아니면 비음성(0).
-# - 음악: 전 대역에 고르게 에너지가 분포 → 비율이 낮음 → 0
-# - 말소리: 300~3400Hz 집중 → 비율이 높음 → 1
-# - 무음: 전체 에너지 자체가 낮음 → 0
-_VAD_VOICE_RATIO  = 0.40   # 음성 대역 에너지가 전체의 40% 이상이면 음성으로 판정 (완화)
-_VAD_MIN_ENERGY   = 1e-8   # 이 이하는 무음으로 간주 (완화)
-_VAD_DEBUG_COUNT  = 0      # 디버그 로그 출력 카운터 (50패킷마다 출력)
+# ZCR(Zero Crossing Rate) + RMS 조합으로 판별.
+# 애니 BGM도 300~3400Hz 대역에 에너지가 집중되므로 주파수 비율만으로는 구분 불가.
+# 사람 목소리는 성대 진동 특성상 ZCR이 1000~3500 /sec 범위에 집중되는 반면
+# BGM은 악기가 혼합되어 ZCR 범위가 넓고 불규칙하다.
+
+_VAD_ZCR_LOW  = 1000    # 음성 ZCR 하한 (crosses/sec)
+_VAD_ZCR_HIGH = 3500    # 음성 ZCR 상한 (crosses/sec)
+_VAD_MIN_RMS  = 5e-3    # 이 이하는 무음으로 판정
 
 def _compute_vad(arr: np.ndarray, sr: int) -> float:
     """
-    arr: 모노 float32 PCM 샘플 배열
-    sr : 샘플레이트
-
-    반환: 1.0 (음성 있음) 또는 0.0 (음성 없음)
+    모노 float32 PCM 배열에서 음성 여부를 판별.
+    반환: 1.0 (음성) / 0.0 (BGM·무음)
     """
-    global _VAD_DEBUG_COUNT
-    _VAD_DEBUG_COUNT += 1
-    _do_debug = (_VAD_DEBUG_COUNT % 50 == 1)   # 50패킷마다 1회 출력
-
     if len(arr) < 16:
-        if _do_debug:
-            print(f"[VAD-DBG] arr too short: len={len(arr)}", flush=True)
         return 0.0
 
-    total_energy = float(np.mean(arr ** 2))
-    if total_energy < _VAD_MIN_ENERGY:
-        if _do_debug:
-            print(f"[VAD-DBG] silent: total_energy={total_energy:.2e} < {_VAD_MIN_ENERGY:.2e}", flush=True)
+    rms = float(np.sqrt(np.mean(arr ** 2)))
+    if rms < _VAD_MIN_RMS:
         return 0.0
 
-    # FFT로 주파수별 에너지 계산
-    fft_mag = np.abs(np.fft.rfft(arr)) ** 2
-    freqs   = np.fft.rfftfreq(len(arr), d=1.0 / sr)
+    zcr = float(np.sum(np.abs(np.diff(np.sign(arr)))) / 2) / (len(arr) / sr)
+    return 1.0 if _VAD_ZCR_LOW <= zcr <= _VAD_ZCR_HIGH else 0.0
 
-    voice_mask   = (freqs >= 300) & (freqs <= 3400)
-    voice_energy = float(fft_mag[voice_mask].sum())
-    total_fft    = float(fft_mag.sum())
 
-    if total_fft < 1e-12:
-        if _do_debug:
-            print(f"[VAD-DBG] total_fft too small: {total_fft:.2e}", flush=True)
-        return 0.0
+# ── PCM 버퍼 처리 공통 로직 ───────────────────────────────────────────────────
 
-    ratio = voice_energy / total_fft
-    result = 1.0 if ratio >= _VAD_VOICE_RATIO else 0.0
-    if _do_debug:
-        print(f"[VAD-DBG] energy={total_energy:.2e} ratio={ratio:.3f} thresh={_VAD_VOICE_RATIO} → vad={result}", flush=True)
-    return result
+def _process_buffer(data, num_frames, flg, qp, ch, _freq):
+    """버퍼에서 (t_hw, rms, vad) 튜플을 계산해 반환."""
+    t_hw = (qp / _freq) if qp > 0 else (qpc_now() / _freq)
 
-# ── 캡처 세션 ─────────────────────────────────────────────────────────────────
-def _run_capture_session(pid: int, audio_queue: Queue,
-                         stop_flag: Value, send_log):
-    """MTA 스레드 래퍼."""
+    if flg & AUDCLNT_BUFFERFLAGS_SILENT or not data.value:
+        return t_hw, 0.0, 0.0
+
+    buf = (ctypes.c_float * (num_frames * ch)).from_address(data.value)
+    arr = np.frombuffer(buf, dtype=np.float32).copy()
+    if ch > 1:
+        arr = arr.reshape(-1, ch).mean(axis=1)
+
+    rms = float(np.sqrt(np.mean(arr ** 2)))
+    vad = _compute_vad(arr, 0)   # sr 불필요 — ZCR은 비율로 계산
+    return t_hw, rms, vad
+
+
+# ── ProcessLoopback 캡처 세션 ─────────────────────────────────────────────────
+
+def _run_capture_session(pid: int, audio_queue: Queue, stop_flag: Value, send_log):
+    """MTA 스레드에서 ProcessLoopback 캡처를 실행하는 래퍼."""
     import threading
     result_box = [None]
 
@@ -160,18 +121,7 @@ def _run_capture_session(pid: int, audio_queue: Queue,
     return result_box[0] if result_box[0] is not None else (False, "MTA 스레드 비정상 종료")
 
 
-def _run_capture_impl(pid: int, audio_queue: Queue,
-                      stop_flag: Value, send_log):
-    """
-    실제 캡처 루프.
-
-    [개선] time.time() → QPC 하드웨어 타임스탬프
-      - get_buffer()가 반환하는 qp(QueryPerformanceCounter 틱)를 qpc_freq()로 나눠
-        하드웨어 기준 절대 시각(초)을 산출한다.
-      - qp == 0 이면 드라이버가 타임스탬프를 지원하지 않는 것이므로 qpc_now()로 폴백.
-      - 두 신호(립·오디오) 모두 같은 QPC 클럭 기준을 쓰므로
-        proc_analyzer 에서 공통 시간축 정렬이 가능해진다.
-    """
+def _run_capture_impl(pid: int, audio_queue: Queue, stop_flag: Value, send_log):
     client  = None
     cap     = None
     h_event = None
@@ -184,20 +134,19 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
         audio_client_set_event(client, h_event)
         cap = get_capture_client(client)
         audio_client_start(client)
-
-        sos, sosfilt  = _make_bandpass(sr)
         send_log(f"🎙 [ProcessLoopback] PID={pid} sr={sr} ch={ch}")
 
         RECHECK       = 3.0
-        last_check    = time.time()
-        cur_pid       = pid
         WAIT_MS       = 10
-        first_packet  = True
+        last_check    = time.time()
         last_stat     = time.time()
+        cur_pid       = pid
+        first_packet  = True
         total_packets = 0
 
         while not stop_flag.value:
             now = time.time()
+
             if now - last_check >= RECHECK:
                 last_check = now
                 new_pid = _find_potplayer_pid()
@@ -210,8 +159,8 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
                 last_stat = now
                 try:
                     pkt_peek = get_next_packet_size(cap)
-                except OSError as _e:
-                    send_log(f"⚠ GetNextPacketSize 오류: {_e}")
+                except OSError as e:
+                    send_log(f"⚠ GetNextPacketSize 오류: {e}")
                     pkt_peek = -1
                 send_log(f"🔍 캡처 상태: total={total_packets} next={pkt_peek}")
 
@@ -220,8 +169,8 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
             while not stop_flag.value:
                 try:
                     pkt = get_next_packet_size(cap)
-                except OSError as _e:
-                    send_log(f"⚠ GetNextPacketSize: {_e}")
+                except OSError as e:
+                    send_log(f"⚠ GetNextPacketSize: {e}")
                     break
                 if pkt == 0:
                     break
@@ -234,27 +183,7 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
                     send_log(f"✅ 첫 패킷 수신! frames={num_frames}")
 
                 if num_frames > 0:
-                    # [개선] QPC 하드웨어 타임스탬프 — time.time() 완전 제거
-                    t_hw = (qp / _freq) if qp > 0 else (qpc_now() / _freq)
-
-                    if flg & AUDCLNT_BUFFERFLAGS_SILENT:
-                        rms = 0.0
-                        vad = 0.0
-                    else:
-                        if not data.value:
-                            release_buffer(cap, num_frames)
-                            continue
-                        buf = (ctypes.c_float * (num_frames * ch)).from_address(data.value)
-                        arr = np.frombuffer(buf, dtype=np.float32).copy()
-                        if ch > 1:
-                            arr = arr.reshape(-1, ch).mean(axis=1)
-                        # RMS: 원본 신호 기준 (OP/ED 감지용 — 필터 전)
-                        rms = float(np.sqrt(np.mean(arr ** 2)))
-                        # VAD: 필터 적용 후 주파수 에너지 비율 기반 (싱크 보정용)
-                        arr_filtered = _apply_filter(arr, sos, sosfilt)
-                        vad = _compute_vad(arr_filtered, sr)
-
-                    # (t_hw, rms, vad) 튜플로 전송
+                    t_hw, rms, vad = _process_buffer(data, num_frames, flg, qp, ch, _freq)
                     queue_put(audio_queue, (t_hw, rms, vad))
 
                 release_buffer(cap, num_frames)
@@ -274,12 +203,10 @@ def _run_capture_impl(pid: int, audio_queue: Queue,
             _kernel32.CloseHandle(h_event)
 
 
-# ── 전체 루프백 세션 (빌드 19041 미만 폴백) ──────────────────────────────────
+# ── GlobalLoopback 캡처 세션 (빌드 19041 미만 폴백) ──────────────────────────
+
 def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
-    """
-    전체 루프백 캡처 세션.
-    [개선] qpc_now() 를 타임스탬프로 사용 — ProcessLoopback 경로와 클럭 기준 통일.
-    """
+    """MTA 스레드에서 전체 루프백 캡처를 실행하는 래퍼."""
     result_box = [None]
 
     def _mta():
@@ -296,9 +223,7 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
             audio_client_set_event(client, h_event)
             cap = get_capture_client(client)
             audio_client_start(client)
-
-            sos, sosfilt = _make_bandpass(sr)
-            send_log(f"🎙 [GlobalLoopback] sr={sr} ch={ch} (전체 루프백)")
+            send_log(f"🎙 [GlobalLoopback] sr={sr} ch={ch}")
 
             first_packet = True
             while not stop_flag.value:
@@ -312,34 +237,18 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
                         return
                     if pkt == 0:
                         break
+
                     data, num_frames, flg, qp = get_buffer(cap)
                     if first_packet:
                         first_packet = False
                         send_log("✅ 첫 패킷 수신! (전체 루프백)")
+
                     if num_frames > 0:
-                        # [개선] QPC 타임스탬프 (GlobalLoopback도 동일 기준)
-                        t_hw = (qp / _freq) if qp > 0 else (qpc_now() / _freq)
-
-                        if flg & AUDCLNT_BUFFERFLAGS_SILENT:
-                            rms = 0.0
-                            vad = 0.0
-                        else:
-                            if not data.value:
-                                release_buffer(cap, num_frames)
-                                continue
-                            buf = (ctypes.c_float * (num_frames * ch)).from_address(data.value)
-                            arr = np.frombuffer(buf, dtype=np.float32).copy()
-                            if ch > 1:
-                                arr = arr.reshape(-1, ch).mean(axis=1)
-                            # RMS: 원본 신호 기준 (OP/ED 감지용)
-                            rms = float(np.sqrt(np.mean(arr ** 2)))
-                            # VAD: 필터 적용 후 주파수 에너지 비율 기반 (싱크 보정용)
-                            arr_filtered = _apply_filter(arr, sos, sosfilt)
-                            vad = _compute_vad(arr_filtered, sr)
-
-                        # (t_hw, rms, vad) 튜플로 전송
+                        t_hw, rms, vad = _process_buffer(data, num_frames, flg, qp, ch, _freq)
                         queue_put(audio_queue, (t_hw, rms, vad))
+
                     release_buffer(cap, num_frames)
+
             result_box[0] = (True, "")
         except Exception as e:
             result_box[0] = (False, str(e))
@@ -362,6 +271,8 @@ def _run_global_loopback_session(audio_queue: Queue, stop_flag, send_log):
     return result_box[0] if result_box[0] is not None else (False, "MTA 스레드 비정상 종료")
 
 
+# ── 진입점 ────────────────────────────────────────────────────────────────────
+
 def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queue=None):
     import sys, os
     if sys.stdout is None:
@@ -370,8 +281,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
         sys.stderr = open(os.devnull, "w")
 
     def send_log(msg: str):
-        ts   = time.strftime("%H:%M:%S")
-        full = f"[{ts}] {msg}"
+        full = f"[{time.strftime('%H:%M:%S')}] {msg}"
         if log_queue is not None:
             try:
                 log_queue.put_nowait(full)
@@ -381,10 +291,9 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict, log_queu
         queue_put(audio_queue, ("LOG", full))
 
     send_log(f"ℹ Win build={_WIN_BUILD} | ProcessLoopback={_SUPPORT_PROCESS_LOOPBACK}")
-    send_log("ℹ [개선] QPC 하드웨어 타임스탬프 모드 활성화")
 
     if not _SUPPORT_PROCESS_LOOPBACK:
-        send_log(f"⚠ ProcessLoopback 미지원 (빌드 {_WIN_BUILD} < 19041) — 전체 루프백으로 전환.")
+        send_log(f"⚠ ProcessLoopback 미지원 (빌드 {_WIN_BUILD} < 19041) — 전체 루프백으로 전환")
         _retry = 0
         while not stop_flag.value:
             try:

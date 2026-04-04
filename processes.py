@@ -11,6 +11,7 @@ from win32_utils import (
     CFG, find_potplayer_hwnd, post_key_to_potplayer,
     queue_put, VK_OEM_PERIOD, VK_OEM_COMMA, VK_OEM_2,
     _user32, WM_USER, POT_SET_CURRENT_TIME, capture_window,
+    get_video_fps,
 )
 from audio_capture import proc_audio_capture
 from audio_com import qpc_freq, qpc_now
@@ -184,6 +185,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     ema_initialized     = False
     offset_buf          = collections.deque(maxlen=OFFSET_BUF_SIZE)
     last_correction_t   = 0.0
+    video_fps           = 30.0    # 현재 영상 fps (재생 감지·영상 변경 시 갱신)
 
     log_lines    = collections.deque(maxlen=100)
     prev_title   = ""
@@ -236,13 +238,13 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 except Exception:
                     break
         now_q = _now_qpc()
-        while lpb and now_q - lpb[0][0] > BUF_SEC * 3:
+        while lpb and now_q - lpb[0][0] > MUSIC_WINDOW_SEC:
             lpb.popleft()
         while aub and now_q - aub[0][0] > MUSIC_WINDOW_SEC:
             aub.popleft()
 
     # ── 립·오디오 버퍼를 공통 시간축으로 리샘플 ──────────────────────────────
-    def resample_aligned(lip_buf, aud_buf, fps=30):
+    def resample_aligned(lip_buf, aud_buf, fps):
         """
         두 버퍼를 겹치는 시간 구간에서 fps 간격으로 리샘플.
         반환: (lip_sig, vad_sig) — 겹침 구간이 1초 미만이면 (None, None)
@@ -281,7 +283,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         s = x.std()
         return x / s if s > 1e-9 else x
 
-    def compute_offset(lip, vad):
+    def compute_offset(lip, vad, fps):
         """
         lip·vad 신호를 이진화·정규화 후 교차상관으로 lag(ms) 추정.
         파라볼라 보간으로 서브샘플 정밀도 확보.
@@ -296,18 +298,23 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         vad_bin = to_binary(vad, ratio=0.3)
         vad_sig = normalize(vad_bin) if vad_bin.std() >= 1e-9 else normalize(vad)
 
+        # 탐색 범위를 MAX_TOTAL_SYNC_MS 이내로 제한해 노이즈 peak 방지
+        max_lag_samples = int(MTM / 1000.0 * fps)
         corr     = correlate(lip_sig, vad_sig, mode="full")
-        peak_idx = int(np.argmax(corr))
+        center   = len(vad_sig) - 1
+        lo       = max(0, center - max_lag_samples)
+        hi       = min(len(corr), center + max_lag_samples + 1)
+        peak_idx = int(np.argmax(corr[lo:hi])) + lo
 
-        if 0 < peak_idx < len(corr) - 1:
+        if lo < peak_idx < hi - 1:
             y0, y1, y2 = corr[peak_idx-1], corr[peak_idx], corr[peak_idx+1]
             denom = 2*y1 - y0 - y2
             sub   = 0.5 * (y2 - y0) / denom if abs(denom) > 1e-9 else 0.0
-            lag   = (peak_idx + sub) - (len(vad_sig) - 1)
+            lag   = (peak_idx + sub) - center
         else:
-            lag = peak_idx - (len(vad_sig) - 1)
+            lag = peak_idx - center
 
-        return lag / 30 * 1000, lip_bin.std(), vad_bin.std(), lip.mean(), vad.mean()
+        return lag / fps * 1000, lip_bin.std(), vad_bin.std(), lip.mean(), vad.mean()
 
     # ── 상태 큐 전송 ──────────────────────────────────────────────────────────
     _last_log_snapshot = [None]
@@ -432,7 +439,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     aub.clear()
                     reset_sync()
                     reset_oped()
-                    add_log("🔄 영상 변경 → 전체 초기화")
+                    video_fps = get_video_fps(hwnd)
+                    add_log(f"🔄 영상 변경 → 전체 초기화 (fps={video_fps})")
                 prev_title = cur_title
             except Exception:
                 pass
@@ -445,11 +453,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         notify      = None
         oped_prompt = None
 
-        # 오디오 최초 감지 알림
+        # 오디오 최초 감지 알림 + fps 갱신
         if not audio_det and aud_n > 5:
             audio_det = True
+            video_fps = get_video_fps(hwnd)
             notify = ("🎬 동영상 재생 감지", "팟플레이어에서 동영상 재생이 감지되었습니다.\n싱크 분석을 시작합니다.")
-            add_log("🎬 동영상 재생 감지")
+            add_log(f"🎬 동영상 재생 감지 (fps={video_fps})")
 
         # OP/ED 구간 감지 및 스킵
         pos = shared_pos.value if shared_pos else -1
@@ -513,7 +522,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        lip_sig, vad_sig = resample_aligned(lpb, aub)
+        lip_sig, vad_sig = resample_aligned(lpb, aub, video_fps)
 
         if lip_sig is None or vad_sig is None:
             if has_prompt:
@@ -532,7 +541,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        raw_ms, lip_std, vad_std, lip_mean, vad_mean = compute_offset(lip_sig, vad_sig)
+        raw_ms, lip_std, vad_std, lip_mean, vad_mean = compute_offset(lip_sig, vad_sig, video_fps)
 
         add_log(f"📊 raw={raw_ms:.0f}ms lip_std={lip_std:.3f} vad_std={vad_std:.3f} "
                 f"lip_mean={lip_mean:.3f} vad_mean={vad_mean:.3f} n={len(lip_sig)}")

@@ -44,9 +44,10 @@ WM_KEYUP             = 0x0101
 POT_COMMAND          = 0x0400
 POT_SEND_VIRTUAL_KEY = 0x5010   # wParam for WM_USER (포커스 없이 가상 키 전송)
 POT_VIRTUAL_KEY_SHIFT = 0x0100
-POT_GET_TOTAL_TIME   = 0x5002   # wParam for WM_USER
-POT_GET_CURRENT_TIME = 0x5004   # wParam for WM_USER
-POT_SET_CURRENT_TIME = 0x5005   # wParam for WM_USER
+POT_GET_TOTAL_TIME     = 0x5002   # wParam for WM_USER
+POT_GET_CURRENT_TIME   = 0x5004   # wParam for WM_USER
+POT_SET_CURRENT_TIME   = 0x5005   # wParam for WM_USER
+POT_GET_VIDEO_FPS_X100 = 0x5012   # wParam for WM_USER — fps × 100 반환 (예: 2397 → 23.97fps)
 
 VK_SHIFT      = 0x10
 VK_Q          = 0x51  # Q key (Shift+Q = PIP 창 열기)
@@ -125,6 +126,22 @@ def get_playback_info(hwnd):
         return pos_ms, dur_ms
     except Exception:
         return None, None
+
+def get_video_fps(hwnd) -> float:
+    """
+    팟플레이어에서 현재 재생 중인 영상의 fps를 읽어온다.
+    POT_GET_VIDEO_FPS_X100은 fps × 100 정수를 반환 (예: 2397 → 23.97).
+    읽기 실패 또는 비정상값이면 기본값 30.0을 반환한다.
+    """
+    if not hwnd:
+        return 30.0
+    try:
+        val = int(_user32.SendMessageW(hwnd, WM_USER, POT_GET_VIDEO_FPS_X100, 0))
+        if val > 0:
+            return round(val / 100.0, 3)
+    except Exception:
+        pass
+    return 30.0
 
 def pip_send(hwnd):
     """기존의 복잡한 로직을 지우고, 검증된 방식으로 교체"""

@@ -144,6 +144,8 @@ class LipSyncGUILogic:
     def record_video_history(self, title: str):
         """동영상 감지 또는 이름 변경 시 호출. 숫자만 다른 기록은 덮어씀."""
         import time as _t
+        if not title or not title.strip():
+            return
         ts      = _t.strftime("%Y-%m-%d %H:%M")
         records = self._load_history()
         base    = _strip_episode_number(title)
@@ -250,7 +252,8 @@ class LipSyncGUILogic:
                         if title and title != prev_title:
                             prev_title = title
                             self._last_detected_title = title
-                            self.root.after(0, lambda t=title: self.record_video_history(t))
+                            if not self._closing:
+                                self.root.after(0, lambda t=title: self.record_video_history(t))
                     else:
                         prev_hwnd = None
                 except Exception:

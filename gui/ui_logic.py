@@ -184,11 +184,11 @@ class LipSyncGUILogic:
         if self._pip_on:
             self._pip_on = False
             self._pip_btn.config(text="⧉ PIP OFF", fg=self.TEXT_MID,
-                                 bg=self.BG2, relief="solid", bd=1)
+                                 bg="#0e0e0e", relief="solid", bd=1)
         else:
             self._pip_on = True
             self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3,
-                                 bg=self.BG2, relief="solid", bd=1)
+                                 bg="#0e0e0e", relief="solid", bd=1)
         self._save_settings()
 
     def _update_oped_btn(self):

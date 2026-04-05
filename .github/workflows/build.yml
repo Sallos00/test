@@ -51,6 +51,7 @@ jobs:
             app_icon.py ^
             audio_com.py ^
             audio_capture.py ^
+            log_utils.py ^
             processes.py ^
             win32_utils.py ^
             auth.py
@@ -85,6 +86,7 @@ jobs:
           --hidden-import="app_icon"
           --hidden-import="audio_com"
           --hidden-import="audio_capture"
+          --hidden-import="log_utils"
           --hidden-import="processes"
           --hidden-import="win32_utils"
           --hidden-import="auth"

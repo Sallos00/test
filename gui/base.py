@@ -32,9 +32,9 @@ class LipSyncGUIBase:
     ACCENT3 = "#5ec44a"
     W, H = 340, 470
     SCALES = {
-        "소": dict(w=340, h=470, scale=1.0),
-        "중": dict(w=408, h=528, scale=1.2),
-        "대": dict(w=476, h=616, scale=1.4),
+        "소": dict(w=340, h=540, scale=1.0),
+        "중": dict(w=408, h=608, scale=1.2),
+        "대": dict(w=476, h=700, scale=1.4),
     }
     APP_DIR      = os.path.join(os.environ.get("APPDATA", ""), "AutoSync")
     CFG_FILE     = os.path.join(APP_DIR, "settings.json")

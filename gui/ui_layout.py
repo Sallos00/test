@@ -84,16 +84,18 @@ class LipSyncGUILayout:
 
         # PIP 버튼 — 탭바 오른쪽에 배치
         self._pip_on = bool(self._load_setting("pip_on", False))
-        pip_text = "⧉ PIP ON" if self._pip_on else "⧉ PIP OFF"
-        pip_fg   = self.ACCENT3 if self._pip_on else self.TEXT_MID
+        pip_text   = "⧉ PIP ON" if self._pip_on else "⧉ PIP OFF"
+        pip_fg     = self.ACCENT3 if self._pip_on else self.TEXT_MID
+        pip_border = self.ACCENT3 if self._pip_on else self.BORDER
         self._pip_btn = reg(
             tk.Button(tab_bar, text=pip_text,
                       font=("Consolas", max(7, round(8*r)), "bold"),
                       bg=self.BG2, fg=pip_fg,
                       activebackground=self.BG3, activeforeground=self.TEXT,
-                      relief="flat", cursor="hand2",
-                      padx=round(8*r), pady=round(4*r),
-                      bd=0, command=self._pip_toggle),
+                      relief="solid", cursor="hand2",
+                      padx=round(7*r), pady=round(3*r),
+                      bd=1, highlightthickness=0,
+                      command=self._pip_toggle),
             bg="BG2", fg="TEXT_MID", abg="BG3")
 
         def _switch_tab(name):
@@ -301,12 +303,12 @@ class LipSyncGUILayout:
 
         # 스크롤 영역
         list_outer = tk.Frame(parent, bg=self.BG)
-        list_outer.pack(fill="both", expand=True, padx=(P2, 0), pady=(round(4*r), 0))
+        list_outer.pack(fill="both", expand=True, padx=P2, pady=(round(4*r), 0))
         reg(list_outer, bg="BG")
 
         sb = tk.Scrollbar(list_outer, bg=self.BG3, troughcolor=self.BG2,
                           relief="flat", width=8)
-        sb.pack(side="right", fill="y", padx=(0, P2))
+        sb.pack(side="right", fill="y")
 
         canvas = tk.Canvas(list_outer, bg=self.BG, highlightthickness=0,
                            yscrollcommand=sb.set)

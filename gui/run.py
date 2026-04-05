@@ -97,6 +97,7 @@ class LipSyncGUIRun:
             pass
         self._om_processes            = []
         self._oped_monitor_running    = False
+        self._om_log_seen_count       = 0
 
     def _toggle(self):
         if not self._running:
@@ -420,17 +421,12 @@ class LipSyncGUIRun:
             if om_latest:
                 om_logs = om_latest.get("log_lines")
                 if om_logs is not None:
-                    # 마지막으로 본 줄 이후 새 항목만 추가 (set 비교 제거)
                     if not hasattr(self, "_log_lines"):
                         self._log_lines = collections.deque(maxlen=100)
-                    last_known = self._log_lines[-1] if self._log_lines else None
-                    try:
-                        new_start = (om_logs.index(last_known) + 1
-                                     if last_known in om_logs else 0)
-                    except Exception:
-                        new_start = 0
-                    for line in om_logs[new_start:]:
+                    seen = getattr(self, "_om_log_seen_count", 0)
+                    for line in om_logs[seen:]:
                         self._log_lines.append(line)
+                    self._om_log_seen_count = len(om_logs)
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0)
@@ -522,14 +518,10 @@ class LipSyncGUIRun:
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)
             if logs:
-                last_known = self._log_lines[-1] if self._log_lines else None
-                try:
-                    new_start = (logs.index(last_known) + 1
-                                 if last_known in logs else 0)
-                except Exception:
-                    new_start = 0
-                for line in logs[new_start:]:
+                seen = getattr(self, "_log_seen_count", 0)
+                for line in logs[seen:]:
                     self._log_lines.append(line)
+                self._log_seen_count = len(logs)
 
         self.root.after(100, self._refresh)
 

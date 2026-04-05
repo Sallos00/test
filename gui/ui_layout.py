@@ -304,10 +304,13 @@ class LipSyncGUILayout:
 
         # 스크롤 영역
         # 스크롤바를 parent에 직접 배치해 창 테두리에 잘리지 않도록 함
-        sb = tk.Scrollbar(parent, orient="vertical",
+        sb_wrap = tk.Frame(parent, bg=self.BG, padx=P2, pady=0)
+        sb_wrap.pack(side="right", fill="y")
+        reg(sb_wrap, bg="BG")
+        sb = tk.Scrollbar(sb_wrap, orient="vertical",
                           bg=self.BG3, troughcolor=self.BG2,
                           relief="flat", width=10, bd=0)
-        sb.pack(side="right", fill="y", padx=(0, P))
+        sb.pack(side="right", fill="y")
 
         list_outer = tk.Frame(parent, bg=self.BG)
         list_outer.pack(fill="both", expand=True, padx=(P2, 0), pady=(round(4*r), 0))

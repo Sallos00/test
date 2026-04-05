@@ -18,13 +18,14 @@ import tkinter as tk
 
 from win32_utils import CFG
 from gui.base        import LipSyncGUIBase
-from gui.ui          import LipSyncGUIUI
+from gui.ui_layout   import LipSyncGUILayout
+from gui.ui_logic    import LipSyncGUILogic
 from gui.record_open import LipSyncGUIRecordOpen
 from gui.run         import LipSyncGUIRun
 from gui.auth        import LipSyncGUIAuth
 
 
-class LipSyncGUI(LipSyncGUIBase, LipSyncGUIUI, LipSyncGUIRecordOpen,
+class LipSyncGUI(LipSyncGUIBase, LipSyncGUILayout, LipSyncGUILogic, LipSyncGUIRecordOpen,
                  LipSyncGUIRun, LipSyncGUIAuth):
     pass
 

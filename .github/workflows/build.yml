@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller pyarmor
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller "pyarmor==8.5.12"
 
       - name: ffmpeg 다운로드 (번들용)
         run: |
@@ -44,36 +44,26 @@ jobs:
       - name: SERVER_URL 삽입
         run: python scripts/inject_url.py
 
-      # ── 코드 난독화 (trial: 4파일씩 분할) ───────────────────────────────
-      - name: 난독화 루트 1/2
+      # ── 코드 난독화 ───────────────────────────────────────────────────────
+      - name: 난독화 (루트)
         run: |
           pyarmor gen --output dist_obf ^
             app_icon.py ^
             audio_com.py ^
             audio_capture.py ^
-            log_utils.py
-        shell: cmd
-
-      - name: 난독화 루트 2/2
-        run: |
-          pyarmor gen --output dist_obf ^
+            log_utils.py ^
             processes.py ^
             win32_utils.py ^
             auth.py
         shell: cmd
 
-      - name: 난독화 gui 1/2
+      - name: 난독화 (gui 패키지)
         run: |
           pyarmor gen --output dist_obf\gui ^
             gui\__init__.py ^
             gui\base.py ^
             gui\ui_layout.py ^
-            gui\ui_logic.py
-        shell: cmd
-
-      - name: 난독화 gui 2/2
-        run: |
-          pyarmor gen --output dist_obf\gui ^
+            gui\ui_logic.py ^
             gui\run.py ^
             gui\auth.py ^
             gui\record_open.py ^

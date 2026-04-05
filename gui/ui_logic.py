@@ -150,22 +150,31 @@ class LipSyncGUILogic:
         records = self._load_history()
         base    = _strip_episode_number(title)
 
-        # 완전히 동일한 제목이 이미 마지막 기록이면 무시 (재시작 후 중복 방지)
-        if records and records[-1].get("title", "") == title:
-            return
-
+        # 같은 base 제목 기록 찾기
         for rec in records:
-            if _strip_episode_number(rec.get("title", "")) == base:
-                rec["title"]     = title
-                rec["timestamp"] = ts
+            rec_base = _strip_episode_number(rec.get("title", ""))
+            if rec_base == base:
+                if rec.get("title", "") == title:
+                    # 완전히 동일한 제목 - 타임스탬프만 갱신
+                    rec["timestamp"] = ts
+                else:
+                    # 화수가 다른 경우 - 제목과 타임스탬프 업데이트
+                    rec["title"]     = title
+                    rec["timestamp"] = ts
                 self._save_history(records)
                 if hasattr(self, "_hist_list_frame"):
                     self._refresh_history_list()
+                if hasattr(self, "_log_lines"):
+                    self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 갱신: {title}")
                 return
+
+        # 새 기록 추가
         records.append({"title": title, "timestamp": ts})
         self._save_history(records)
         if hasattr(self, "_hist_list_frame"):
             self._refresh_history_list()
+        if hasattr(self, "_log_lines"):
+            self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 추가: {title}")
 
     # ── PIP ───────────────────────────────────────────────────────────────────
     def _pip_toggle(self):
@@ -174,10 +183,12 @@ class LipSyncGUILogic:
         pip_send(hwnd)
         if self._pip_on:
             self._pip_on = False
-            self._pip_btn.config(text="⧉ PIP OFF", fg=self.TEXT_MID)
+            self._pip_btn.config(text="⧉ PIP OFF", fg=self.TEXT_MID,
+                                 bg=self.BG2, relief="solid", bd=1)
         else:
             self._pip_on = True
-            self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3)
+            self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3,
+                                 bg=self.BG2, relief="solid", bd=1)
         self._save_settings()
 
     def _update_oped_btn(self):
@@ -249,7 +260,16 @@ class LipSyncGUILogic:
                         raw   = buf.value
                         title = _extract_potplayer_title(raw)
 
-                        if title and title != prev_title:
+                        # 새로 PotPlayer가 감지된 경우 (hwnd가 새로 생김)
+                        if hwnd != prev_hwnd:
+                            prev_hwnd = hwnd
+                            if title and title != prev_title:
+                                prev_title = title
+                                self._last_detected_title = title
+                                if not self._closing:
+                                    self.root.after(0, lambda t=title: self.record_video_history(t))
+                        elif title and title != prev_title:
+                            # 제목이 변경된 경우
                             prev_title = title
                             self._last_detected_title = title
                             if not self._closing:

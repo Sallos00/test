@@ -307,7 +307,7 @@ class LipSyncGUILayout:
         sb = tk.Scrollbar(parent, orient="vertical",
                           bg=self.BG3, troughcolor=self.BG2,
                           relief="flat", width=10, bd=0)
-        sb.pack(side="right", fill="y", padx=(0, P2))
+        sb.pack(side="right", fill="y", padx=(0, P2 + 3))
 
         list_outer = tk.Frame(parent, bg=self.BG)
         list_outer.pack(fill="both", expand=True, padx=(P2, 0), pady=(round(4*r), 0))

@@ -62,7 +62,8 @@ jobs:
           pyarmor gen --output dist_obf\gui ^
             gui\__init__.py ^
             gui\base.py ^
-            gui\ui.py ^
+            gui\ui_layout.py ^
+            gui\ui_logic.py ^
             gui\run.py ^
             gui\auth.py ^
             gui\record_open.py ^

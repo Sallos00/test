@@ -18,18 +18,8 @@ from log_utils import (make_add_log, STATUS_OK, STATUS_CORRECTED, STATUS_COLLECT
                        STATUS_NO_SIGNAL, STATUS_LOW_CONF, STATUS_COOLDOWN,
                        STATUS_UNDETECTED, STATUS_CEILING, STATUS_NO_POT, STATUS_BUFFERING)
 
-
 def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_anchor=None):
-    """
-    팟플레이어 화면을 캡처해 입술 개구(開口) 신호를 추출하는 프로세스.
-
-    타임스탬프: 오디오 스트림 기준 위치(초) — proc_audio_capture와 동일한 기준점.
-                stream_anchor[qp_origin, sr, freq]를 읽어 qpc_now()를 변환.
-                기준점 미확립 시 qpc_now() / freq 로 폴백.
-    입술 위치:  얼굴 ROI 하위 절반에서 수평 평균 밝기가 가장 낮은 행을 동적 추정.
-    개구 신호:  입술 ROI를 64×16으로 축소 후 열(列)별 세로 분산의 평균으로 계산.
-                입이 열리면 치아(밝음)와 입술(어두움)의 대비로 분산이 커짐.
-    """
+    """팟플레이어 화면 캡처 → 입술 개구 신호 추출 프로세스."""
     import cv2
     import sys
 
@@ -49,8 +39,7 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
     lip_y_ratio        = 0.70   # 얼굴 높이 대비 입술 시작 위치 (동적 갱신)
     lip_ratio_update_n = 0
 
-    def _estimate_lip_y_ratio(face_gray):
-        """얼굴 하위 50~92% 구간에서 가장 어두운 수평 띠를 입술 위치로 추정."""
+    def _estimate_lip_y_ratio(face_gray):  # 얼굴 하위 50~92%에서 가장 어두운 행 → 입술 위치
         h            = face_gray.shape[0]
         search_start = int(h * 0.50)
         search_end   = int(h * 0.92)
@@ -64,12 +53,9 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
         t0   = time.perf_counter()
         hwnd = find_potplayer_hwnd()
 
-        # 캡처 시작 직전에 QPC 틱 기록
         qp_now_val = qpc_now()
         raw  = capture_window(hwnd) if hwnd else None
 
-        # stream_anchor 기준점이 확립되면 오디오와 동일한 스트림 위치(초)로 변환
-        # 미확립 시 qpc_now() / freq 로 폴백 (오디오 첫 패킷 전 구간)
         if stream_anchor is not None and stream_anchor[0] > 0:
             qp_origin = stream_anchor[0]
             sr_anc    = stream_anchor[1]
@@ -78,7 +64,6 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
         else:
             t_hw = qp_now_val / _freq
 
-        # 30초마다 진단 로그 전송
         now = time.time()
         if now - last_diag_time >= 30.0:
             last_diag_time = now
@@ -102,7 +87,6 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
         frame_count += 1
         motion = 0.0
 
-        # 얼굴 탐지 (매 DETECT_EVERY_N 프레임)
         if frame_count % DETECT_EVERY_N == 1 or last_roi is None:
             faces = cascade.detectMultiScale(
                 cv2.equalizeHist(gray),
@@ -121,8 +105,6 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
             else:
                 last_roi = None
 
-        # 얼굴 감지된 프레임만 큐에 전송
-        # 미감지 프레임의 motion=0이 섞이면 상관 신호가 오염되어 싱크 오탐 발생
         if last_roi is not None:
             x, y, fw, fh = last_roi
             h_img, w_img = gray.shape
@@ -144,12 +126,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                   state_queue: Queue, cmd_queue: Queue,
                   stop_flag: Value, cfg: dict,
                   shared_pos=None, shared_dur=None):
-    """립·오디오 교차상관으로 싱크 오프셋 추정 및 팟플레이어 자동 보정 프로세스.
-    aub: (t_stream, rms, vad) — rms: OP/ED 감지용, vad: 싱크 보정 게이트용
-    """
+    """교차상관으로 싱크 오프셋 추정 및 팟플레이어 자동 보정 프로세스."""
     from scipy.signal import correlate
 
-    # ── 설정값 ────────────────────────────────────────────────────────────────
     BUF_SEC   = cfg["BUFFER_SEC"]
     THRESH    = cfg["SYNC_THRESHOLD_MS"]
     STEP      = cfg["POTPLAYER_STEP_MS"]
@@ -172,7 +151,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     SYNC_COOLDOWN_SEC  = 10.0     # 보정 후 재보정 억제 시간
     CONFIDENCE_THRESH  = 0.25     # 교차상관 신뢰도 하한 (이 미만이면 해당 사이클 skip)
 
-    # ── 상태 변수 ─────────────────────────────────────────────────────────────
     lpb = collections.deque()
     aub = collections.deque()
 
@@ -188,8 +166,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     audio_warned = False   # 오디오 미감지 경고 1회 플래그
     audio_det    = False   # 오디오 최초 감지 알림 플래그
 
-    # OP/ED 상태를 오프닝/엔딩 구간별로 독립 관리
-    # 단일 변수로 관리하면 오프닝에서 소진 후 엔딩 감지가 차단되는 버그 발생
     oped_confirm  = {"오프닝": 0,     "엔딩": 0}
     oped_last_t   = {"오프닝": 0.0,   "엔딩": 0.0}
     oped_prompted = {"오프닝": False,  "엔딩": False}
@@ -199,11 +175,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     add_log = make_add_log(log_lines)
 
-    # ── OP/ED: 음악 재생 여부 판단 ────────────────────────────────────────────
     def is_music_playing() -> bool:
         if len(aub) < 10:
             return False
-        # aub 타임스탬프는 스트림 위치 기준 — 최신 항목에서 윈도우만큼 이전
         latest_t = aub[-1][0]
         cutoff   = latest_t - MUSIC_WINDOW_SEC
         vals     = [x[1] for x in aub if x[0] >= cutoff]   # rms
@@ -217,7 +191,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         fill = float((arr > mean_rms * 0.5).sum()) / len(arr)
         return cv < MUSIC_MAX_CV and fill > MUSIC_MIN_FILL
 
-    # ── 큐 드레인 + 만료 항목 제거 ────────────────────────────────────────────
     def drain_queues():
         for q, buf, tag in [(lip_queue, lpb, "👁"), (audio_queue, aub, "🔊")]:
             while True:
@@ -238,9 +211,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             while aub and latest_aud - aub[0][0] > MUSIC_WINDOW_SEC:
                 aub.popleft()
 
-    # ── 립·오디오 버퍼를 공통 시간축으로 리샘플 ──────────────────────────────
     def resample_aligned(lip_buf, aud_buf, fps):
-        """두 버퍼를 겹치는 시간 구간에서 fps 간격으로 리샘플. (None, None) if < 1s"""
+
         if len(lip_buf) < 2 or len(aud_buf) < 2:
             return None, None
 
@@ -271,9 +243,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         aud_sig = np.interp(t_grid, aud_ts, aud_vs)
         return lip_sig, aud_sig
 
-    # ── 교차상관으로 싱크 오프셋 추정 ─────────────────────────────────────────
     def to_binary(signal, ratio):
-        """중앙값 + ratio×표준편차를 임계값으로 이진화."""
+
         thresh = np.median(signal) + ratio * signal.std()
         return (signal > thresh).astype(np.float32)
 
@@ -283,24 +254,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         return x / s if s > 1e-9 else x
 
     def compute_offset(lip, aud, fps):
-        """
-        lip·aud 신호를 정규화 후 교차상관으로 lag(ms) 추정.
-        파라볼라 보간으로 서브샘플 정밀도 확보.
 
-        lip: 연속값 → to_binary로 이진화
-        aud: VAD 마스킹된 RMS diff → 이미 변화 시점 기반이므로 그대로 정규화
-
-        lag > 0: 오디오가 립보다 빠름 → 오디오 늦춰야 함 (Shift+.)
-        lag < 0: 오디오가 립보다 느림 → 오디오 당겨야 함 (Shift+,)
-        반환: (lag_ms, lip_bin_std, aud_std, lip_mean, aud_mean, confidence)
-        """
         lip_bin = to_binary(lip, ratio=0.5)
         lip_sig = normalize(lip_bin) if lip_bin.std() >= 1e-9 else normalize(lip)
 
-        # aud는 VAD 마스킹된 RMS diff — to_binary 없이 바로 정규화
         aud_sig = normalize(aud) if aud.std() >= 1e-9 else aud
 
-        # 탐색 범위를 MAX_TOTAL_SYNC_MS 이내로 제한해 노이즈 peak 방지
         max_lag_samples = int(MTM / 1000.0 * fps)
         corr   = correlate(lip_sig, aud_sig, mode="full")
         center = len(aud_sig) - 1
@@ -308,11 +267,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         hi     = min(len(corr), center + max_lag_samples + 1)
 
         sub_corr = corr[lo:hi]
-        # 절대값 기준 peak 탐색 — 신호 반전 시 음수 상관도 유효한 매칭
         peak_rel = int(np.argmax(np.abs(sub_corr)))
         peak_idx = peak_rel + lo
 
-        # 정규화 상관계수로 신뢰도 산출 (0~1, 절대값 기준)
         energy     = np.sqrt(np.sum(lip_sig**2) * np.sum(aud_sig**2))
         confidence = float(abs(corr[peak_idx]) / energy) if energy > 1e-9 else 0.0
 
@@ -326,7 +283,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         return lag / fps * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean(), confidence
 
-    # ── 상태 큐 전송 ──────────────────────────────────────────────────────────
     _last_log_snapshot = [None]
 
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
@@ -337,7 +293,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             _last_log_snapshot[0] = snap
         if oped_prompt is not None:
             pending_prompt[0] = oped_prompt
-        # 전송 후 즉시 클리어 — 큐 잔류로 팝업 중복 호출 방지
         prompt_to_send    = pending_prompt[0]
         pending_prompt[0] = None
         queue_put(state_queue, dict(
@@ -347,7 +302,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             notify=notify, oped_prompt=prompt_to_send,
         ))
 
-    # ── OP/ED 스킵 실행 ───────────────────────────────────────────────────────
     def execute_skip() -> bool:
         hwnd = find_potplayer_hwnd()
         if not hwnd:
@@ -368,7 +322,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             add_log(f"⚠ 스킵 실패: {e}")
             return False
 
-    # ── 상태 리셋 헬퍼 ────────────────────────────────────────────────────────
     def reset_sync():
         nonlocal total_correction_ms, smoothed_offset, ema_initialized, last_correction_t
         total_correction_ms = 0
@@ -384,13 +337,11 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         oped_prompted = {"오프닝": False,  "엔딩": False}
         pending_prompt[0] = None
 
-    # ── 메인 루프 ─────────────────────────────────────────────────────────────
     time.sleep(BUF_SEC)
 
     while not stop_flag.value:
         t0 = time.perf_counter()
 
-        # 커맨드 처리
         while True:
             try:
                 cmd = cmd_queue.get_nowait()
@@ -435,7 +386,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         lip_n  = len(lpb)
         aud_n  = len(aub)
 
-        # 영상 변경 감지 → 전체 상태 초기화
         if hwnd:
             try:
                 tbuf = ctypes.create_unicode_buffer(512)
@@ -455,7 +405,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             except Exception:
                 pass
 
-        # 오디오 미감지 경고 (1회)
         if aud_n == 0 and lip_n > 10 and not audio_warned:
             audio_warned = True
             add_log("⚠ 오디오 미감지 — 팟플레이어 재생 중인지 확인하세요")
@@ -463,20 +412,16 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         notify      = None
         oped_prompt = None
 
-        # 오디오 최초 감지 알림 + fps 갱신
         if not audio_det and aud_n > 5:
             audio_det = True
             video_fps = get_video_fps(hwnd)
             notify = ("🎬 동영상 재생 감지", "팟플레이어에서 동영상 재생이 감지되었습니다.\n싱크 분석을 시작합니다.")
             add_log(f"🎬 동영상 재생 감지 (fps={video_fps})")
 
-        # OP/ED 구간 감지 및 스킵
         pos = shared_pos.value if shared_pos else -1
         dur = shared_dur.value if shared_dur else -1
 
         if pos >= 0 and dur > 0:
-            # 짧은 영상에서 오프닝/엔딩이 동시에 True가 되지 않도록
-            # 영상 전반부는 오프닝, 후반부는 엔딩으로만 판정
             in_op   = pos < OPED_ZONE_MS and pos <= dur // 2
             in_ed   = pos > (dur - OPED_ZONE_MS) and pos > dur // 2
             in_zone = in_op or in_ed
@@ -525,7 +470,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         has_prompt = oped_prompt is not None or pending_prompt[0] is not None
 
-        # 데이터 부족
         if aud_n < 10 or (lip_n < 10 and not has_prompt):
             push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
@@ -541,7 +485,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        # 1차 신호 품질 체크 — flat 신호가 correlate에 들어가면 bogus lag 발생
         pre_lip_std = float(lip_sig.std())
         pre_aud_std = float(aud_sig.std())
         if pre_lip_std < 0.001 or pre_aud_std < 1e-4:
@@ -556,14 +499,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         add_log(f"📊 raw={raw_ms:.0f}ms lip_std={lip_std:.3f} aud_std={aud_std:.4f} "
                 f"lip_mean={lip_mean:.4f} conf={confidence:.3f} n={len(lip_sig)}")
 
-        # 얼굴은 잡혔지만 입 움직임이 없는 구간 (대사 없음)
         if lip_mean < 0.002:
             push_state(STATUS_UNDETECTED, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(1.0)
             continue
 
-        # 2차 신호 품질 체크 (이진화 후)
         if lip_std < 0.05 or aud_std < 1e-4:
             add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_std={aud_std:.6f}) → 건너뜀")
             push_state(STATUS_NO_SIGNAL, 0, total_correction_ms, log_lines, pot_ok,
@@ -571,7 +512,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        # 상관 신뢰도 체크 — peak가 낮으면 lip·aud 패턴이 맞지 않는 구간
         if confidence < CONFIDENCE_THRESH:
             add_log(f"⚠ 상관 신뢰도 낮음 (conf={confidence:.3f}) → 건너뜀")
             push_state(STATUS_LOW_CONF, 0, total_correction_ms, log_lines, pot_ok,
@@ -589,20 +529,17 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             continue
 
         buf_avg = float(np.mean(offset_buf))
-        add_log(f"📦 버퍼 평균={buf_avg:.1f}ms (최근 {OFFSET_BUF_SIZE}회)")
-
         if not ema_initialized:
             smoothed_offset = buf_avg
             ema_initialized = True
         else:
             smoothed_offset = EMA_ALPHA * buf_avg + (1.0 - EMA_ALPHA) * smoothed_offset
-
-        add_log(f"📈 smoothed={smoothed_offset:.1f}ms (EMA α={EMA_ALPHA})")
+        add_log(f"📈 buf_avg={buf_avg:.1f}ms smoothed={smoothed_offset:.1f}ms")
 
         # 보정 쿨다운 체크
         cooldown_remain = SYNC_COOLDOWN_SEC - (time.time() - last_correction_t)
         if cooldown_remain > 0:
-            add_log(f"⏳ 보정 쿨다운 {cooldown_remain:.1f}초 남음 → 건너뜀")
+            add_log(f"⏳ 쿨다운 {cooldown_remain:.1f}초")
             push_state(STATUS_COOLDOWN, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
@@ -633,7 +570,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             total_correction_ms += steps * STEP * sign
             last_correction_t    = time.time()
             offset_buf.clear()
-            add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
+            add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운")
             status = STATUS_CORRECTED
         elif not hwnd:
             status = STATUS_NO_POT

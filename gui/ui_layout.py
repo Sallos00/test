@@ -142,9 +142,10 @@ class LipSyncGUILayout:
         reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x")
 
         # ── 하단 버튼을 container보다 먼저 pack (tkinter는 pack 등록 순서대로 공간 배분)
-        reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", padx=P2, side="bottom")
+        # side="bottom" 은 역순으로 쌓이므로: 선을 나중에 pack해야 버튼 위에 표시됨
         bf = reg(tk.Frame(self.root, bg=self.BG, padx=round(10*r), pady=round(6*r)), bg="BG")
         bf.pack(fill="x", side="bottom")
+        reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", side="bottom")
         bf.columnconfigure(2, weight=1)
         bf.rowconfigure(0, minsize=round(32*r))
         BTN = dict(font=("Consolas", max(8, round(9*r)), "bold"), relief="flat", cursor="hand2", padx=round(8*r), pady=0, anchor="center")
@@ -307,7 +308,7 @@ class LipSyncGUILayout:
         reg(list_outer, bg="BG")
 
         sb = tk.Scrollbar(list_outer, bg=self.BG3, troughcolor=self.BG2,
-                          relief="flat", width=8)
+                          relief="flat", width=10)
         sb.pack(side="right", fill="y")
 
         canvas = tk.Canvas(list_outer, bg=self.BG, highlightthickness=0,
@@ -323,7 +324,8 @@ class LipSyncGUILayout:
         def _on_frame_cfg(e):
             canvas.configure(scrollregion=canvas.bbox("all"))
         def _on_canvas_cfg(e):
-            canvas.itemconfig(self._hist_canvas_window, width=e.width)
+            # 스크롤바 너비(10)를 제외한 너비로 내부 프레임 설정
+            canvas.itemconfig(self._hist_canvas_window, width=max(1, e.width - 2))
 
         self._hist_list_frame.bind("<Configure>", _on_frame_cfg)
         canvas.bind("<Configure>", _on_canvas_cfg)

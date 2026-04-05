@@ -82,6 +82,20 @@ class LipSyncGUILayout:
         tab_inner = tk.Frame(tab_bar, bg=self.BG2)
         tab_inner.pack(side="left", padx=P2, pady=(round(6*r), 0))
 
+        # PIP 버튼 — 탭바 오른쪽에 배치
+        self._pip_on = bool(self._load_setting("pip_on", False))
+        pip_text = "⧉ PIP ON" if self._pip_on else "⧉ PIP OFF"
+        pip_fg   = self.ACCENT3 if self._pip_on else self.TEXT_MID
+        self._pip_btn = reg(
+            tk.Button(tab_bar, text=pip_text,
+                      font=("Consolas", max(7, round(8*r)), "bold"),
+                      bg=self.BG2, fg=pip_fg,
+                      activebackground=self.BG3, activeforeground=self.TEXT,
+                      relief="flat", cursor="hand2",
+                      padx=round(8*r), pady=round(4*r),
+                      bd=0, command=self._pip_toggle),
+            bg="BG2", fg="TEXT_MID", abg="BG3")
+
         def _switch_tab(name):
             self._tab_var.set(name)
             for n, frame in self._tab_frames.items():
@@ -99,6 +113,8 @@ class LipSyncGUILayout:
                     btn.config(bg=self.BG, fg=self.ACCENT, font=("Consolas", TAB_F, "bold"))
                 else:
                     btn.config(bg=self.BG2, fg=self.TEXT_MID, font=("Consolas", TAB_F))
+
+        self._pip_btn.pack(side="right", padx=(0, P2), pady=(round(4*r), 0))
 
         self._tab_btn_sync = tk.Button(
             tab_inner, text="싱크 보정",
@@ -164,22 +180,17 @@ class LipSyncGUILayout:
         self._oped_btn.pack(fill="x")
         self._update_oped_btn()
         reg(tk.Frame(sync_frame, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", padx=P2, pady=(round(8*r), 0))
-        mf = reg(tk.Frame(sync_frame, bg=self.BG, pady=round(10*r), padx=P), bg="BG")
-        mf.pack(fill="both", expand=True)
+        mf = reg(tk.Frame(sync_frame, bg=self.BG, pady=round(6*r), padx=P), bg="BG")
+        mf.pack(fill="x")
         tp = reg(tk.Frame(mf, bg=self.BG), bg="BG")
         tp.pack(fill="x")
         reg(tk.Label(tp, text="OFFSET", font=("Consolas", 7, "bold"), bg=self.BG, fg=self.TEXT_DIM), bg="BG", fg="TEXT_DIM").pack(side="left")
         self._badge = reg(tk.Label(tp, text=" 대기 중 ", font=("Consolas", max(7, round(8*r)), "bold"), bg=self.BG3, fg=self.TEXT, padx=round(6*r), pady=2), bg="BG3", fg="TEXT")
         self._badge.pack(side="right")
-        self._pip_on = bool(self._load_setting("pip_on", False))
         offr = reg(tk.Frame(mf, bg=self.BG), bg="BG")
         offr.pack(fill="x", pady=(2, 0))
         self._offset_lbl = reg(tk.Label(offr, text="— ms", font=("Consolas", self.F_OFFSET, "bold"), bg=self.BG, fg=self.ACCENT), bg="BG", fg="ACCENT")
         self._offset_lbl.pack(side="left", anchor="w")
-        self._pip_btn = reg(tk.Button(offr, text="⧉ PIP OFF", font=("Consolas", max(7, round(8*r)), "bold"), bg=self.BG3, fg=self.TEXT_MID, activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(6*r), pady=2, command=self._pip_toggle), bg="BG3", fg="TEXT_MID", abg="BORDER")
-        self._pip_btn.pack(side="right", anchor="s", padx=(4, 0))
-        if self._pip_on:
-            self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3)
         bar_bg = reg(tk.Frame(mf, bg=self.BG3, height=4), bg="BG3")
         bar_bg.pack(fill="x", pady=(4, 0))
         bar_bg.pack_propagate(False)
@@ -289,13 +300,13 @@ class LipSyncGUILayout:
             bg="BG", fg="TEXT_DIM").pack(side="left")
 
         # 스크롤 영역
-        list_outer = tk.Frame(parent, bg=self.BG, padx=P2)
-        list_outer.pack(fill="both", expand=True, pady=(round(4*r), 0))
+        list_outer = tk.Frame(parent, bg=self.BG)
+        list_outer.pack(fill="both", expand=True, padx=(P2, 0), pady=(round(4*r), 0))
         reg(list_outer, bg="BG")
 
         sb = tk.Scrollbar(list_outer, bg=self.BG3, troughcolor=self.BG2,
                           relief="flat", width=8)
-        sb.pack(side="right", fill="y")
+        sb.pack(side="right", fill="y", padx=(0, P2))
 
         canvas = tk.Canvas(list_outer, bg=self.BG, highlightthickness=0,
                            yscrollcommand=sb.set)

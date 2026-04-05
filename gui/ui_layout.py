@@ -86,11 +86,11 @@ class LipSyncGUILayout:
         self._pip_on = bool(self._load_setting("pip_on", False))
         pip_text   = "⧉ PIP ON" if self._pip_on else "⧉ PIP OFF"
         pip_fg     = self.ACCENT3 if self._pip_on else self.TEXT_MID
-        pip_border = self.ACCENT3 if self._pip_on else self.BORDER
+        pip_bg     = "#0e0e0e"
         self._pip_btn = reg(
             tk.Button(tab_bar, text=pip_text,
                       font=("Consolas", max(7, round(8*r)), "bold"),
-                      bg=self.BG2, fg=pip_fg,
+                      bg=pip_bg, fg=pip_fg,
                       activebackground=self.BG3, activeforeground=self.TEXT,
                       relief="solid", cursor="hand2",
                       padx=round(7*r), pady=round(3*r),
@@ -213,17 +213,10 @@ class LipSyncGUILayout:
         self._corr_lbl = reg(tk.Label(r2, text="+0 ms", font=MONO_S, bg=self.BG, fg=self.TEXT), bg="BG", fg="TEXT")
         self._corr_lbl.pack(side="left", padx=(4, 0))
 
-        # ════════════════════════════════════════════════════════
-        # 탭2: 시청 기록
-        # ════════════════════════════════════════════════════════
-        hist_frame = reg(tk.Frame(container, bg=self.BG), bg="BG")
-        self._tab_frames["history"] = hist_frame
-        self._build_history_tab(hist_frame, r, P, P2, MONO, MONO_S)
-
-        # ── 하단 버튼 ─────────────────────────────────────────────────────────
-        reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", padx=P2)
+        # ── 하단 버튼 (container보다 먼저 pack해야 expand=True가 남은 공간만 차지함) ──
+        reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", padx=P2, side="bottom")
         bf = reg(tk.Frame(self.root, bg=self.BG, padx=round(10*r), pady=round(6*r)), bg="BG")
-        bf.pack(fill="x")
+        bf.pack(fill="x", side="bottom")
         bf.columnconfigure(2, weight=1)
         bf.rowconfigure(0, minsize=round(32*r))
         BTN = dict(font=("Consolas", max(8, round(9*r)), "bold"), relief="flat", cursor="hand2", padx=round(8*r), pady=0, anchor="center")
@@ -234,6 +227,13 @@ class LipSyncGUILayout:
         reg(tk.Frame(bf, bg=self.BG), bg="BG").grid(row=0, column=2, sticky="nsew")
         self._close_btn = reg(tk.Button(bf, text="✕ 종료", bg=self.BG3, fg=self.ACCENT2, activebackground=self.BORDER, command=self._on_close, **BTN), bg="BG3", fg="ACCENT2", abg="BORDER")
         self._close_btn.grid(row=0, column=3, padx=(2, 0), sticky="nsew")
+
+        # ════════════════════════════════════════════════════════
+        # 탭2: 시청 기록
+        # ════════════════════════════════════════════════════════
+        hist_frame = reg(tk.Frame(container, bg=self.BG), bg="BG")
+        self._tab_frames["history"] = hist_frame
+        self._build_history_tab(hist_frame, r, P, P2, MONO, MONO_S)
 
         # 싱크 탭 먼저 표시
         _switch_tab("sync")

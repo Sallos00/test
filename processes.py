@@ -38,6 +38,7 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
     last_diag_time     = 0.0
     lip_y_ratio        = 0.70   # 얼굴 높이 대비 입술 시작 위치 (동적 갱신)
     lip_ratio_update_n = 0
+    no_face_count      = 0      # 연속 얼굴 미감지 횟수
 
     def _estimate_lip_y_ratio(face_gray):  # 얼굴 하위 50~92%에서 가장 어두운 행 → 입술 위치
         h            = face_gray.shape[0]
@@ -94,16 +95,20 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
             )
             if len(faces):
                 x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-                last_roi = (x, y, fw, fh)
+                last_roi      = (x, y, fw, fh)
+                no_face_count = 0
                 lip_ratio_update_n += 1
-                # 30회마다 입술 위치 재추정
                 if lip_ratio_update_n % 30 == 1:
                     h_img, w_img = gray.shape
                     face_crop = gray[y:min(y+fh, h_img), x:min(x+fw, w_img)]
                     if face_crop.size > 0:
                         lip_y_ratio = _estimate_lip_y_ratio(face_crop)
             else:
-                last_roi = None
+                no_face_count += 1
+                # 연속 2회 탐지 실패 시 즉시 last_roi 초기화
+                # 오탐으로 last_roi가 유지돼 버퍼에 쌓이는 문제 방지
+                if no_face_count >= 2:
+                    last_roi = None
 
         if last_roi is not None:
             x, y, fw, fh = last_roi

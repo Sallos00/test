@@ -303,18 +303,19 @@ class LipSyncGUILayout:
             bg="BG", fg="TEXT_DIM").pack(side="left")
 
         # 스크롤 영역
-        list_outer = tk.Frame(parent, bg=self.BG)
-        list_outer.pack(fill="both", expand=True, padx=P2, pady=(round(4*r), 0))
-        reg(list_outer, bg="BG")
-
-        sb = tk.Scrollbar(list_outer, orient="vertical",
+        # 스크롤바를 parent에 직접 배치해 창 테두리에 잘리지 않도록 함
+        sb = tk.Scrollbar(parent, orient="vertical",
                           bg=self.BG3, troughcolor=self.BG2,
                           relief="flat", width=10, bd=0)
-        sb.pack(side="right", fill="y")
+        sb.pack(side="right", fill="y", padx=(0, P2))
+
+        list_outer = tk.Frame(parent, bg=self.BG)
+        list_outer.pack(fill="both", expand=True, padx=(P2, 0), pady=(round(4*r), 0))
+        reg(list_outer, bg="BG")
 
         canvas = tk.Canvas(list_outer, bg=self.BG, highlightthickness=0,
                            yscrollcommand=sb.set)
-        canvas.pack(side="left", fill="both", expand=True)
+        canvas.pack(fill="both", expand=True)
         sb.config(command=canvas.yview)
 
         self._hist_list_canvas = canvas
@@ -325,8 +326,7 @@ class LipSyncGUILayout:
         def _on_frame_cfg(e):
             canvas.configure(scrollregion=canvas.bbox("all"))
         def _on_canvas_cfg(e):
-            # 스크롤바 너비(10)를 제외한 너비로 내부 프레임 설정
-            canvas.itemconfig(self._hist_canvas_window, width=max(1, e.width - 2))
+            canvas.itemconfig(self._hist_canvas_window, width=e.width)
 
         self._hist_list_frame.bind("<Configure>", _on_frame_cfg)
         canvas.bind("<Configure>", _on_canvas_cfg)

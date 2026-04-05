@@ -24,6 +24,7 @@ from audio_com import (
     activate_global_loopback, audio_client_initialize_loopback,
     qpc_freq, qpc_now,
 )
+from log_utils import make_send_log
 
 # Windows 빌드 확인 — ProcessLoopback은 빌드 19041(20H1) 이상에서만 지원
 def _windows_build() -> int:
@@ -325,15 +326,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict,
     if stream_anchor is None:
         stream_anchor = [0, 48000, qpc_freq()]  # 더미 — 공유 안 됨
 
-    def send_log(msg: str):
-        full = f"[{time.strftime('%H:%M:%S')}] {msg}"
-        if log_queue is not None:
-            try:
-                log_queue.put_nowait(full)
-                return
-            except Exception:
-                pass
-        queue_put(audio_queue, ("LOG", full))
+    send_log = make_send_log(audio_queue, log_queue, queue_put)
 
     send_log(f"ℹ Win build={_WIN_BUILD} | ProcessLoopback={_SUPPORT_PROCESS_LOOPBACK}")
 

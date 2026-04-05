@@ -15,8 +15,8 @@ CFG = dict(
     BUFFER_SEC          = 3.0,
     ANALYSIS_INTERVAL   = 3.0,
     SYNC_THRESHOLD_MS   = 80,
-    POTPLAYER_STEP_MS   = 5,
-    MAX_CORRECT_STEP    = 20,   # 한 사이클 최대 보정량 = 100ms
+    POTPLAYER_STEP_MS   = 10,
+    MAX_CORRECT_STEP    = 10,   # 한 사이클 최대 보정량 = 100ms
     MAX_TOTAL_SYNC_MS   = 500,
     QUEUE_MAXSIZE       = 200,
     OPED_AUTO_SKIP      = False,   

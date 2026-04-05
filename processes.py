@@ -5,7 +5,6 @@ import ctypes
 import ctypes.wintypes
 import collections
 import numpy as np
-import psutil
 from multiprocessing import Queue, Value
 from win32_utils import (
     CFG, find_potplayer_hwnd, post_key_to_potplayer,
@@ -15,14 +14,10 @@ from win32_utils import (
 )
 from audio_capture import proc_audio_capture
 from audio_com import qpc_freq, qpc_now
+from log_utils import (make_add_log, STATUS_OK, STATUS_CORRECTED, STATUS_COLLECTING,
+                       STATUS_NO_SIGNAL, STATUS_LOW_CONF, STATUS_COOLDOWN,
+                       STATUS_UNDETECTED, STATUS_CEILING, STATUS_NO_POT, STATUS_BUFFERING)
 
-def _load_saved_setting(key, default):
-    try:
-        path = os.path.join(os.environ.get("APPDATA", ""), "AutoSync", "settings.json")
-        with open(path, "r") as f:
-            return json.load(f).get(key, default)
-    except Exception:
-        return default
 
 def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_anchor=None):
     """
@@ -149,14 +144,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                   state_queue: Queue, cmd_queue: Queue,
                   stop_flag: Value, cfg: dict,
                   shared_pos=None, shared_dur=None):
-    """
-    립 모션(lip)과 오디오 VAD를 교차상관으로 비교해 싱크 오프셋을 추정하고
-    팟플레이어 오디오 딜레이를 자동 보정하는 프로세스.
-
-    aub 튜플: (t_stream, rms, vad)
-      t_stream: 오디오 스트림 기준 위치(초) — lip과 동일 기준축
-      rms: OP/ED 음악 감지에 사용
-      vad: 싱크 보정에 사용 (ZCR 기반 이진 신호)
+    """립·오디오 교차상관으로 싱크 오프셋 추정 및 팟플레이어 자동 보정 프로세스.
+    aub: (t_stream, rms, vad) — rms: OP/ED 감지용, vad: 싱크 보정 게이트용
     """
     from scipy.signal import correlate
 
@@ -208,8 +197,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
 
-    def add_log(msg: str):
-        log_lines.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+    add_log = make_add_log(log_lines)
 
     # ── OP/ED: 음악 재생 여부 판단 ────────────────────────────────────────────
     def is_music_playing() -> bool:
@@ -539,7 +527,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         # 데이터 부족
         if aud_n < 10 or (lip_n < 10 and not has_prompt):
-            push_state("데이터 수집 중", 0, total_correction_ms, log_lines, pot_ok,
+            push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
@@ -548,7 +536,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         if lip_sig is None or aud_sig is None:
             if has_prompt:
-                push_state("데이터 수집 중", 0, total_correction_ms, log_lines, pot_ok,
+                push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
                            lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
@@ -556,9 +544,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         # 1차 신호 품질 체크 — flat 신호가 correlate에 들어가면 bogus lag 발생
         pre_lip_std = float(lip_sig.std())
         pre_aud_std = float(aud_sig.std())
-        if pre_lip_std < 0.05 or pre_aud_std < 1e-6:
-            add_log(f"⚠ 신호 불충분 (lip_std={pre_lip_std:.3f} aud_std={pre_aud_std:.6f}) → 생략")
-            push_state("신호 부족", 0, total_correction_ms, log_lines, pot_ok,
+        if pre_lip_std < 0.001 or pre_aud_std < 1e-4:
+            add_log(f"⚠ 신호 불충분 (lip_std={pre_lip_std:.4f} aud_std={pre_aud_std:.6f}) → 생략")
+            push_state(STATUS_NO_SIGNAL, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
@@ -570,15 +558,15 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         # 얼굴은 잡혔지만 입 움직임이 없는 구간 (대사 없음)
         if lip_mean < 0.002:
-            push_state("미감지", 0, total_correction_ms, log_lines, pot_ok,
+            push_state(STATUS_UNDETECTED, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(1.0)
             continue
 
         # 2차 신호 품질 체크 (이진화 후)
-        if lip_std < 0.05 or aud_std < 1e-6:
+        if lip_std < 0.05 or aud_std < 1e-4:
             add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_std={aud_std:.6f}) → 건너뜀")
-            push_state("신호 부족", 0, total_correction_ms, log_lines, pot_ok,
+            push_state(STATUS_NO_SIGNAL, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
@@ -586,7 +574,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         # 상관 신뢰도 체크 — peak가 낮으면 lip·aud 패턴이 맞지 않는 구간
         if confidence < CONFIDENCE_THRESH:
             add_log(f"⚠ 상관 신뢰도 낮음 (conf={confidence:.3f}) → 건너뜀")
-            push_state("신뢰도 부족", 0, total_correction_ms, log_lines, pot_ok,
+            push_state(STATUS_LOW_CONF, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
@@ -595,7 +583,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         offset_buf.append(raw_ms)
         if len(offset_buf) < OFFSET_BUF_SIZE:
             add_log(f"📦 버퍼 수집 중 ({len(offset_buf)}/{OFFSET_BUF_SIZE}) raw={raw_ms:.0f}ms")
-            push_state("버퍼 수집 중", raw_ms, total_correction_ms, log_lines, pot_ok,
+            push_state(STATUS_BUFFERING, raw_ms, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
@@ -615,7 +603,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         cooldown_remain = SYNC_COOLDOWN_SEC - (time.time() - last_correction_t)
         if cooldown_remain > 0:
             add_log(f"⏳ 보정 쿨다운 {cooldown_remain:.1f}초 남음 → 건너뜀")
-            push_state("쿨다운 중", smoothed_offset, total_correction_ms, log_lines, pot_ok,
+            push_state(STATUS_COOLDOWN, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
@@ -630,7 +618,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                 steps = max(0, int((MTM - abs(total_correction_ms)) / STEP))
             if steps == 0:
                 add_log(f"⚠ 싱크 상한 도달 (±{MTM}ms)")
-                push_state("상한 도달", smoothed_offset, total_correction_ms, log_lines, pot_ok,
+                push_state(STATUS_CEILING, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                            lip_n, aud_n, notify, oped_prompt)
                 time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
                 continue
@@ -646,11 +634,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             last_correction_t    = time.time()
             offset_buf.clear()
             add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
-            status = "보정 완료"
+            status = STATUS_CORRECTED
         elif not hwnd:
-            status = "팟플레이어 미감지"
+            status = STATUS_NO_POT
         else:
-            status = "정상"
+            add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
+            status = STATUS_OK
 
         push_state(status, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                    lip_n, aud_n, notify, oped_prompt)

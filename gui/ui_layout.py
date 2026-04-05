@@ -302,14 +302,15 @@ class LipSyncGUILayout:
                      bg=self.BG, fg=self.TEXT_DIM),
             bg="BG", fg="TEXT_DIM").pack(side="left")
 
-        # 스크롤 영역 — 오른쪽 패딩 없이 스크롤바가 잘리지 않도록 함
+        # 스크롤 영역
         list_outer = tk.Frame(parent, bg=self.BG)
-        list_outer.pack(fill="both", expand=True, padx=(P2, 0), pady=(round(4*r), 0))
+        list_outer.pack(fill="both", expand=True, padx=P2, pady=(round(4*r), 0))
         reg(list_outer, bg="BG")
 
-        sb = tk.Scrollbar(list_outer, bg=self.BG3, troughcolor=self.BG2,
-                          relief="flat", width=10)
-        sb.pack(side="right", fill="y", padx=(0, P2))
+        sb = tk.Scrollbar(list_outer, orient="vertical",
+                          bg=self.BG3, troughcolor=self.BG2,
+                          relief="flat", width=10, bd=0)
+        sb.pack(side="right", fill="y")
 
         canvas = tk.Canvas(list_outer, bg=self.BG, highlightthickness=0,
                            yscrollcommand=sb.set)

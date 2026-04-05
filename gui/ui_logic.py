@@ -73,6 +73,13 @@ class LipSyncGUILogic:
 
     # ── 시청 기록 목록 갱신 ───────────────────────────────────────────────────
     def _refresh_history_list(self):
+        if not hasattr(self, "_hist_list_frame"):
+            return
+        try:
+            if not self._hist_list_frame.winfo_exists():
+                return
+        except Exception:
+            return
         frame = self._hist_list_frame
         for w in frame.winfo_children():
             w.destroy()
@@ -133,13 +140,17 @@ class LipSyncGUILogic:
             return []
 
     def _save_history(self, records):
+        import collections, time as _t
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
         try:
             os.makedirs(self.APP_DIR, exist_ok=True)
             p = os.path.join(self.APP_DIR, "history.json")
             with open(p, "w", encoding="utf-8") as f:
                 json.dump(records, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] ❌ _save_history 오류: {e}")
 
     def record_video_history(self, title: str):
         """동영상 재생 감지 또는 제목 변경 시 호출.
@@ -155,43 +166,45 @@ class LipSyncGUILogic:
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
 
-        ts      = _t.strftime("%Y-%m-%d %H:%M")
-        records = self._load_history()
-        base    = _strip_series_name(title)
+        try:
+            ts      = _t.strftime("%Y-%m-%d %H:%M")
+            records = self._load_history()
+            base    = _strip_series_name(title)
 
-        for rec in records:
-            existing_title = rec.get("title", "")
+            for rec in records:
+                existing_title = rec.get("title", "")
 
-            # 완전히 동일한 제목 → 타임스탬프만 갱신
-            if existing_title == title:
-                rec["timestamp"] = ts
-                self._save_history(records)
-                if hasattr(self, "_hist_list_frame"):
+                # 완전히 동일한 제목 → 타임스탬프만 갱신
+                if existing_title == title:
+                    rec["timestamp"] = ts
+                    self._save_history(records)
                     self._refresh_history_list()
-                self._log_lines.append(
-                    f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 갱신: {title}")
-                return
+                    self._log_lines.append(
+                        f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 갱신: {title}")
+                    return
 
-            # 같은 시리즈명, 화수만 다름 → 덮어쓰기
-            existing_base = _strip_series_name(existing_title)
-            if existing_base and base and existing_base == base:
-                old_title        = existing_title
-                rec["title"]     = title
-                rec["timestamp"] = ts
-                self._save_history(records)
-                if hasattr(self, "_hist_list_frame"):
+                # 같은 시리즈명, 화수만 다름 → 덮어쓰기
+                existing_base = _strip_series_name(existing_title)
+                if existing_base and base and existing_base == base:
+                    old_title        = existing_title
+                    rec["title"]     = title
+                    rec["timestamp"] = ts
+                    self._save_history(records)
                     self._refresh_history_list()
-                self._log_lines.append(
-                    f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 덮어쓰기: {old_title} → {title}")
-                return
+                    self._log_lines.append(
+                        f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 덮어쓰기: {old_title} → {title}")
+                    return
 
-        # 신규 기록 추가
-        records.append({"title": title, "timestamp": ts})
-        self._save_history(records)
-        if hasattr(self, "_hist_list_frame"):
+            # 신규 기록 추가
+            records.append({"title": title, "timestamp": ts})
+            self._save_history(records)
             self._refresh_history_list()
-        self._log_lines.append(
-            f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 추가: {title}")
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 추가: {title}")
+
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] ❌ record_video_history 오류: {e}")
 
     # ── PIP ───────────────────────────────────────────────────────────────────
     def _pip_toggle(self):

@@ -465,10 +465,22 @@ def _strip_episode_number(name: str) -> str:
 
 
 def _extract_potplayer_title(window_title: str) -> str:
-    """PotPlayer 창 제목에서 동영상 파일명을 추출."""
+    """PotPlayer 창 제목에서 동영상 파일명을 추출.
+    지원 형식:
+      파일명 - PotPlayer64
+      파일명 - PotPlayer
+      PotPlayer64 - 파일명  (일부 버전)
+    """
     if not window_title:
         return ""
-    m = re.match(r'^(.+?)\s*-\s*PotPlayer', window_title, re.IGNORECASE)
+    # 일반 형식: "파일명 - PotPlayer[64]"
+    m = re.match(r'^(.+?)\s*-\s*PotPlayer(?:64)?(?:\s.*)?$', window_title, re.IGNORECASE)
+    if m:
+        title = m.group(1).strip()
+        if title and title not in ("", "-"):
+            return title
+    # 역순 형식: "PotPlayer[64] - 파일명"
+    m = re.match(r'^PotPlayer(?:64)?\s*-\s*(.+)$', window_title, re.IGNORECASE)
     if m:
         title = m.group(1).strip()
         if title and title not in ("", "-"):

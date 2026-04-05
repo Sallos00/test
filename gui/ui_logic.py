@@ -253,23 +253,24 @@ class LipSyncGUILogic:
             self.root.after(1000, self._poll_playback_info)
 
     def _start_title_watcher(self):
-        """별도 스레드에서 PotPlayer 창 제목 변경을 감지해 시청 기록 저장.
-        기록 기준 2: 동영상 제목이 바뀌었을 때.
-        기록 기준 1(재생 감지 팝업)은 run.py _show_start_popup 에서 담당.
+        """PotPlayer 창 제목을 1초마다 감시해 변경 시 시청 기록 저장.
+
+        기록 기준:
+          - 기준1(재생 감지 팝업)과 기준2(제목 변경) 모두 이 watcher 하나로 처리.
+          - 팝업 기록과의 중복은 record_video_history 내부에서
+            '완전히 동일한 제목 → 타임스탬프만 갱신' 처리로 자연스럽게 방지됨.
+          - 팟플레이어가 닫혔다가 다시 열리거나 다른 영상을 열면 항상 기록.
         """
         import threading, ctypes, time as _t, collections
 
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
 
-        # _title_watcher_last: 마지막으로 기록한 제목 (재생 감지 팝업과 공유)
-        # 이미 팝업에서 기록한 제목을 title_watcher가 중복 기록하지 않도록 사용
-        self._title_watcher_last = ""
-
         def _watch():
-            prev_title = ""
-            user32     = ctypes.windll.user32
-            buf        = ctypes.create_unicode_buffer(512)
+            prev_title  = ""
+            was_running = False          # 이전 루프에서 PotPlayer가 있었는지
+            user32      = ctypes.windll.user32
+            buf         = ctypes.create_unicode_buffer(512)
 
             while not getattr(self, "_closing", False):
                 try:
@@ -279,18 +280,20 @@ class LipSyncGUILogic:
                         title = _extract_potplayer_title(buf.value)
 
                         if title and title != prev_title:
-                            prev_title = title
-                            # 재생 감지 팝업이 이미 같은 제목을 기록했으면 스킵
-                            if title == getattr(self, "_title_watcher_last", ""):
-                                continue
-                            self._title_watcher_last = title
-                            if not getattr(self, "_closing", False):
-                                self._log_lines.append(
-                                    f"[{_t.strftime('%H:%M:%S')}] 🔍 제목 변경 감지: {title}")
-                                self.root.after(0, lambda t=title: self.record_video_history(t))
+                            prev_title  = title
+                            was_running = True
+                            self._log_lines.append(
+                                f"[{_t.strftime('%H:%M:%S')}] 🔍 제목 감지: {title}")
+                            self.root.after(
+                                0, lambda t=title: self.record_video_history(t))
+                        else:
+                            was_running = True
                     else:
-                        # 팟플레이어가 닫히면 다음 감지를 위해 초기화
-                        prev_title = ""
+                        # PotPlayer가 닫히면 prev_title 초기화
+                        # → 같은 영상을 다시 열면 다시 기록됨
+                        if was_running:
+                            prev_title  = ""
+                            was_running = False
                 except Exception as e:
                     try:
                         self._log_lines.append(

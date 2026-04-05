@@ -316,11 +316,13 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         hi     = min(len(corr), center + max_lag_samples + 1)
 
         sub_corr = corr[lo:hi]
-        peak_idx = int(np.argmax(sub_corr)) + lo
+        # 절대값 기준 peak 탐색 — 신호 반전 시 음수 상관도 유효한 매칭
+        peak_rel = int(np.argmax(np.abs(sub_corr)))
+        peak_idx = peak_rel + lo
 
-        # 정규화 상관계수로 신뢰도 산출 (신호 에너지 대비 peak 크기)
-        energy    = np.sqrt(np.sum(lip_sig**2) * np.sum(vad_sig**2))
-        confidence = float(corr[peak_idx] / energy) if energy > 1e-9 else 0.0
+        # 정규화 상관계수로 신뢰도 산출 (0~1, 절대값 기준)
+        energy     = np.sqrt(np.sum(lip_sig**2) * np.sum(vad_sig**2))
+        confidence = float(abs(corr[peak_idx]) / energy) if energy > 1e-9 else 0.0
 
         if lo < peak_idx < hi - 1:
             y0, y1, y2 = corr[peak_idx-1], corr[peak_idx], corr[peak_idx+1]

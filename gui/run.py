@@ -235,6 +235,7 @@ class LipSyncGUIRun:
 
         # 팝업이 뜨는 시점에 창 제목에서 동영상 제목을 추출해 시청기록 저장
         # 기록 기준 1: 재생 감지 팝업 발생 시점에 시청 기록 저장
+        # (title_watcher와 중복돼도 record_video_history 내부에서 타임스탬프 갱신만 함)
         try:
             import ctypes as _ct
             _u32 = _ct.windll.user32
@@ -244,8 +245,6 @@ class LipSyncGUIRun:
                 _u32.GetWindowTextW(_hwnd, _buf, 512)
                 _title = _extract_potplayer_title(_buf.value)
                 if _title:
-                    # title_watcher 중복 기록 방지용 공유 변수 갱신
-                    self._title_watcher_last = _title
                     self.root.after(0, lambda t=_title: self.record_video_history(t))
         except Exception:
             pass

@@ -18,6 +18,7 @@ from win32_utils import (
     is_potplayer_running, post_key_to_potplayer, VK_OEM_2,
     get_playback_info,
 )
+from gui.ui_logic import _extract_potplayer_title
 from processes import proc_lip_capture, proc_audio_capture, proc_analyzer
 
 class LipSyncGUIRun:
@@ -231,6 +232,20 @@ class LipSyncGUIRun:
                  text="팟플레이어에서 동영상이 재생됩니다.\n싱크 보정을 시작할까요?",
                  font=("Segoe UI", max(8, round(9 * r))),
                  bg=self.BG, fg=self.TEXT, justify="center").pack()
+
+        # 팝업이 뜨는 시점에 창 제목에서 동영상 제목을 추출해 시청기록 저장
+        try:
+            import ctypes as _ct
+            _u32 = _ct.windll.user32
+            _buf = _ct.create_unicode_buffer(512)
+            _hwnd = find_potplayer_hwnd()
+            if _hwnd:
+                _u32.GetWindowTextW(_hwnd, _buf, 512)
+                _title = _extract_potplayer_title(_buf.value)
+                if _title:
+                    self.root.after(0, lambda t=_title: self.record_video_history(t))
+        except Exception:
+            pass
 
         btn_f = tk.Frame(popup, bg=self.BG, pady=round(16*r))
         btn_f.pack()

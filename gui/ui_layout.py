@@ -6,6 +6,7 @@
   _build_ui                  — 메인 UI 레이아웃 전체 구성 (헤더·탭바·카드·버튼)
   _build_history_tab         — 시청 기록 탭 위젯 구성
 """
+import os
 import tkinter as tk
 import tkinter.filedialog as fd
 from app_icon import apply_to_root_window

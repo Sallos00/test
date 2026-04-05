@@ -142,42 +142,56 @@ class LipSyncGUILogic:
             pass
 
     def record_video_history(self, title: str):
-        """동영상 감지 또는 이름 변경 시 호출. 숫자만 다른 기록은 덮어씀."""
+        """동영상 재생 감지 또는 제목 변경 시 호출.
+        기록 기준:
+          1. 완전히 동일한 제목 → 타임스탬프만 갱신 (중복 추가 방지)
+          2. 같은 시리즈명인데 화수만 다름 → 기존 기록 덮어쓰기
+          3. 새로운 작품 → 신규 기록 추가
+        """
         import time as _t, collections
         if not title or not title.strip():
             return
-        # _log_lines 보장
+
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
+
         ts      = _t.strftime("%Y-%m-%d %H:%M")
         records = self._load_history()
-        base    = _strip_episode_number(title)
+        base    = _strip_series_name(title)
 
-        # 같은 base 제목 기록 찾기
         for rec in records:
-            rec_base = _strip_episode_number(rec.get("title", ""))
-            if rec_base == base:
-                if rec.get("title", "") == title:
-                    # 완전히 동일한 제목 - 타임스탬프만 갱신
-                    rec["timestamp"] = ts
-                else:
-                    # 화수가 다른 경우 - 제목과 타임스탬프 업데이트
-                    rec["title"]     = title
-                    rec["timestamp"] = ts
+            existing_title = rec.get("title", "")
+
+            # 완전히 동일한 제목 → 타임스탬프만 갱신
+            if existing_title == title:
+                rec["timestamp"] = ts
                 self._save_history(records)
                 if hasattr(self, "_hist_list_frame"):
                     self._refresh_history_list()
-                if hasattr(self, "_log_lines"):
-                    self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 갱신: {title}")
+                self._log_lines.append(
+                    f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 갱신: {title}")
                 return
 
-        # 새 기록 추가
+            # 같은 시리즈명, 화수만 다름 → 덮어쓰기
+            existing_base = _strip_series_name(existing_title)
+            if existing_base and base and existing_base == base:
+                old_title        = existing_title
+                rec["title"]     = title
+                rec["timestamp"] = ts
+                self._save_history(records)
+                if hasattr(self, "_hist_list_frame"):
+                    self._refresh_history_list()
+                self._log_lines.append(
+                    f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 덮어쓰기: {old_title} → {title}")
+                return
+
+        # 신규 기록 추가
         records.append({"title": title, "timestamp": ts})
         self._save_history(records)
         if hasattr(self, "_hist_list_frame"):
             self._refresh_history_list()
-        if hasattr(self, "_log_lines"):
-            self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 추가: {title}")
+        self._log_lines.append(
+            f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 추가: {title}")
 
     # ── PIP ───────────────────────────────────────────────────────────────────
     def _pip_toggle(self):
@@ -239,18 +253,20 @@ class LipSyncGUILogic:
             self.root.after(1000, self._poll_playback_info)
 
     def _start_title_watcher(self):
-        """별도 스레드에서 PotPlayer 창 제목 변경을 감지해 시청 기록 기록."""
+        """별도 스레드에서 PotPlayer 창 제목 변경을 감지해 시청 기록 저장.
+        기록 기준 2: 동영상 제목이 바뀌었을 때.
+        기록 기준 1(재생 감지 팝업)은 run.py _show_start_popup 에서 담당.
+        """
         import threading, ctypes, time as _t, collections
 
-        # _log_lines 보장
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
 
-        # prev_title을 빈 문자열로 초기화 → 현재 재생 중인 영상도 즉시 기록됨
-        self._last_detected_title = ""
+        # _title_watcher_last: 마지막으로 기록한 제목 (재생 감지 팝업과 공유)
+        # 이미 팝업에서 기록한 제목을 title_watcher가 중복 기록하지 않도록 사용
+        self._title_watcher_last = ""
 
         def _watch():
-            prev_hwnd  = None
             prev_title = ""
             user32     = ctypes.windll.user32
             buf        = ctypes.create_unicode_buffer(512)
@@ -260,19 +276,21 @@ class LipSyncGUILogic:
                     hwnd = find_potplayer_hwnd()
                     if hwnd:
                         user32.GetWindowTextW(hwnd, buf, 512)
-                        raw   = buf.value
-                        title = _extract_potplayer_title(raw)
+                        title = _extract_potplayer_title(buf.value)
 
                         if title and title != prev_title:
-                            prev_hwnd  = hwnd
                             prev_title = title
-                            self._last_detected_title = title
+                            # 재생 감지 팝업이 이미 같은 제목을 기록했으면 스킵
+                            if title == getattr(self, "_title_watcher_last", ""):
+                                continue
+                            self._title_watcher_last = title
                             if not getattr(self, "_closing", False):
                                 self._log_lines.append(
-                                    f"[{_t.strftime('%H:%M:%S')}] 🔍 제목 감지: {title}")
+                                    f"[{_t.strftime('%H:%M:%S')}] 🔍 제목 변경 감지: {title}")
                                 self.root.after(0, lambda t=title: self.record_video_history(t))
                     else:
-                        prev_hwnd = None
+                        # 팟플레이어가 닫히면 다음 감지를 위해 초기화
+                        prev_title = ""
                 except Exception as e:
                     try:
                         self._log_lines.append(
@@ -474,18 +492,32 @@ class LipSyncGUILogic:
 
 # ── 모듈 수준 유틸 ────────────────────────────────────────────────────────────
 
-def _strip_episode_number(name: str) -> str:
-    """파일명/제목에서 에피소드 숫자를 제거해 기본 제목만 반환 (소문자)."""
+def _strip_series_name(name: str) -> str:
+    """파일명/제목에서 화수 정보만 제거해 시리즈명을 추출.
+    예: '디지몬 어드벤처 1화' → '디지몬 어드벤처'
+        'Attack on Titan S01E03' → 'attack on titan'
+        '[SubGroup] One Piece - 1050' → 'one piece'
+    """
     name = os.path.splitext(name)[0]
-    name = re.sub(r'[\[\(]\d+[\]\)]', '', name)
-    name = re.sub(r'[Ee](?:pisode)?\s*\d+', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'#\d+', '', name)
-    # 한글 화/편/부/회/장/권 단위 제거 (예: 1화, 12편, 3부)
-    name = re.sub(r'\d+\s*[화편부회장권]', '', name)
-    # 단독 숫자 제거 (앞뒤가 단어문자가 아닐 때)
-    name = re.sub(r'(?<!\w)\d+(?!\w)', '', name)
+    # 서브그룹 태그 제거: [SubGroup], (SubGroup)
+    name = re.sub(r'^[\[\(][^\]\)]{1,30}[\]\)]\s*', '', name)
+    # 영상 품질/코덱 태그 제거: [1080p], (HEVC), [BluRay] 등
+    name = re.sub(r'[\[\(](?:1080|720|480|2160|4K|BluRay|WEB|HDTV|HEVC|x264|x265|AAC|AC3)[^\]\)]*[\]\)]', '', name, flags=re.IGNORECASE)
+    # S01E03, s1e3 형식
+    name = re.sub(r'S\d{1,2}E\d{1,3}', '', name, flags=re.IGNORECASE)
+    # Episode 3, Ep.3, EP03
+    name = re.sub(r'[Ee]p(?:isode)?[.\s]*\d+', '', name, flags=re.IGNORECASE)
+    # 한글 화수: 1화, 12편, 3부, 제1화, 제12화
+    name = re.sub(r'제?\d+\s*[화편부회장권화]', '', name)
+    # 숫자 단독 구분자: " - 1050", "_01", " 03"  (앞에 단어문자가 없고 뒤도 없는 숫자)
+    name = re.sub(r'(?<![\w가-힣])[-_\s]*\d{1,4}(?![\w가-힣])', '', name)
+    # 남은 구분자 정리
     name = re.sub(r'[\s_\-\.]+', ' ', name).strip()
     return name.lower()
+
+def _strip_episode_number(name: str) -> str:
+    """하위호환용 alias."""
+    return _strip_series_name(name)
 
 
 def _extract_potplayer_title(window_title: str) -> str:

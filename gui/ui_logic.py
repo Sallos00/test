@@ -143,9 +143,12 @@ class LipSyncGUILogic:
 
     def record_video_history(self, title: str):
         """동영상 감지 또는 이름 변경 시 호출. 숫자만 다른 기록은 덮어씀."""
-        import time as _t
+        import time as _t, collections
         if not title or not title.strip():
             return
+        # _log_lines 보장
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
         ts      = _t.strftime("%Y-%m-%d %H:%M")
         records = self._load_history()
         base    = _strip_episode_number(title)
@@ -237,22 +240,22 @@ class LipSyncGUILogic:
 
     def _start_title_watcher(self):
         """별도 스레드에서 PotPlayer 창 제목 변경을 감지해 시청 기록 기록."""
-        import threading, ctypes, time as _t
+        import threading, ctypes, time as _t, collections
 
-        # 시작 시 history.json 마지막 기록을 초기 비교값으로 사용
-        try:
-            records = self._load_history()
-            self._last_detected_title = records[-1].get("title", "") if records else ""
-        except Exception:
-            self._last_detected_title = ""
+        # _log_lines 보장
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        # prev_title을 빈 문자열로 초기화 → 현재 재생 중인 영상도 즉시 기록됨
+        self._last_detected_title = ""
 
         def _watch():
             prev_hwnd  = None
-            prev_title = self._last_detected_title
+            prev_title = ""
             user32     = ctypes.windll.user32
             buf        = ctypes.create_unicode_buffer(512)
 
-            while not self._closing:
+            while not getattr(self, "_closing", False):
                 try:
                     hwnd = find_potplayer_hwnd()
                     if hwnd:
@@ -260,25 +263,23 @@ class LipSyncGUILogic:
                         raw   = buf.value
                         title = _extract_potplayer_title(raw)
 
-                        # 새로 PotPlayer가 감지된 경우 (hwnd가 새로 생김)
-                        if hwnd != prev_hwnd:
-                            prev_hwnd = hwnd
-                            if title and title != prev_title:
-                                prev_title = title
-                                self._last_detected_title = title
-                                if not self._closing:
-                                    self.root.after(0, lambda t=title: self.record_video_history(t))
-                        elif title and title != prev_title:
-                            # 제목이 변경된 경우
+                        if title and title != prev_title:
+                            prev_hwnd  = hwnd
                             prev_title = title
                             self._last_detected_title = title
-                            if not self._closing:
+                            if not getattr(self, "_closing", False):
+                                self._log_lines.append(
+                                    f"[{_t.strftime('%H:%M:%S')}] 🔍 제목 감지: {title}")
                                 self.root.after(0, lambda t=title: self.record_video_history(t))
                     else:
                         prev_hwnd = None
-                except Exception:
-                    pass
-                _t.sleep(0.5)
+                except Exception as e:
+                    try:
+                        self._log_lines.append(
+                            f"[{_t.strftime('%H:%M:%S')}] ⚠ 타이틀 감시 오류: {e}")
+                    except Exception:
+                        pass
+                _t.sleep(1.0)
 
         t = threading.Thread(target=_watch, daemon=True, name="title-watcher")
         t.start()

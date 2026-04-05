@@ -83,6 +83,11 @@ class LipSyncGUILogic:
         frame = self._hist_list_frame
         for w in frame.winfo_children():
             w.destroy()
+        # canvas 너비를 frame에 즉시 반영 (Configure 이벤트보다 먼저 그려지는 경우 대비)
+        canvas = self._hist_list_canvas
+        cw = canvas.winfo_width()
+        if cw > 1:
+            canvas.itemconfig(self._hist_canvas_window, width=cw)
 
         records  = self._load_history()
         r        = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]

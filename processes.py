@@ -136,7 +136,9 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
             lip_roi = gray[y1:y2, x:min(x+fw, w_img)]
             if lip_roi.size > 0:
                 small  = cv2.resize(lip_roi, LIP_ROI_SIZE)
-                motion = float(small.var(axis=0).mean()) / 255.0
+                # var()는 픽셀값(0~255)의 분산 → 최대 255²/4 수준
+                # 255²으로 나눠 0~1 범위로 정규화
+                motion = float(small.var(axis=0).mean()) / (255.0 ** 2)
             queue_put(lip_queue, (t_hw, motion))
 
         sleep_t = interval - (time.perf_counter() - t0)
@@ -250,17 +252,21 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     # ── 립·오디오 버퍼를 공통 시간축으로 리샘플 ──────────────────────────────
     def resample_aligned(lip_buf, aud_buf, fps):
-        """
-        두 버퍼를 겹치는 시간 구간에서 fps 간격으로 리샘플.
-        반환: (lip_sig, vad_sig) — 겹침 구간이 1초 미만이면 (None, None)
-        """
+        """두 버퍼를 겹치는 시간 구간에서 fps 간격으로 리샘플. (None, None) if < 1s"""
         if len(lip_buf) < 2 or len(aud_buf) < 2:
             return None, None
 
         lip_ts = np.fromiter((x[0] for x in lip_buf), dtype=np.float64, count=len(lip_buf))
         aud_ts = np.fromiter((x[0] for x in aud_buf), dtype=np.float64, count=len(aud_buf))
         lip_vs = np.fromiter((x[1] for x in lip_buf), dtype=np.float32, count=len(lip_buf))
-        aud_vs = np.fromiter((x[2] for x in aud_buf), dtype=np.float32, count=len(aud_buf))  # vad
+        rms_vs = np.fromiter((x[1] for x in aud_buf), dtype=np.float32, count=len(aud_buf))  # rms
+        vad_vs = np.fromiter((x[2] for x in aud_buf), dtype=np.float32, count=len(aud_buf))  # vad
+
+        # VAD로 마스킹한 RMS diff
+        # - RMS diff: 대사 시작/끝의 변화 시점을 잡음 → 절대 타임스탬프 편향 없음
+        # - VAD 마스킹: BGM 구간(VAD=0)을 0으로 제거 → flat 신호 문제 해결
+        rms_diff = np.abs(np.diff(rms_vs, prepend=rms_vs[0]))
+        aud_vs   = rms_diff * vad_vs
 
         t_start = max(lip_ts[0], aud_ts[0])
         t_end   = min(lip_ts[-1], aud_ts[-1])
@@ -274,8 +280,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         t_grid  = np.linspace(t_start, t_end, n_samples)
         lip_sig = np.interp(t_grid, lip_ts, lip_vs)
-        vad_sig = np.interp(t_grid, aud_ts, aud_vs)
-        return lip_sig, vad_sig
+        aud_sig = np.interp(t_grid, aud_ts, aud_vs)
+        return lip_sig, aud_sig
 
     # ── 교차상관으로 싱크 오프셋 추정 ─────────────────────────────────────────
     def to_binary(signal, ratio):
@@ -288,30 +294,28 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         s = x.std()
         return x / s if s > 1e-9 else x
 
-    def compute_offset(lip, vad, fps):
+    def compute_offset(lip, aud, fps):
         """
-        lip·vad 신호를 정규화 후 교차상관으로 lag(ms) 추정.
+        lip·aud 신호를 정규화 후 교차상관으로 lag(ms) 추정.
         파라볼라 보간으로 서브샘플 정밀도 확보.
 
         lip: 연속값 → to_binary로 이진화
-        vad: 이미 0/1 이진 신호 → round()로 스냅 (to_binary 재적용 시 신호 왜곡)
+        aud: VAD 마스킹된 RMS diff → 이미 변화 시점 기반이므로 그대로 정규화
 
         lag > 0: 오디오가 립보다 빠름 → 오디오 늦춰야 함 (Shift+.)
         lag < 0: 오디오가 립보다 느림 → 오디오 당겨야 함 (Shift+,)
-        반환: (lag_ms, lip_bin_std, vad_std, lip_mean, vad_mean, confidence)
-               confidence: 정규화 상관계수 peak값 (0~1), 낮으면 신뢰 불가
+        반환: (lag_ms, lip_bin_std, aud_std, lip_mean, aud_mean, confidence)
         """
         lip_bin = to_binary(lip, ratio=0.5)
         lip_sig = normalize(lip_bin) if lip_bin.std() >= 1e-9 else normalize(lip)
 
-        # vad는 interp로 생긴 0~1 중간값을 반올림해 이진으로 복원 후 정규화
-        vad_snapped = np.round(vad).astype(np.float32)
-        vad_sig     = normalize(vad_snapped) if vad_snapped.std() >= 1e-9 else normalize(vad)
+        # aud는 VAD 마스킹된 RMS diff — to_binary 없이 바로 정규화
+        aud_sig = normalize(aud) if aud.std() >= 1e-9 else aud
 
         # 탐색 범위를 MAX_TOTAL_SYNC_MS 이내로 제한해 노이즈 peak 방지
         max_lag_samples = int(MTM / 1000.0 * fps)
-        corr   = correlate(lip_sig, vad_sig, mode="full")
-        center = len(vad_sig) - 1
+        corr   = correlate(lip_sig, aud_sig, mode="full")
+        center = len(aud_sig) - 1
         lo     = max(0, center - max_lag_samples)
         hi     = min(len(corr), center + max_lag_samples + 1)
 
@@ -321,7 +325,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         peak_idx = peak_rel + lo
 
         # 정규화 상관계수로 신뢰도 산출 (0~1, 절대값 기준)
-        energy     = np.sqrt(np.sum(lip_sig**2) * np.sum(vad_sig**2))
+        energy     = np.sqrt(np.sum(lip_sig**2) * np.sum(aud_sig**2))
         confidence = float(abs(corr[peak_idx]) / energy) if energy > 1e-9 else 0.0
 
         if lo < peak_idx < hi - 1:
@@ -332,7 +336,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         else:
             lag = peak_idx - center
 
-        return lag / fps * 1000, lip_bin.std(), vad_snapped.std(), lip.mean(), vad.mean(), confidence
+        return lag / fps * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean(), confidence
 
     # ── 상태 큐 전송 ──────────────────────────────────────────────────────────
     _last_log_snapshot = [None]
@@ -540,9 +544,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        lip_sig, vad_sig = resample_aligned(lpb, aub, video_fps)
+        lip_sig, aud_sig = resample_aligned(lpb, aub, video_fps)
 
-        if lip_sig is None or vad_sig is None:
+        if lip_sig is None or aud_sig is None:
             if has_prompt:
                 push_state("데이터 수집 중", 0, total_correction_ms, log_lines, pot_ok,
                            lip_n, aud_n, notify, oped_prompt)
@@ -551,35 +555,35 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         # 1차 신호 품질 체크 — flat 신호가 correlate에 들어가면 bogus lag 발생
         pre_lip_std = float(lip_sig.std())
-        pre_vad_std = float(vad_sig.std())
-        if pre_lip_std < 0.05 or pre_vad_std < 0.05:
-            add_log(f"⚠ 신호 불충분 (lip_std={pre_lip_std:.3f} vad_std={pre_vad_std:.3f}) → 생략")
+        pre_aud_std = float(aud_sig.std())
+        if pre_lip_std < 0.05 or pre_aud_std < 1e-6:
+            add_log(f"⚠ 신호 불충분 (lip_std={pre_lip_std:.3f} aud_std={pre_aud_std:.6f}) → 생략")
             push_state("신호 부족", 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        raw_ms, lip_std, vad_std, lip_mean, vad_mean, confidence = compute_offset(lip_sig, vad_sig, video_fps)
+        raw_ms, lip_std, aud_std, lip_mean, aud_mean, confidence = compute_offset(lip_sig, aud_sig, video_fps)
 
-        add_log(f"📊 raw={raw_ms:.0f}ms lip_std={lip_std:.3f} vad_std={vad_std:.3f} "
-                f"lip_mean={lip_mean:.3f} vad_mean={vad_mean:.3f} conf={confidence:.3f} n={len(lip_sig)}")
+        add_log(f"📊 raw={raw_ms:.0f}ms lip_std={lip_std:.3f} aud_std={aud_std:.4f} "
+                f"lip_mean={lip_mean:.4f} conf={confidence:.3f} n={len(lip_sig)}")
 
         # 얼굴은 잡혔지만 입 움직임이 없는 구간 (대사 없음)
-        if lip_mean < 0.4:
+        if lip_mean < 0.002:
             push_state("미감지", 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(1.0)
             continue
 
         # 2차 신호 품질 체크 (이진화 후)
-        if lip_std < 0.05 or vad_std < 0.05:
-            add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} vad_std={vad_std:.3f}) → 건너뜀")
+        if lip_std < 0.05 or aud_std < 1e-6:
+            add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_std={aud_std:.6f}) → 건너뜀")
             push_state("신호 부족", 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        # 상관 신뢰도 체크 — peak가 낮으면 lip·vad 패턴이 맞지 않는 구간
+        # 상관 신뢰도 체크 — peak가 낮으면 lip·aud 패턴이 맞지 않는 구간
         if confidence < CONFIDENCE_THRESH:
             add_log(f"⚠ 상관 신뢰도 낮음 (conf={confidence:.3f}) → 건너뜀")
             push_state("신뢰도 부족", 0, total_correction_ms, log_lines, pot_ok,

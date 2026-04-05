@@ -141,7 +141,22 @@ class LipSyncGUILayout:
 
         reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x")
 
-        # ── 탭 컨테이너 ────────────────────────────────────────────────────────
+        # ── 하단 버튼을 container보다 먼저 pack (tkinter는 pack 등록 순서대로 공간 배분)
+        reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", padx=P2, side="bottom")
+        bf = reg(tk.Frame(self.root, bg=self.BG, padx=round(10*r), pady=round(6*r)), bg="BG")
+        bf.pack(fill="x", side="bottom")
+        bf.columnconfigure(2, weight=1)
+        bf.rowconfigure(0, minsize=round(32*r))
+        BTN = dict(font=("Consolas", max(8, round(9*r)), "bold"), relief="flat", cursor="hand2", padx=round(8*r), pady=0, anchor="center")
+        self._start_btn = reg(tk.Button(bf, text="▶ 시작", bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER, command=self._toggle, **BTN), bg="BG3", fg="ACCENT", abg="BORDER")
+        self._start_btn.grid(row=0, column=0, padx=(0, 2), sticky="nsew")
+        self._reset_btn = reg(tk.Button(bf, text="↺ 초기화", bg=self.BG3, fg=self.TEXT_MID, activebackground=self.BORDER, command=self._reset, **BTN), bg="BG3", fg="TEXT_MID", abg="BORDER")
+        self._reset_btn.grid(row=0, column=1, padx=2, sticky="nsew")
+        reg(tk.Frame(bf, bg=self.BG), bg="BG").grid(row=0, column=2, sticky="nsew")
+        self._close_btn = reg(tk.Button(bf, text="✕ 종료", bg=self.BG3, fg=self.ACCENT2, activebackground=self.BORDER, command=self._on_close, **BTN), bg="BG3", fg="ACCENT2", abg="BORDER")
+        self._close_btn.grid(row=0, column=3, padx=(2, 0), sticky="nsew")
+
+        # ── 탭 컨테이너 (하단 버튼 다음에 pack → 남은 공간만 차지)
         container = reg(tk.Frame(self.root, bg=self.BG), bg="BG")
         container.pack(fill="both", expand=True)
 
@@ -212,21 +227,6 @@ class LipSyncGUILayout:
         reg(tk.Label(r2, text="누적 보정", font=MONO_S, bg=self.BG, fg=self.TEXT_MID), bg="BG", fg="TEXT_MID").pack(side="left")
         self._corr_lbl = reg(tk.Label(r2, text="+0 ms", font=MONO_S, bg=self.BG, fg=self.TEXT), bg="BG", fg="TEXT")
         self._corr_lbl.pack(side="left", padx=(4, 0))
-
-        # ── 하단 버튼 (container보다 먼저 pack해야 expand=True가 남은 공간만 차지함) ──
-        reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", padx=P2, side="bottom")
-        bf = reg(tk.Frame(self.root, bg=self.BG, padx=round(10*r), pady=round(6*r)), bg="BG")
-        bf.pack(fill="x", side="bottom")
-        bf.columnconfigure(2, weight=1)
-        bf.rowconfigure(0, minsize=round(32*r))
-        BTN = dict(font=("Consolas", max(8, round(9*r)), "bold"), relief="flat", cursor="hand2", padx=round(8*r), pady=0, anchor="center")
-        self._start_btn = reg(tk.Button(bf, text="▶ 시작", bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER, command=self._toggle, **BTN), bg="BG3", fg="ACCENT", abg="BORDER")
-        self._start_btn.grid(row=0, column=0, padx=(0, 2), sticky="nsew")
-        self._reset_btn = reg(tk.Button(bf, text="↺ 초기화", bg=self.BG3, fg=self.TEXT_MID, activebackground=self.BORDER, command=self._reset, **BTN), bg="BG3", fg="TEXT_MID", abg="BORDER")
-        self._reset_btn.grid(row=0, column=1, padx=2, sticky="nsew")
-        reg(tk.Frame(bf, bg=self.BG), bg="BG").grid(row=0, column=2, sticky="nsew")
-        self._close_btn = reg(tk.Button(bf, text="✕ 종료", bg=self.BG3, fg=self.ACCENT2, activebackground=self.BORDER, command=self._on_close, **BTN), bg="BG3", fg="ACCENT2", abg="BORDER")
-        self._close_btn.grid(row=0, column=3, padx=(2, 0), sticky="nsew")
 
         # ════════════════════════════════════════════════════════
         # 탭2: 시청 기록

@@ -44,26 +44,36 @@ jobs:
       - name: SERVER_URL 삽입
         run: python scripts/inject_url.py
 
-      # ── [기능4] 모든 파일 난독화 ─────────────────────────────────────────
-      - name: 코드 난독화 (루트 레벨)
+      # ── 코드 난독화 (trial: 4파일씩 분할) ───────────────────────────────
+      - name: 난독화 루트 1/2
         run: |
           pyarmor gen --output dist_obf ^
             app_icon.py ^
             audio_com.py ^
             audio_capture.py ^
-            log_utils.py ^
+            log_utils.py
+        shell: cmd
+
+      - name: 난독화 루트 2/2
+        run: |
+          pyarmor gen --output dist_obf ^
             processes.py ^
             win32_utils.py ^
             auth.py
         shell: cmd
 
-      - name: 코드 난독화 (gui 패키지)
+      - name: 난독화 gui 1/2
         run: |
           pyarmor gen --output dist_obf\gui ^
             gui\__init__.py ^
             gui\base.py ^
             gui\ui_layout.py ^
-            gui\ui_logic.py ^
+            gui\ui_logic.py
+        shell: cmd
+
+      - name: 난독화 gui 2/2
+        run: |
+          pyarmor gen --output dist_obf\gui ^
             gui\run.py ^
             gui\auth.py ^
             gui\record_open.py ^

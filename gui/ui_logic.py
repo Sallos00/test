@@ -92,9 +92,6 @@ class LipSyncGUILogic:
         records  = self._load_history()
         r        = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         has_dir  = bool(getattr(self, "_hist_video_dir", ""))
-        # 버튼 너비 + row padding을 빼서 wraplength를 canvas 너비에 맞게 동적 계산
-        btn_w  = round(70 * r)
-        wrap_w = max(80, (cw if cw > 1 else round(180*r)) - btn_w - round(24*r))
 
         if not records:
             tk.Label(frame, text="— 시청 기록 없음 —",
@@ -114,11 +111,19 @@ class LipSyncGUILogic:
             info = tk.Frame(row, bg=row_bg)
             info.pack(side="left", fill="x", expand=True)
 
-            tk.Label(info, text=title,
+            # 확장자 제거 후 ' - ' 기준으로 첫 번째 줄 / 나머지 줄 분리
+            import os as _os
+            display_title = _os.path.splitext(title)[0]
+            if " - " in display_title:
+                first, rest = display_title.split(" - ", 1)
+                display_text = first + "\n- " + rest
+            else:
+                display_text = display_title
+
+            tk.Label(info, text=display_text,
                      font=("Consolas", self.F_MONO_S, "bold"),
                      bg=row_bg, fg=self.TEXT,
                      anchor="w",
-                     wraplength=wrap_w,
                      justify="left").pack(anchor="w")
             if ts:
                 tk.Label(info, text=ts,

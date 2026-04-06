@@ -447,6 +447,11 @@ class LipSyncGUIRun:
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0) if pot_ok else 0
+                # 팟플레이어 종료 감지 → 시청 기록 탭으로 전환
+                if not pot_ok and getattr(self, "_pot_was_ok", False):
+                    if hasattr(self, "_switch_tab_fn"):
+                        self._switch_tab_fn("history")
+                self._pot_was_ok = pot_ok
                 c = self.ACCENT3 if pot_ok else self.ACCENT2
                 self._pot_dot.config(fg=c)
                 self._pot_lbl.config(text="연결됨" if pot_ok else "미감지", fg=c)
@@ -490,6 +495,11 @@ class LipSyncGUIRun:
             corr   = latest.get("correction_ms", 0)
             logs   = latest.get("log_lines", [])
 
+            # 팟플레이어 종료 감지 → 시청 기록 탭으로 전환
+            if not pot_ok and getattr(self, "_pot_was_ok", False):
+                if hasattr(self, "_switch_tab_fn"):
+                    self._switch_tab_fn("history")
+            self._pot_was_ok = pot_ok
             c = self.ACCENT3 if pot_ok else self.ACCENT2
             t = "연결됨" if pot_ok else "미감지"
             self._pot_dot.config(fg=c); self._pot_lbl.config(text=t, fg=c)

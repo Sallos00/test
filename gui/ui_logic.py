@@ -94,18 +94,6 @@ class LipSyncGUILogic:
                            f"폴더에서 해당 동영상을 찾을 수 없습니다.\n\n"
                            f"제목: {title}\n폴더: {d}")
 
-    # ── 기록 삭제 ─────────────────────────────────────────────────────────────
-    def _hist_delete(self, title: str):
-        try:
-            records = self._load_history()
-            records = [r for r in records if r.get("title") != title]
-            self._save_history(records)
-            self._refresh_history_list()
-        except Exception as e:
-            import datetime as _dt
-            self._log_lines.append(
-                f"[{_dt.datetime.now().strftime('%H:%M:%S')}] ❌ _hist_delete 오류: {e}")
-
     # ── 시청 기록 목록 갱신 ───────────────────────────────────────────────────
     def _refresh_history_list(self):
         if not hasattr(self, "_hist_list_frame"):
@@ -179,6 +167,14 @@ class LipSyncGUILogic:
                               anchor="w")
             ts_lbl.pack(anchor="w")
 
+            del_btn = tk.Button(row, text="🗑",
+                                font=("Consolas", max(7, round(8*r))),
+                                bg=btn_bg, fg=self.TEXT if self._darkmode_var.get() else self.TEXT_MID,
+                                activebackground=self.BORDER, activeforeground=self.ACCENT2,
+                                relief="flat", cursor="hand2",
+                                padx=round(4*r), pady=round(2*r))
+            del_btn.pack(side="right", anchor="center", padx=(0, round(4*r)))
+
             btn = tk.Button(row, text="▶ 이어보기",
                             font=("Consolas", max(7, round(8*r)), "bold"),
                             bg=btn_bg, fg=self.ACCENT,
@@ -186,23 +182,6 @@ class LipSyncGUILogic:
                             relief="flat", cursor="hand2",
                             padx=round(6*r), pady=round(2*r))
             btn.pack(side="right", anchor="center", padx=(0, round(4*r)))
-
-            del_btn = tk.Button(row, text="🗑",
-                                font=("Segoe UI Emoji", max(7, round(8*r))),
-                                bg=btn_bg, fg=self.TEXT_DIM,
-                                activeforeground=self.ACCENT2,
-                                activebackground=self.BORDER,
-                                relief="flat", cursor="hand2",
-                                padx=round(4*r), pady=round(2*r))
-            del_btn.pack(side="right", anchor="center", padx=(0, round(2*r)))
-
-            # 스크롤 이벤트를 자식 위젯에서도 캔버스로 전달
-            def _bind_scroll(w):
-                w.bind("<MouseWheel>",
-                       lambda e: self._hist_list_canvas.yview_scroll(
-                           int(-1 * (e.delta / 120)), "units"))
-            for w in (row, info, title_lbl, ts_lbl, btn, del_btn):
-                _bind_scroll(w)
 
             cache.append({"row": row, "title_lbl": title_lbl,
                           "ts_lbl": ts_lbl, "btn": btn, "del_btn": del_btn})
@@ -227,7 +206,7 @@ class LipSyncGUILogic:
                 command=lambda t=title: self._hist_resume(t)
             )
             cached["del_btn"].config(
-                command=lambda t=title: self._hist_delete(t)
+                command=lambda t=title: self._hist_delete_one(t)
             )
             cached["row"].pack(fill="x", pady=(0, 1))
 
@@ -241,6 +220,21 @@ class LipSyncGUILogic:
         canvas.configure(scrollregion=canvas.bbox("all"))
 
     # ── history.json 로드/저장 ────────────────────────────────────────────────
+    def _hist_delete_one(self, title: str):
+        records = self._load_history()
+        records = [r for r in records if r.get("title") != title]
+        self._save_history(records)
+        self._hist_row_cache = []
+        self._refresh_history_list()
+
+    def _hist_clear_all(self):
+        import tkinter.messagebox as mb
+        if not mb.askyesno("전체 삭제", "시청 기록을 모두 삭제할까요?"):
+            return
+        self._save_history([])
+        self._hist_row_cache = []
+        self._refresh_history_list()
+
     def _load_history(self):
         try:
             p = os.path.join(self.APP_DIR, "history.json")

@@ -116,7 +116,7 @@ class LipSyncGUILayout:
                 else:
                     btn.config(bg=self.BG2, fg=self.TEXT_MID, font=("Consolas", TAB_F))
 
-        self._pip_btn.pack(side="right", padx=(0, P2), pady=(round(4*r), 0))
+        self._pip_btn.pack(side="right", padx=(0, P2), pady=(round(4*r), round(4*r)))
 
         self._tab_btn_sync = tk.Button(
             tab_inner, text="싱크 보정",

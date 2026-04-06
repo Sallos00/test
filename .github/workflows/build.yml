@@ -71,6 +71,13 @@ jobs:
         shell: cmd
 
       # main.py 는 PyInstaller 진입점 — 난독화 없이 복사
+      - name: 오류 로그 출력
+        if: always()
+        run: |
+          if exist pyarmor.error.log type pyarmor.error.log
+          if exist pyarmor.report.bug type pyarmor.report.bug
+        shell: cmd
+
       - name: main.py 복사
         run: copy main.py dist_obf\main.py
         shell: cmd

@@ -47,7 +47,8 @@ class LipSyncGUILogic:
         VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv",
                       ".ts", ".m2ts", ".flv", ".webm", ".m4v"}
         base = _strip_episode_number(title)
-        ep_num = _extract_episode_number(title)
+        ep_pat = re.search(r'제?(\d+)\s*[화편부회장권]', title)
+        ep_num = int(ep_pat.group(1)) if ep_pat else None
         found = None
         for dirpath, _, fnames in os.walk(d):
             for fname in fnames:
@@ -57,7 +58,9 @@ class LipSyncGUILogic:
                     found = os.path.join(dirpath, fname)
                     break
                 if _strip_episode_number(fname) == base:
-                    if ep_num is not None and _extract_episode_number(fname) == ep_num:
+                    fp = re.search(r'제?(\d+)\s*[화편부회장권]', fname)
+                    fn = int(fp.group(1)) if fp else None
+                    if ep_num is not None and fn == ep_num:
                         found = os.path.join(dirpath, fname)
                         break
             if found:
@@ -571,28 +574,3 @@ def _extract_potplayer_title(window_title: str) -> str:
         if title and title not in ("", "-"):
             return title
     return ""
-
-def _extract_episode_number(name: str):
-    """파일명/제목에서 화수 번호를 추출.
-    예: '디지몬 프론티어 17화' → 17
-        'Attack on Titan S01E03' → 3
-        'One Piece - 1050' → 1050
-    """
-    name = os.path.splitext(name)[0]
-    # 한글 화수: 17화, 제17화, 17편 등
-    m = re.search(r'제?(\d+)\s*[화편부회장권]', name)
-    if m:
-        return int(m.group(1))
-    # S01E03 형식
-    m = re.search(r'S\d{1,2}E(\d{1,3})', name, re.IGNORECASE)
-    if m:
-        return int(m.group(1))
-    # Ep.3, Episode 3
-    m = re.search(r'[Ee]p(?:isode)?[.\s]*(\d+)', name, re.IGNORECASE)
-    if m:
-        return int(m.group(1))
-    # 구분자 뒤 숫자: " - 1050", "_03", " 03"
-    m = re.search(r'(?:[-_\s])(\d{1,4})(?![\w가-힣])', name)
-    if m:
-        return int(m.group(1))
-    return None

@@ -304,6 +304,11 @@ class LipSyncGUILogic:
                                 f"[{_t.strftime('%H:%M:%S')}] 🔍 제목 감지: {title}")
                             self.root.after(
                                 0, lambda t=title: self.record_video_history(t))
+                        elif not title and buf.value:
+                            # 창 제목은 있는데 파싱 실패한 경우
+                            self._log_lines.append(
+                                f"[{_t.strftime('%H:%M:%S')}] ⚠ 제목 파싱 실패 (raw={buf.value!r})")
+                            was_running = True
                         else:
                             was_running = True
                     else:

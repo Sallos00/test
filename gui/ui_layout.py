@@ -302,20 +302,20 @@ class LipSyncGUILayout:
                      bg=self.BG, fg=self.TEXT_DIM),
             bg="BG", fg="TEXT_DIM").pack(side="left")
 
-        # 스크롤 영역: sb를 먼저 right에 pack → canvas가 나머지를 fill
-        # (tkinter에서 가장 확실하게 너비가 맞는 구조)
-        list_outer = tk.Frame(parent, bg=self.BG)
+        # 스크롤 영역: 로그 팝업과 동일 구조
+        # list_outer가 padx 담당, sb/canvas는 padx 없이 right/left로만 배치
+        list_outer = tk.Frame(parent, bg=self.BG, padx=P2)
         list_outer.pack(fill="both", expand=True, pady=(round(4*r), 0))
         reg(list_outer, bg="BG")
 
         sb = tk.Scrollbar(list_outer, orient="vertical",
                           bg=self.BG3, troughcolor=self.BG2,
                           relief="flat", width=10, bd=0)
-        sb.pack(side="right", fill="y", padx=(0, P2))
+        sb.pack(side="right", fill="y")
 
         canvas = tk.Canvas(list_outer, bg=self.BG, highlightthickness=0,
                            yscrollcommand=sb.set)
-        canvas.pack(side="left", fill="both", expand=True, padx=(P2, 0))
+        canvas.pack(side="left", fill="both", expand=True)
         sb.config(command=canvas.yview)
 
         self._hist_list_canvas = canvas

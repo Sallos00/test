@@ -47,8 +47,6 @@ class LipSyncGUILogic:
         VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv",
                       ".ts", ".m2ts", ".flv", ".webm", ".m4v"}
         base = _strip_episode_number(title)
-        nums = [s for s in title.split() if s.isdigit()]
-        ep = nums[0] if nums else None
         found = None
         for dirpath, _, fnames in os.walk(d):
             for fname in fnames:
@@ -57,9 +55,11 @@ class LipSyncGUILogic:
                 if os.path.splitext(fname)[0] == title or fname == title:
                     found = os.path.join(dirpath, fname)
                     break
-                if _strip_episode_number(fname) == base and ep and ep in fname:
-                    found = os.path.join(dirpath, fname)
-                    break
+                if _strip_episode_number(fname) == base:
+                    nums = [s for s in title.split() if s.isdigit()]
+                    if not nums or nums[0] in fname:
+                        found = os.path.join(dirpath, fname)
+                        break
             if found:
                 break
         if found:

@@ -48,19 +48,17 @@ class LipSyncGUILogic:
                       ".ts", ".m2ts", ".flv", ".webm", ".m4v"}
         base = _strip_episode_number(title)
         found = None
-        for fname in os.listdir(d):
-            fpath = os.path.join(d, fname)
-            if not os.path.isfile(fpath):
-                continue
-            if os.path.splitext(fname)[1].lower() not in VIDEO_EXTS:
-                continue
-            # 정확한 파일명 일치
-            if os.path.splitext(fname)[0] == title or fname == title:
-                found = fpath
-                break
-            # 숫자만 다른 경우
-            if _strip_episode_number(fname) == base:
-                found = fpath
+        for dirpath, _, fnames in os.walk(d):
+            for fname in fnames:
+                if os.path.splitext(fname)[1].lower() not in VIDEO_EXTS:
+                    continue
+                if os.path.splitext(fname)[0] == title or fname == title:
+                    found = os.path.join(dirpath, fname)
+                    break
+                if _strip_episode_number(fname) == base:
+                    found = os.path.join(dirpath, fname)
+                    break
+            if found:
                 break
         if found:
             try: os.startfile(found)

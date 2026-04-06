@@ -307,21 +307,13 @@ class LipSyncGUILayout:
         scroll_outer.pack(fill="both", expand=True, pady=(round(4*r), 0))
         reg(scroll_outer, bg="BG")
 
-        # 오른쪽 마진 스페이서 (P2) → 먼저 pack해야 sb 오른쪽에 위치
+        # 좌우 마진 스페이서 (P2)
         tk.Frame(scroll_outer, bg=self.BG, width=P2).pack(side="right", fill="y")
-
-        sb = tk.Scrollbar(scroll_outer, orient="vertical",
-                          bg=self.BG3, troughcolor=self.BG2,
-                          relief="flat", width=10, bd=0)
-        sb.pack(side="right", fill="y")
-
-        # 왼쪽 마진 스페이서 (P2)
         tk.Frame(scroll_outer, bg=self.BG, width=P2).pack(side="left", fill="y")
 
-        canvas = tk.Canvas(scroll_outer, bg=self.BG, highlightthickness=0,
-                           yscrollcommand=sb.set)
+        # 스크롤바 없이 캔버스만 (마우스휠로만 스크롤)
+        canvas = tk.Canvas(scroll_outer, bg=self.BG, highlightthickness=0)
         canvas.pack(side="left", fill="both", expand=True)
-        sb.config(command=canvas.yview)
 
         self._hist_list_canvas = canvas
         self._hist_list_frame  = tk.Frame(canvas, bg=self.BG)

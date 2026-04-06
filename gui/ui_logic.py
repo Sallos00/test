@@ -224,7 +224,10 @@ class LipSyncGUILogic:
         records = self._load_history()
         records = [r for r in records if r.get("title") != title]
         self._save_history(records)
-        self._hist_row_cache = []
+        # 캐시 초기화 없이 바로 갱신 — _refresh_history_list 내부의
+        # 캐시 재활용 로직이 항목 수 감소(마지막 행 pack_forget)를 처리함.
+        # 캐시를 []로 리셋하면 기존 pack()된 Frame이 frame에 잔류하여
+        # 새 위젯과 중복 표시되는 버그가 발생하므로 제거.
         self._refresh_history_list()
 
     def _hist_clear_all(self):
@@ -232,6 +235,12 @@ class LipSyncGUILogic:
         if not mb.askyesno("전체 삭제", "시청 기록을 모두 삭제할까요?"):
             return
         self._save_history([])
+        # 기존 캐시 위젯을 명시적으로 destroy하여 frame에 잔류하지 않도록 함
+        for cached in getattr(self, "_hist_row_cache", []):
+            try:
+                cached["row"].destroy()
+            except Exception:
+                pass
         self._hist_row_cache = []
         self._refresh_history_list()
 

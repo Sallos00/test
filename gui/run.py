@@ -237,29 +237,17 @@ class LipSyncGUIRun:
         # 기록 기준 1: 재생 감지 팝업 발생 시점에 시청 기록 저장
         # (title_watcher와 중복돼도 record_video_history 내부에서 타임스탬프 갱신만 함)
         try:
-            import ctypes as _ct, time as _t2
+            import ctypes as _ct
             _u32 = _ct.windll.user32
             _buf = _ct.create_unicode_buffer(512)
             _hwnd = find_potplayer_hwnd()
             if _hwnd:
                 _u32.GetWindowTextW(_hwnd, _buf, 512)
-                _raw = _buf.value
-                _title = _extract_potplayer_title(_raw)
+                _title = _extract_potplayer_title(_buf.value)
                 if _title:
                     self.root.after(0, lambda t=_title: self.record_video_history(t))
-                else:
-                    self._log_lines.append(
-                        f"[{_t2.strftime('%H:%M:%S')}] ⚠ 재생감지: 제목 추출 실패 (raw={_raw!r})")
-            else:
-                self._log_lines.append(
-                    f"[{_t2.strftime('%H:%M:%S')}] ⚠ 재생감지: PotPlayer 핸들 없음")
-        except Exception as _e:
-            try:
-                import time as _t2
-                self._log_lines.append(
-                    f"[{_t2.strftime('%H:%M:%S')}] ❌ 재생감지 시청기록 오류: {_e}")
-            except Exception:
-                pass
+        except Exception:
+            pass
 
         btn_f = tk.Frame(popup, bg=self.BG, pady=round(16*r))
         btn_f.pack()

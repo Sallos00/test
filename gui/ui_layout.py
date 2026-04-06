@@ -236,8 +236,8 @@ class LipSyncGUILayout:
         self._tab_frames["history"] = hist_frame
         self._build_history_tab(hist_frame, r, P, P2, MONO, MONO_S)
 
-        # 싱크 탭 먼저 표시
-        _switch_tab("sync")
+        # 시청 기록 탭 먼저 표시
+        _switch_tab("history")
         self.root.after(1000, self._poll_playback_info)
         self.root.after(500,  self._start_title_watcher)
 

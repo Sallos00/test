@@ -382,6 +382,27 @@ class LipSyncGUILogic:
         except Exception: pass
 
 
+
+def _strip_series_name(name: str) -> str:
+    """파일명/제목에서 화수 정보만 제거해 시리즈명을 추출.
+    예: '디지몬 어드벤처 1화' → '디지몬 어드벤처'
+        'Attack on Titan S01E03' → 'attack on titan'
+        '[SubGroup] One Piece - 1050' → 'one piece'
+    """
+    name = os.path.splitext(name)[0]
+    name = re.sub(r'^[\[\(][^\]\)]{1,30}[\]\)]\s*', '', name)
+    name = re.sub(r'[\[\(](?:1080|720|480|2160|4K|BluRay|WEB|HDTV|HEVC|x264|x265|AAC|AC3)[^\]\)]*[\]\)]', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\bS\d{1,2}E\d{1,3}\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b[Ee]p(?:isode)?[.\s]*\d+\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'제?\d+\s*[화편부회장권화]', '', name)
+    name = re.sub(r'(?<![\w가-힣])[-_\s]*\d{1,4}(?![\w가-힣])', '', name)
+    name = re.sub(r'[\s_\-\.]+', ' ', name).strip()
+    return name.lower()
+
+def _strip_episode_number(name: str) -> str:
+    """하위호환용 alias."""
+    return _strip_series_name(name)
+
 def _extract_potplayer_title(window_title: str) -> str:
     """PotPlayer 창 제목에서 동영상 파일명을 추출.
     지원 형식:
@@ -391,13 +412,11 @@ def _extract_potplayer_title(window_title: str) -> str:
     """
     if not window_title:
         return ""
-    # 일반 형식: "파일명 - PotPlayer[64]" 또는 "파일명 - 팟플레이어[64]"
     m = re.match(r'^(.+?)\s*-\s*(?:PotPlayer(?:64)?|팟플레이어(?:64)?)(?:\s.*)?$', window_title, re.IGNORECASE)
     if m:
         title = m.group(1).strip()
         if title and title not in ("", "-"):
             return title
-    # 역순 형식: "PotPlayer[64] - 파일명" 또는 "팟플레이어[64] - 파일명"
     m = re.match(r'^(?:PotPlayer(?:64)?|팟플레이어(?:64)?)\s*-\s*(.+)$', window_title, re.IGNORECASE)
     if m:
         title = m.group(1).strip()

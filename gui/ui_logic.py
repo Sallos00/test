@@ -103,44 +103,87 @@ class LipSyncGUILogic:
                 return
         except Exception:
             return
-        frame = self._hist_list_frame
-        # 깜빡임 방지: 스크롤 위치 보존 후 재생성
-        canvas = self._hist_list_canvas
-        try:
-            ypos = canvas.yview()[0]
-        except Exception:
-            ypos = 0.0
-        frame.update_idletasks()
-        for w in frame.winfo_children():
-            w.destroy()
-        cw = canvas.winfo_width()
-        if cw > 1:
-            canvas.itemconfig(self._hist_canvas_window, width=cw)
 
-        records  = self._load_history()
-        r        = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-        has_dir  = bool(getattr(self, "_hist_video_dir", ""))
+        records = self._load_history()
+        r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        has_dir = bool(getattr(self, "_hist_video_dir", ""))
 
-        if not records:
-            tk.Label(frame, text="— 시청 기록 없음 —",
-                     font=("Consolas", self.F_MONO_S),
-                     bg=self.BG, fg=self.TEXT_DIM,
-                     pady=round(12*r)).pack()
+        import os as _os
+
+        # 표시할 데이터 목록 (최신순)
+        entries = list(reversed(records))
+
+        # 캐시된 행 위젯 목록 (재활용)
+        if not hasattr(self, "_hist_row_cache"):
+            self._hist_row_cache = []
+
+        cache     = self._hist_row_cache
+        frame     = self._hist_list_frame
+        canvas    = self._hist_list_canvas
+
+        # ── 빈 상태 레이블 처리 ──────────────────────────────────────────────
+        empty_lbl = getattr(self, "_hist_empty_lbl", None)
+        if not entries:
+            # 캐시 행 숨기기
+            for cached in cache:
+                cached["row"].pack_forget()
+            if empty_lbl is None or not empty_lbl.winfo_exists():
+                self._hist_empty_lbl = tk.Label(
+                    frame, text="— 시청 기록 없음 —",
+                    font=("Consolas", self.F_MONO_S),
+                    bg=self.BG, fg=self.TEXT_DIM,
+                    pady=round(12*r))
+                self._hist_empty_lbl.pack()
+            else:
+                self._hist_empty_lbl.pack()
+            canvas.configure(scrollregion=canvas.bbox("all"))
             return
+        else:
+            if empty_lbl is not None:
+                try:
+                    empty_lbl.pack_forget()
+                except Exception:
+                    pass
 
-        for i, rec in enumerate(reversed(records)):
-            title   = rec.get("title", "")
-            ts      = rec.get("timestamp", "")
-            row_bg  = self.BG2 if i % 2 == 0 else self.BG3
+        # ── 캐시 행 부족하면 새로 생성 ──────────────────────────────────────
+        while len(cache) < len(entries):
+            idx     = len(cache)
+            row_bg  = self.BG2 if idx % 2 == 0 else self.BG3
+            btn_bg  = self.BG3 if idx % 2 == 0 else self.BG2
 
-            row = tk.Frame(frame, bg=row_bg, pady=round(5*r))
-            row.pack(fill="x", pady=(0, 1))
-
-            info = tk.Frame(row, bg=row_bg)
+            row  = tk.Frame(frame, bg=row_bg, pady=round(5*r))
+            info = tk.Frame(row,  bg=row_bg)
             info.pack(side="left", fill="x", expand=True, padx=(round(8*r), 0))
 
-            # 확장자 제거 후 ' - ' 기준으로 첫 번째 줄 / 나머지 줄 분리
-            import os as _os
+            title_lbl = tk.Label(info, text="",
+                                 font=("Consolas", self.F_MONO_S, "bold"),
+                                 bg=row_bg, fg=self.TEXT,
+                                 anchor="w", justify="left")
+            title_lbl.pack(anchor="w")
+
+            ts_lbl = tk.Label(info, text="",
+                              font=("Consolas", max(6, self.F_MONO_S-1)),
+                              bg=row_bg, fg=self.TEXT_DIM,
+                              anchor="w")
+            ts_lbl.pack(anchor="w")
+
+            btn = tk.Button(row, text="▶ 이어보기",
+                            font=("Consolas", max(7, round(8*r)), "bold"),
+                            bg=btn_bg, fg=self.ACCENT,
+                            activebackground=self.BORDER,
+                            relief="flat", cursor="hand2",
+                            padx=round(6*r), pady=round(2*r))
+            btn.pack(side="right", anchor="center", padx=(0, round(8*r)))
+
+            cache.append({"row": row, "title_lbl": title_lbl,
+                          "ts_lbl": ts_lbl, "btn": btn})
+
+        # ── 기존 행 내용만 업데이트 (위젯 재활용) ───────────────────────────
+        for i, rec in enumerate(entries):
+            title  = rec.get("title", "")
+            ts     = rec.get("timestamp", "")
+            cached = cache[i]
+
             display_title = _os.path.splitext(title)[0]
             if " - " in display_title:
                 first, rest = display_title.split(" - ", 1)
@@ -148,28 +191,25 @@ class LipSyncGUILogic:
             else:
                 display_text = display_title
 
-            tk.Label(info, text=display_text,
-                     font=("Consolas", self.F_MONO_S, "bold"),
-                     bg=row_bg, fg=self.TEXT,
-                     anchor="w",
-                     justify="left").pack(anchor="w")
-            if ts:
-                tk.Label(info, text=ts,
-                         font=("Consolas", max(6, self.F_MONO_S-1)),
-                         bg=row_bg, fg=self.TEXT_DIM,
-                         anchor="w").pack(anchor="w")
-
-            btn_bg = self.BG3 if i % 2 == 0 else self.BG2
-            tk.Button(
-                row, text="▶ 이어보기",
-                font=("Consolas", max(7, round(8*r)), "bold"),
-                bg=btn_bg, fg=self.ACCENT,
-                activebackground=self.BORDER,
-                relief="flat", cursor="hand2",
-                padx=round(6*r), pady=round(2*r),
+            cached["title_lbl"].config(text=display_text)
+            cached["ts_lbl"].config(text=ts if ts else "")
+            cached["btn"].config(
                 state="normal" if has_dir else "disabled",
-                command=lambda t=title: (self._hist_resume(t), self._switch_tab_fn("sync") if hasattr(self, "_switch_tab_fn") else None)
-            ).pack(side="right", anchor="center", padx=(0, round(8*r)))
+                command=lambda t=title: (
+                    self._hist_resume(t),
+                    self._switch_tab_fn("sync") if hasattr(self, "_switch_tab_fn") else None
+                )
+            )
+            cached["row"].pack(fill="x", pady=(0, 1))
+
+        # ── 남는 캐시 행은 숨기기 ────────────────────────────────────────────
+        for i in range(len(entries), len(cache)):
+            cache[i]["row"].pack_forget()
+
+        cw = canvas.winfo_width()
+        if cw > 1:
+            canvas.itemconfig(self._hist_canvas_window, width=cw)
+        canvas.configure(scrollregion=canvas.bbox("all"))
 
     # ── history.json 로드/저장 ────────────────────────────────────────────────
     def _load_history(self):

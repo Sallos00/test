@@ -105,11 +105,11 @@ class LipSyncGUILogic:
             ts      = rec.get("timestamp", "")
             row_bg  = self.BG2 if i % 2 == 0 else self.BG3
 
-            row = tk.Frame(frame, bg=row_bg, padx=round(8*r), pady=round(5*r))
+            row = tk.Frame(frame, bg=row_bg, pady=round(5*r))
             row.pack(fill="x", pady=(0, 1))
 
             info = tk.Frame(row, bg=row_bg)
-            info.pack(side="left", fill="x", expand=True)
+            info.pack(side="left", fill="x", expand=True, padx=(round(8*r), 0))
 
             # 확장자 제거 후 ' - ' 기준으로 첫 번째 줄 / 나머지 줄 분리
             import os as _os

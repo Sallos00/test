@@ -13,7 +13,7 @@ from app_icon import apply_to_root_window
 from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip, pip_send
 
 
-class LipSyncGUILayout:
+class LipSyncGUILogic2:
 
     def _tray_show(self, icon=None, item=None):
         self.root.after(0, self.root.deiconify)

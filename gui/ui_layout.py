@@ -302,21 +302,19 @@ class LipSyncGUILayout:
                      bg=self.BG, fg=self.TEXT_DIM),
             bg="BG", fg="TEXT_DIM").pack(side="left")
 
-        # 스크롤 영역
-        # 스크롤바를 parent에 직접 배치해 창 테두리에 잘리지 않도록 함
-        sb = tk.Scrollbar(parent, orient="vertical",
-                          bg=self.BG3, troughcolor=self.BG2,
-                          relief="flat", width=10, bd=0)
-        sb.pack(side="right", fill="y", padx=(0, P2))
-
+        # 스크롤 영역: list_outer 전체를 canvas로 채우고 스크롤바는 place로 우측에 올림
         list_outer = tk.Frame(parent, bg=self.BG)
-        list_outer.pack(fill="both", expand=True, padx=(P2, 0), pady=(round(4*r), 0))
+        list_outer.pack(fill="both", expand=True, padx=P2, pady=(round(4*r), 0))
         reg(list_outer, bg="BG")
 
-        canvas = tk.Canvas(list_outer, bg=self.BG, highlightthickness=0,
-                           yscrollcommand=sb.set)
+        canvas = tk.Canvas(list_outer, bg=self.BG, highlightthickness=0)
         canvas.pack(fill="both", expand=True)
-        sb.config(command=canvas.yview)
+
+        sb = tk.Scrollbar(list_outer, orient="vertical",
+                          bg=self.BG3, troughcolor=self.BG2,
+                          relief="flat", width=10, bd=0,
+                          command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
 
         self._hist_list_canvas = canvas
         self._hist_list_frame  = tk.Frame(canvas, bg=self.BG)
@@ -325,9 +323,15 @@ class LipSyncGUILayout:
 
         def _on_frame_cfg(e):
             canvas.configure(scrollregion=canvas.bbox("all"))
+
         def _on_canvas_cfg(e):
-            canvas.itemconfig(self._hist_canvas_window, width=e.width)
-            self._hist_list_frame.config(width=e.width)
+            # 스크롤바를 canvas 오른쪽 끝에 place로 고정
+            sb.place(in_=canvas, relx=1.0, rely=0, anchor="ne",
+                     relheight=1.0, width=10)
+            # canvas window 너비는 스크롤바 너비를 뺀 값
+            inner_w = e.width - 10
+            canvas.itemconfig(self._hist_canvas_window, width=inner_w)
+            self._hist_list_frame.config(width=inner_w)
 
         self._hist_list_frame.bind("<Configure>", _on_frame_cfg)
         canvas.bind("<Configure>", _on_canvas_cfg)

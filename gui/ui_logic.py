@@ -92,6 +92,9 @@ class LipSyncGUILogic:
         records  = self._load_history()
         r        = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         has_dir  = bool(getattr(self, "_hist_video_dir", ""))
+        # 버튼 너비 + row padding을 빼서 wraplength를 canvas 너비에 맞게 동적 계산
+        btn_w  = round(70 * r)
+        wrap_w = max(80, (cw if cw > 1 else round(180*r)) - btn_w - round(24*r))
 
         if not records:
             tk.Label(frame, text="— 시청 기록 없음 —",
@@ -115,7 +118,7 @@ class LipSyncGUILogic:
                      font=("Consolas", self.F_MONO_S, "bold"),
                      bg=row_bg, fg=self.TEXT,
                      anchor="w",
-                     wraplength=round(190*r),
+                     wraplength=wrap_w,
                      justify="left").pack(anchor="w")
             if ts:
                 tk.Label(info, text=ts,
@@ -304,11 +307,6 @@ class LipSyncGUILogic:
                                 f"[{_t.strftime('%H:%M:%S')}] 🔍 제목 감지: {title}")
                             self.root.after(
                                 0, lambda t=title: self.record_video_history(t))
-                        elif not title and buf.value:
-                            # 창 제목은 있는데 파싱 실패한 경우
-                            self._log_lines.append(
-                                f"[{_t.strftime('%H:%M:%S')}] ⚠ 제목 파싱 실패 (raw={buf.value!r})")
-                            was_running = True
                         else:
                             was_running = True
                     else:
@@ -555,14 +553,14 @@ def _extract_potplayer_title(window_title: str) -> str:
     """
     if not window_title:
         return ""
-    # 일반 형식: "파일명 - PotPlayer[64]"
-    m = re.match(r'^(.+?)\s*-\s*PotPlayer(?:64)?(?:\s.*)?$', window_title, re.IGNORECASE)
+    # 일반 형식: "파일명 - PotPlayer[64]" 또는 "파일명 - 팟플레이어[64]"
+    m = re.match(r'^(.+?)\s*-\s*(?:PotPlayer(?:64)?|팟플레이어(?:64)?)(?:\s.*)?$', window_title, re.IGNORECASE)
     if m:
         title = m.group(1).strip()
         if title and title not in ("", "-"):
             return title
-    # 역순 형식: "PotPlayer[64] - 파일명"
-    m = re.match(r'^PotPlayer(?:64)?\s*-\s*(.+)$', window_title, re.IGNORECASE)
+    # 역순 형식: "PotPlayer[64] - 파일명" 또는 "팟플레이어[64] - 파일명"
+    m = re.match(r'^(?:PotPlayer(?:64)?|팟플레이어(?:64)?)\s*-\s*(.+)$', window_title, re.IGNORECASE)
     if m:
         title = m.group(1).strip()
         if title and title not in ("", "-"):

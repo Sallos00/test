@@ -59,7 +59,7 @@ jobs:
 
       - name: 난독화 (gui 패키지)
         run: |
-          pyarmor gen -d --output dist_obf\gui ^
+          pyarmor -d gen --output dist_obf\gui ^
             gui\__init__.py ^
             gui\base.py ^
             gui\ui_layout.py ^

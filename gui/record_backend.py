@@ -504,7 +504,7 @@ class _AudioRecorder:
                                 break
                             if pkt == 0:
                                 break
-                            data, num_frames, flg, qpc_ts = get_buffer(cap)
+                            data, num_frames, flg, _dp, qpc_ts = get_buffer(cap)
                             if num_frames > 0:
                                 if not (flg & AUDCLNT_BUFFERFLAGS_SILENT) and data.value:
                                     if qpc_ts:

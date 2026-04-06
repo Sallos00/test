@@ -302,7 +302,7 @@ class LipSyncGUILayout:
                      bg=self.BG, fg=self.TEXT_DIM),
             bg="BG", fg="TEXT_DIM").pack(side="left")
 
-        # 스크롤 영역: sb를 padx 바깥에 배치해 잘림 방지
+        # 스크롤 영역: scroll_outer에 padx=P2 양쪽, sb/canvas 직접 배치
         scroll_outer = tk.Frame(parent, bg=self.BG)
         scroll_outer.pack(fill="both", expand=True, padx=P2, pady=(round(4*r), 0))
         reg(scroll_outer, bg="BG")
@@ -312,13 +312,9 @@ class LipSyncGUILayout:
                           relief="flat", width=10, bd=0)
         sb.pack(side="right", fill="y")
 
-        list_outer = tk.Frame(scroll_outer, bg=self.BG)
-        list_outer.pack(side="left", fill="both", expand=True, padx=(P2, 0))
-        reg(list_outer, bg="BG")
-
-        canvas = tk.Canvas(list_outer, bg=self.BG, highlightthickness=0,
+        canvas = tk.Canvas(scroll_outer, bg=self.BG, highlightthickness=0,
                            yscrollcommand=sb.set)
-        canvas.pack(fill="both", expand=True)
+        canvas.pack(side="left", fill="both", expand=True)
         sb.config(command=canvas.yview)
 
         self._hist_list_canvas = canvas

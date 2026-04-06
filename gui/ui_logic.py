@@ -572,7 +572,7 @@ def _extract_potplayer_title(window_title: str) -> str:
             return title
     return ""
 
-def _extract_episode_number(name: str) -> int | None:
+def _extract_episode_number(name: str):
     """파일명/제목에서 화수 번호를 추출.
     예: '디지몬 프론티어 17화' → 17
         'Attack on Titan S01E03' → 3

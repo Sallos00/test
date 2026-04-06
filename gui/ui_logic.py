@@ -48,6 +48,7 @@ class LipSyncGUILogic:
                       ".ts", ".m2ts", ".flv", ".webm", ".m4v"}
         base = _strip_episode_number(title)
         found = None
+        _te = re.search(r'제?(\d+)\s*[화편부]', title)
         for dirpath, _, fnames in os.walk(d):
             for fname in fnames:
                 if os.path.splitext(fname)[1].lower() not in VIDEO_EXTS:
@@ -56,8 +57,10 @@ class LipSyncGUILogic:
                     found = os.path.join(dirpath, fname)
                     break
                 if _strip_episode_number(fname) == base:
-                    found = os.path.join(dirpath, fname)
-                    break
+                    _fe = re.search(r'제?(\d+)\s*[화편부]', fname)
+                    if _te and _fe and _te.group(1) == _fe.group(1):
+                        found = os.path.join(dirpath, fname)
+                        break
             if found:
                 break
         if found:

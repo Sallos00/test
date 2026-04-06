@@ -213,6 +213,9 @@ class LipSyncGUIRun:
                 return
         except Exception:
             return
+        # 재생 감지 시 싱크 보정 탭으로 자동 전환
+        if hasattr(self, "_switch_tab_fn"):
+            self._switch_tab_fn("sync")
 
         popup = tk.Toplevel(self.root)
         popup.title("Auto Sync")

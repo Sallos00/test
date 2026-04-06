@@ -9,7 +9,7 @@ import ctypes
 import ctypes.wintypes
 import tkinter as tk
 import winreg
-from multiprocessing import Process, Queue, Value
+from multiprocessing import Process, Queue, Value, Array, Array
 
 import auth as _auth_module
 
@@ -46,8 +46,7 @@ class LipSyncGUIRun:
             self._om_shared_pos  = Value(ctypes.c_longlong, -1)
             self._om_shared_dur  = Value(ctypes.c_longlong, -1)
 
-            from multiprocessing import Manager
-            self._om_stream_anchor = Manager().list([0, 48000, 1])
+            self._om_stream_anchor = Array(ctypes.c_double, [0, 48000, 1])
 
             self._om_processes = []
             for target, args in [
@@ -290,8 +289,7 @@ class LipSyncGUIRun:
 
         # 오디오 스트림 기준점 — P2가 첫 패킷에서 기록, P1이 읽어서 타임스탬프 통일
         # [qp_origin, sr, freq] : 0이면 미확립
-        from multiprocessing import Manager
-        self._stream_anchor = Manager().list([0, 48000, 1])
+        self._stream_anchor = Array(ctypes.c_double, [0, 48000, 1])
 
         # 싱크 ON 상태 전용 로그 큐 (P2 → GUI 직접 전달)
         self._main_log_queue = Queue(maxsize=200)
@@ -320,9 +318,12 @@ class LipSyncGUIRun:
     def _stop_processes(self):
         self._running = False
         self.stop_flag.value = True
-        for p in self._processes:
-            p.join(timeout=2)
-            if p.is_alive(): p.terminate()
+        # 병렬 join으로 대기 시간 단축
+        procs = list(self._processes)
+        ts = [threading.Thread(target=lambda p=p: (p.join(timeout=2), p.terminate() if p.is_alive() else None), daemon=True)
+              for p in procs]
+        for t in ts: t.start()
+        for t in ts: t.join()
         self._processes.clear()
         if hasattr(self, "_shared_pos"): self._shared_pos.value = -1
         if hasattr(self, "_shared_dur"): self._shared_dur.value = -1
@@ -726,6 +727,21 @@ class LipSyncGUIRun:
         if hasattr(self, "_popup_after_id"):
             try: self.root.after_cancel(self._popup_after_id)
             except Exception: pass
+        # 열려 있는 모든 Toplevel 팝업 닫기
+        try:
+            for w in self.root.winfo_children():
+                if isinstance(w, tk.Toplevel):
+                    try: w.destroy()
+                    except Exception: pass
+        except Exception: pass
+        # 오버레이 정리
+        try:
+            from gui.record_backend import _active_overlays
+            for ov in list(_active_overlays):
+                try: ov.destroy()
+                except Exception: pass
+            _active_overlays.clear()
+        except Exception: pass
         self._save_pos()
         self._stop_processes()
         self._stop_oped_monitor()   # oped 모니터도 종료

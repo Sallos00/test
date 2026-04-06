@@ -195,10 +195,7 @@ class LipSyncGUILogic:
             cached["ts_lbl"].config(text=ts if ts else "")
             cached["btn"].config(
                 state="normal" if has_dir else "disabled",
-                command=lambda t=title: (
-                    self._hist_resume(t),
-                    self._switch_tab_fn("sync") if hasattr(self, "_switch_tab_fn") else None
-                )
+                command=lambda t=title: self._hist_resume(t)
             )
             cached["row"].pack(fill="x", pady=(0, 1))
 

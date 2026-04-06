@@ -302,15 +302,21 @@ class LipSyncGUILayout:
                      bg=self.BG, fg=self.TEXT_DIM),
             bg="BG", fg="TEXT_DIM").pack(side="left")
 
-        # 스크롤 영역: scroll_outer에 padx=P2 양쪽, sb/canvas 직접 배치
+        # 스크롤 영역: 스페이서 Frame으로 좌우 마진을 명시적으로 보장
         scroll_outer = tk.Frame(parent, bg=self.BG)
-        scroll_outer.pack(fill="both", expand=True, padx=P2, pady=(round(4*r), 0))
+        scroll_outer.pack(fill="both", expand=True, pady=(round(4*r), 0))
         reg(scroll_outer, bg="BG")
+
+        # 오른쪽 마진 스페이서 (P2) → 먼저 pack해야 sb 오른쪽에 위치
+        tk.Frame(scroll_outer, bg=self.BG, width=P2).pack(side="right", fill="y")
 
         sb = tk.Scrollbar(scroll_outer, orient="vertical",
                           bg=self.BG3, troughcolor=self.BG2,
                           relief="flat", width=10, bd=0)
         sb.pack(side="right", fill="y")
+
+        # 왼쪽 마진 스페이서 (P2)
+        tk.Frame(scroll_outer, bg=self.BG, width=P2).pack(side="left", fill="y")
 
         canvas = tk.Canvas(scroll_outer, bg=self.BG, highlightthickness=0,
                            yscrollcommand=sb.set)

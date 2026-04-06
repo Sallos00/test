@@ -47,25 +47,44 @@ class LipSyncGUILogic:
         VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv",
                       ".ts", ".m2ts", ".flv", ".webm", ".m4v"}
         base = _strip_episode_number(title)
+        # 제목에서 화수 숫자 추출: "17화", "17편", "S01E17", 순수 숫자 등
+        ep_num = None
+        m = re.search(r'제?(\d+)\s*[화편부회장권]', title)
+        if not m:
+            m = re.search(r'[Ss]\d{1,2}[Ee](\d{1,3})', title)
+        if not m:
+            nums = re.findall(r'(?<!\d)(\d+)(?!\d)', title)
+            if nums:
+                m_val = nums[-1]
+                ep_num = m_val
+        if m and ep_num is None:
+            ep_num = m.group(1)
+
         found = None
+        exact_match = None
+        series_match = None
+
         for dirpath, _, fnames in os.walk(d):
             for fname in fnames:
                 if os.path.splitext(fname)[1].lower() not in VIDEO_EXTS:
                     continue
-                if os.path.splitext(fname)[0] == title or fname == title:
-                    found = os.path.join(dirpath, fname)
+                fname_noext = os.path.splitext(fname)[0]
+                # 1순위: 완전 일치
+                if fname_noext == title or fname == title:
+                    exact_match = os.path.join(dirpath, fname)
                     break
-                if _strip_episode_number(fname) == base:
-                    ep = ""
-                    for s in title.split():
-                        if s.isdigit():
-                            ep = s
-                            break
-                    if ep == "" or ep in fname:
-                        found = os.path.join(dirpath, fname)
-                        break
+                # 2순위: 같은 시리즈 + 화수 일치
+                if _strip_episode_number(fname) == base and ep_num is not None:
+                    # fname 안에서 같은 위치의 숫자가 ep_num과 일치하는지 확인
+                    fname_nums = re.findall(r'(?<!\d)(\d+)(?!\d)', fname_noext)
+                    if ep_num in fname_nums:
+                        series_match = os.path.join(dirpath, fname)
+            if exact_match:
+                break
             if found:
                 break
+
+        found = exact_match or series_match
         if found:
             try: os.startfile(found)
             except Exception: pass

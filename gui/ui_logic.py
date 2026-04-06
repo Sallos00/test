@@ -106,7 +106,7 @@ class LipSyncGUILogic:
             row_bg  = self.BG2 if i % 2 == 0 else self.BG3
 
             row = tk.Frame(frame, bg=row_bg, pady=round(5*r))
-            row.pack(fill="x", pady=(0, 1), padx=(0, round(4*r)))
+            row.pack(fill="x", pady=(0, 1))
 
             info = tk.Frame(row, bg=row_bg)
             info.pack(side="left", fill="x", expand=True, padx=(round(8*r), 0))

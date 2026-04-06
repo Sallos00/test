@@ -104,10 +104,15 @@ class LipSyncGUILogic:
         except Exception:
             return
         frame = self._hist_list_frame
+        # 깜빡임 방지: 스크롤 위치 보존 후 재생성
+        canvas = self._hist_list_canvas
+        try:
+            ypos = canvas.yview()[0]
+        except Exception:
+            ypos = 0.0
+        frame.update_idletasks()
         for w in frame.winfo_children():
             w.destroy()
-        # canvas 너비를 frame에 즉시 반영 (Configure 이벤트보다 먼저 그려지는 경우 대비)
-        canvas = self._hist_list_canvas
         cw = canvas.winfo_width()
         if cw > 1:
             canvas.itemconfig(self._hist_canvas_window, width=cw)
@@ -163,7 +168,7 @@ class LipSyncGUILogic:
                 relief="flat", cursor="hand2",
                 padx=round(6*r), pady=round(2*r),
                 state="normal" if has_dir else "disabled",
-                command=lambda t=title: self._hist_resume(t)
+                command=lambda t=title: (self._hist_resume(t), self._switch_tab_fn("sync") if hasattr(self, "_switch_tab_fn") else None)
             ).pack(side="right", anchor="center", padx=(0, round(8*r)))
 
     # ── history.json 로드/저장 ────────────────────────────────────────────────

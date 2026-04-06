@@ -477,6 +477,192 @@ class LipSyncGUILogic:
         try: self.root.unbind("<Button-1>")
         except Exception: pass
 
+    # ── 로그 팝업 ─────────────────────────────────────────────────────────────
+    def _open_log_popup(self):
+        """내부 로그를 스크롤 가능한 텍스트 팝업으로 표시."""
+        import collections
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        pw = round(520 * r)
+        ph = round(360 * r)
+
+        popup = tk.Toplevel(self.root)
+        popup.title("로그")
+        popup.resizable(True, True)
+        popup.configure(bg=self.BG)
+        self._place_popup(popup, pw, ph)
+
+        F_MONO = max(7, round(8 * r))
+        PAD    = round(10 * r)
+
+        # 헤더
+        hdr = tk.Frame(popup, bg=self.BG, padx=PAD, pady=round(6 * r))
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="📋 로그",
+                 font=("Segoe UI", max(9, round(10 * r)), "bold"),
+                 bg=self.BG, fg=self.TEXT).pack(side="left")
+
+        btn_kw = dict(font=("Consolas", F_MONO, "bold"), relief="flat",
+                      cursor="hand2", padx=round(8 * r), pady=round(2 * r),
+                      activebackground=self.BORDER)
+
+        def do_clear():
+            self._log_lines.clear()
+            _refresh_text()
+
+        tk.Button(hdr, text="🗑 지우기", bg=self.BG3, fg=self.TEXT_MID,
+                  command=do_clear, **btn_kw).pack(side="right")
+
+        tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x")
+
+        # 텍스트 영역
+        txt_frame = tk.Frame(popup, bg=self.BG)
+        txt_frame.pack(fill="both", expand=True, padx=PAD, pady=PAD)
+
+        scrollbar = tk.Scrollbar(txt_frame)
+        scrollbar.pack(side="right", fill="y")
+
+        txt = tk.Text(
+            txt_frame,
+            font=("Consolas", F_MONO),
+            bg=self.BG2, fg=self.TEXT,
+            insertbackground=self.ACCENT,
+            relief="flat", bd=0,
+            wrap="word",
+            yscrollcommand=scrollbar.set,
+            state="disabled",
+        )
+        txt.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=txt.yview)
+
+        def _refresh_text():
+            if not popup.winfo_exists():
+                return
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            lines = list(self._log_lines)
+            if lines:
+                txt.insert("end", "\n".join(lines))
+            else:
+                txt.insert("end", "— 로그 없음 —")
+            txt.config(state="disabled")
+            txt.see("end")
+
+        _refresh_text()
+
+        # 1초마다 자동 갱신
+        _after_id = [None]
+        def _auto_refresh():
+            if not popup.winfo_exists():
+                return
+            _refresh_text()
+            _after_id[0] = popup.after(1000, _auto_refresh)
+
+        _after_id[0] = popup.after(1000, _auto_refresh)
+
+        def on_close():
+            if _after_id[0]:
+                try: popup.after_cancel(_after_id[0])
+                except Exception: pass
+            try: popup.destroy()
+            except Exception: pass
+
+        popup.protocol("WM_DELETE_WINDOW", on_close)
+        tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x")
+        tk.Button(popup, text="닫기",
+                  font=("Consolas", F_MONO, "bold"),
+                  bg=self.BG3, fg=self.TEXT,
+                  activebackground=self.BORDER,
+                  relief="flat", cursor="hand2",
+                  padx=round(16 * r), pady=round(4 * r),
+                  command=on_close).pack(pady=(0, PAD))
+
+    # ── 설정 팝업 ─────────────────────────────────────────────────────────────
+    def _open_settings(self):
+        """테마·크기·시작프로그램·자동시작 설정 팝업."""
+        r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        pw = round(300 * r)
+        ph = round(300 * r)
+
+        popup = tk.Toplevel(self.root)
+        popup.title("설정")
+        popup.resizable(False, False)
+        popup.configure(bg=self.BG)
+        popup.grab_set()
+        self._place_popup(popup, pw, ph)
+
+        F_TITLE = max(9, round(10 * r))
+        F_MONO  = max(8, round(9  * r))
+        PAD     = round(14 * r)
+        PAD_V   = round(8  * r)
+
+        tk.Label(popup, text="⚙ 설정",
+                 font=("Segoe UI", F_TITLE, "bold"),
+                 bg=self.BG, fg=self.TEXT).pack(pady=(PAD, 0))
+        tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", pady=(round(8 * r), 0))
+
+        card = tk.Frame(popup, bg=self.BG2, padx=round(16 * r), pady=PAD_V)
+        card.pack(fill="x", padx=PAD, pady=(PAD_V, 0))
+
+        CHK = dict(font=("Consolas", F_MONO), bg=self.BG2, fg=self.TEXT,
+                   selectcolor=self.BG3, activebackground=self.BG2,
+                   activeforeground=self.TEXT, relief="flat", cursor="hand2")
+
+        # 다크 모드
+        tk.Checkbutton(card, text="🌙 다크 모드",
+                       variable=self._darkmode_var,
+                       command=self._toggle_darkmode,
+                       **CHK).pack(anchor="w", pady=(0, round(4 * r)))
+
+        # 시작프로그램 등록
+        tk.Checkbutton(card, text="🚀 Windows 시작 시 자동 실행",
+                       variable=self._startup_var,
+                       command=self._toggle_startup,
+                       **CHK).pack(anchor="w", pady=(0, round(4 * r)))
+
+        # 재생 감지 시 자동 시작
+        tk.Checkbutton(card, text="▶ 재생 감지 시 싱크 자동 시작",
+                       variable=self._autostart_var,
+                       command=self._save_settings,
+                       **CHK).pack(anchor="w")
+
+        tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", padx=PAD, pady=(PAD_V, 0))
+
+        # 화면 크기
+        size_card = tk.Frame(popup, bg=self.BG2, padx=round(16 * r), pady=PAD_V)
+        size_card.pack(fill="x", padx=PAD, pady=(PAD_V, 0))
+        tk.Label(size_card, text="화면 크기",
+                 font=("Consolas", F_MONO, "bold"),
+                 bg=self.BG2, fg=self.TEXT_MID).pack(anchor="w")
+
+        btn_row = tk.Frame(size_card, bg=self.BG2)
+        btn_row.pack(anchor="w", pady=(round(4 * r), 0))
+
+        BTN_S = dict(font=("Consolas", max(7, F_MONO - 1), "bold"),
+                     relief="flat", cursor="hand2",
+                     padx=round(10 * r), pady=round(3 * r),
+                     activebackground=self.BORDER)
+        for size in ("소", "중", "대"):
+            is_cur = (self._scale_var.get() == size)
+            tk.Button(
+                btn_row, text=size,
+                bg=self.BG3 if is_cur else self.BG2,
+                fg=self.ACCENT if is_cur else self.TEXT_MID,
+                command=lambda s=size: (popup.destroy(), self._toggle_scale(s)),
+                **BTN_S,
+            ).pack(side="left", padx=(0, round(4 * r)))
+
+        tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", padx=PAD, pady=(PAD_V, 0))
+
+        tk.Button(popup, text="닫기",
+                  font=("Consolas", F_MONO, "bold"),
+                  bg=self.BG3, fg=self.TEXT,
+                  activebackground=self.BORDER,
+                  relief="flat", cursor="hand2",
+                  padx=round(16 * r), pady=round(4 * r),
+                  command=popup.destroy).pack(pady=PAD_V)
 
 
 def _strip_series_name(name: str) -> str:

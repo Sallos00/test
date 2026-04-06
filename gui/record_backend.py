@@ -472,22 +472,40 @@ class _AudioRecorder:
 
         def _session_mta():
             import ctypes as ct
+            import platform
             import numpy as np
             ole32    = ct.windll.ole32
             kernel32 = ct.windll.kernel32
             hr_co = ole32.CoInitializeEx(None, 0x0)
             co_ok = hr_co in (0, 1, 0x80010106)
+
+            # Windows 빌드 확인 — ProcessLoopback은 빌드 19041(20H1) 이상 전용
+            try:
+                _win_build = int(platform.version().split(".")[-1])
+            except Exception:
+                _win_build = 0
+            _support_process_loopback = (_win_build >= 19041)
+
             try:
                 from audio_com import (
                     activate_process_loopback, audio_client_initialize,
+                    activate_global_loopback, audio_client_initialize_loopback,
                     audio_client_set_event, audio_client_start, audio_client_stop,
                     get_capture_client, get_next_packet_size, get_buffer,
                     release_buffer, _com_release, AUDCLNT_BUFFERFLAGS_SILENT,
                     qpc_freq,
                 )
                 _freq  = qpc_freq()
-                client = activate_process_loopback(pid)
-                sr, ch = audio_client_initialize(client)
+
+                # 빌드 19041 미만이면 GlobalLoopback으로 폴백
+                if _support_process_loopback:
+                    client = activate_process_loopback(pid)
+                    sr, ch = audio_client_initialize(client)
+                    _log(f"[녹화] ProcessLoopback 시작 (PID={pid})")
+                else:
+                    client = activate_global_loopback()
+                    sr, ch = audio_client_initialize_loopback(client)
+                    _log(f"[녹화] GlobalLoopback 시작 (빌드 {_win_build} < 19041, 폴백)")
                 recorder._sr, recorder._ch = sr, ch
                 h_event = kernel32.CreateEventW(None, False, False, None)
                 audio_client_set_event(client, h_event)

@@ -138,7 +138,7 @@ class LipSyncGUILogic:
                 bg=btn_bg, fg=self.ACCENT,
                 activebackground=self.BORDER,
                 relief="flat", cursor="hand2",
-                padx=(round(6*r), max(3, round(3*r))), pady=round(2*r),
+                padx=round(6*r), pady=round(2*r),
                 state="normal" if has_dir else "disabled",
                 command=lambda t=title: self._hist_resume(t)
             ).pack(side="right", anchor="center")

@@ -21,7 +21,6 @@ from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip, pi
 
 class LipSyncGUILogic:
 
-    # ── 폴더 지정 / 열기 ──────────────────────────────────────────────────────
     def _hist_browse_dir(self):
         init = self._hist_video_dir if getattr(self, "_hist_video_dir", "") else "/"
         d = fd.askdirectory(title="동영상 폴더 지정", initialdir=init)
@@ -39,7 +38,6 @@ class LipSyncGUILogic:
             try: os.startfile(d)
             except Exception: pass
 
-    # ── 이어보기 ──────────────────────────────────────────────────────────────
     def _hist_resume(self, title: str):
         d = getattr(self, "_hist_video_dir", "")
         if not d or not os.path.isdir(d):
@@ -47,22 +45,18 @@ class LipSyncGUILogic:
         VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv",
                       ".ts", ".m2ts", ".flv", ".webm", ".m4v"}
         base = _strip_episode_number(title)
-        ep_pat = re.search(r'제?(\d+)\s*[화편부회장권]', title)
-        ep_num = int(ep_pat.group(1)) if ep_pat else None
+        _em = re.search(r'제?(\d+)\s*[화편부]', title)
+        ep = int(_em.group(1)) if _em else None
         found = None
         for dirpath, _, fnames in os.walk(d):
             for fname in fnames:
                 if os.path.splitext(fname)[1].lower() not in VIDEO_EXTS:
                     continue
                 if os.path.splitext(fname)[0] == title or fname == title:
-                    found = os.path.join(dirpath, fname)
-                    break
-                if _strip_episode_number(fname) == base:
-                    fp = re.search(r'제?(\d+)\s*[화편부회장권]', fname)
-                    fn = int(fp.group(1)) if fp else None
-                    if ep_num is not None and fn == ep_num:
-                        found = os.path.join(dirpath, fname)
-                        break
+                    found = os.path.join(dirpath, fname); break
+                _fm = re.search(r'제?(\d+)\s*[화편부]', fname)
+                if _strip_episode_number(fname) == base and ep and _fm and int(_fm.group(1)) == ep:
+                    found = os.path.join(dirpath, fname); break
             if found:
                 break
         if found:
@@ -74,7 +68,6 @@ class LipSyncGUILogic:
                            f"폴더에서 해당 동영상을 찾을 수 없습니다.\n\n"
                            f"제목: {title}\n폴더: {d}")
 
-    # ── 시청 기록 목록 갱신 ───────────────────────────────────────────────────
     def _refresh_history_list(self):
         if not hasattr(self, "_hist_list_frame"):
             return
@@ -146,7 +139,6 @@ class LipSyncGUILogic:
                 command=lambda t=title: self._hist_resume(t)
             ).pack(side="right", anchor="center", padx=(0, round(8*r)))
 
-    # ── history.json 로드/저장 ────────────────────────────────────────────────
     def _load_history(self):
         try:
             p = os.path.join(self.APP_DIR, "history.json")
@@ -222,7 +214,6 @@ class LipSyncGUILogic:
             self._log_lines.append(
                 f"[{_t.strftime('%H:%M:%S')}] ❌ record_video_history 오류: {e}")
 
-    # ── PIP ───────────────────────────────────────────────────────────────────
     def _pip_toggle(self):
         hwnd = find_potplayer_hwnd()
         if not hwnd: return
@@ -521,8 +512,6 @@ class LipSyncGUILogic:
         tk.Button(bf, text="💾 저장", font=("Consolas", FB, "bold"), bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(16*r), pady=round(6*r), command=on_save).pack(side="left", padx=(0, round(8*r)))
         tk.Button(bf, text="닫기",   font=("Consolas", FB, "bold"), bg=self.BG3, fg=self.TEXT,   activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(16*r), pady=round(6*r), command=popup.destroy).pack(side="left")
 
-
-# ── 모듈 수준 유틸 ────────────────────────────────────────────────────────────
 
 def _strip_series_name(name: str) -> str:
     """파일명/제목에서 화수 정보만 제거해 시리즈명을 추출.

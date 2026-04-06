@@ -141,7 +141,7 @@ class LipSyncGUILogic:
                 padx=round(6*r), pady=round(2*r),
                 state="normal" if has_dir else "disabled",
                 command=lambda t=title: self._hist_resume(t)
-            ).pack(side="right", anchor="center")
+            ).pack(side="right", anchor="center", padx=(0, round(8*r)))
 
     # ── history.json 로드/저장 ────────────────────────────────────────────────
     def _load_history(self):

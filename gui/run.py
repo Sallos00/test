@@ -446,7 +446,7 @@ class LipSyncGUIRun:
                     self._om_log_seen_count = len(om_logs)
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
-                aud_n  = om_latest.get("audio_samples", 0)
+                aud_n  = om_latest.get("audio_samples", 0) if pot_ok else 0
                 c = self.ACCENT3 if pot_ok else self.ACCENT2
                 self._pot_dot.config(fg=c)
                 self._pot_lbl.config(text="연결됨" if pot_ok else "미감지", fg=c)
@@ -494,10 +494,11 @@ class LipSyncGUIRun:
             t = "연결됨" if pot_ok else "미감지"
             self._pot_dot.config(fg=c); self._pot_lbl.config(text=t, fg=c)
 
-            c = self.ACCENT3 if aud_n > 0 else self.TEXT_DIM
+            _aud_n_disp = aud_n if pot_ok else 0
+            c = self.ACCENT3 if _aud_n_disp > 0 else self.TEXT_DIM
             _aud_mode = getattr(self, "_aud_capture_mode", "")
-            _aud_suffix = f" ({_aud_mode})" if _aud_mode and aud_n > 0 else ""
-            t = ("캡처 중" if aud_n > 0 else "대기 중") + _aud_suffix
+            _aud_suffix = f" ({_aud_mode})" if _aud_mode and _aud_n_disp > 0 else ""
+            t = ("캡처 중" if _aud_n_disp > 0 else "대기 중") + _aud_suffix
             self._aud_dot.config(fg=c); self._aud_lbl.config(text=t, fg=c)
 
             if self._running and lip_n > 0:

@@ -74,7 +74,7 @@ class LipSyncGUILayout:
         TAB_F = max(8, round(9 * r))
         tab_bar = reg(tk.Frame(self.root, bg=self.BG2), bg="BG2")
         tab_bar.pack(fill="x")
-        self._tab_var = getattr(self, "_tab_var", tk.StringVar(value="sync"))
+        self._tab_var = getattr(self, "_tab_var", tk.StringVar(value="history"))
         self._tab_frames = {}
         self._tab_btn_sync    = None
         self._tab_btn_history = None
@@ -281,12 +281,12 @@ class LipSyncGUILayout:
         self._hist_browse_btn.pack(side="left", padx=(round(4*r), 0))
 
         self._hist_open_btn = reg(
-            tk.Button(dir_row, text="🗁 열기",
-                      bg=self.BG3, fg=self.TEXT_MID,
+            tk.Button(dir_row, text="열기",
+                      bg=self.BG3, fg=self.TEXT,
                       activebackground=self.BORDER,
                       state="disabled",
                       command=self._hist_open_dir, **BTN_S),
-            bg="BG3", fg="TEXT_MID", abg="BORDER")
+            bg="BG3", fg="TEXT", abg="BORDER")
         self._hist_open_btn.pack(side="left", padx=(round(4*r), 0))
 
         # 구분선

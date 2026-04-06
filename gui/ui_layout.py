@@ -303,9 +303,11 @@ class LipSyncGUILayout:
             bg="BG", fg="TEXT_DIM").pack(side="left")
 
         # 스크롤 영역: 로그 팝업과 동일 구조
-        # list_outer가 padx 담당, sb/canvas는 padx 없이 right/left로만 배치
-        list_outer = tk.Frame(parent, bg=self.BG, padx=P2)
-        list_outer.pack(fill="both", expand=True, pady=(round(4*r), 0))
+        # list_outer에 padx를 주면 스크롤바 오른쪽이 잘리므로
+        # padx는 list_outer pack()에서 처리하고, 내부는 padx 없이 배치
+        list_outer = tk.Frame(parent, bg=self.BG)
+        list_outer.pack(fill="both", expand=True,
+                        padx=(P2, 0), pady=(round(4*r), 0))
         reg(list_outer, bg="BG")
 
         sb = tk.Scrollbar(list_outer, orient="vertical",

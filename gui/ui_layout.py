@@ -301,6 +301,17 @@ class LipSyncGUILayout:
                      font=("Consolas", self.F_MONO_S, "bold"),
                      bg=self.BG, fg=self.TEXT_DIM),
             bg="BG", fg="TEXT_DIM").pack(side="left")
+        clear_fg = self.TEXT if self._darkmode_var.get() else self.TEXT_MID
+        self._hist_clear_btn = reg(
+            tk.Button(hdr_row, text="🗑 전체 삭제",
+                      font=("Consolas", max(7, round(8*r)), "bold"),
+                      bg=self.BG, fg=clear_fg,
+                      activebackground=self.BG2, activeforeground=self.ACCENT2,
+                      relief="flat", cursor="hand2",
+                      padx=round(6*r), pady=0,
+                      command=self._hist_clear_all),
+            bg="BG", fg="TEXT_MID", abg="BG2", afg="ACCENT2")
+        self._hist_clear_btn.pack(side="right")
 
         # 스크롤 영역: 스페이서 Frame으로 좌우 마진을 명시적으로 보장
         scroll_outer = tk.Frame(parent, bg=self.BG)

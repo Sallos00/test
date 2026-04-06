@@ -88,6 +88,8 @@ class LipSyncGUILogic:
         cw = canvas.winfo_width()
         if cw > 1:
             canvas.itemconfig(self._hist_canvas_window, width=cw)
+            frame.config(width=cw)
+        frame.pack_propagate(False)
 
         records  = self._load_history()
         r        = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]

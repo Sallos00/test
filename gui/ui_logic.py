@@ -203,6 +203,12 @@ class LipSyncGUILogic:
                     if ts_lbl:
                         ts_lbl.bind("<MouseWheel>", mw_fn)
 
+        # 스크롤 위치 저장 (교체 전)
+        try:
+            scroll_pos = canvas.yview()[0]
+        except Exception:
+            scroll_pos = 0.0
+
         # 구 Frame 참조 저장 후 canvas window를 새 Frame으로 원자적 교체
         old_frame = getattr(self, "_hist_list_frame", None)
         self._hist_list_frame = new_frame
@@ -210,6 +216,11 @@ class LipSyncGUILogic:
         if cw > 1:
             canvas.itemconfig(self._hist_canvas_window, width=cw)
         canvas.configure(scrollregion=canvas.bbox("all"))
+
+        # 스크롤 위치 복원 (레이아웃 확정 후 적용)
+        if scroll_pos > 0.0:
+            canvas.after_idle(lambda pos=scroll_pos: canvas.yview_moveto(pos))
+
         # 구 Frame 파괴 (화면에서 이미 분리된 뒤이므로 깜빡임 없음)
         if old_frame is not None:
             try:

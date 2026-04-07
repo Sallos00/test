@@ -86,9 +86,14 @@ class LipSyncGUIRun:
             return
         try:
             self._om_stop_flag.value = True
+            # analyzer에 stop 커맨드 전송으로 즉시 탈출 유도
+            try:
+                self._om_cmd_queue.put_nowait("stop")
+            except Exception:
+                pass
             import threading as _th
             def _join(p):
-                p.join(timeout=2)
+                p.join(timeout=1)
                 if p.is_alive(): p.terminate()
             ts = [_th.Thread(target=_join, args=(p,), daemon=True) for p in self._om_processes]
             for t in ts: t.start()
@@ -321,9 +326,14 @@ class LipSyncGUIRun:
     def _stop_processes(self):
         self._running = False
         self.stop_flag.value = True
-        # 병렬 join으로 대기 시간 단축
+        # P3(analyzer)에 stop 커맨드를 직접 전송해 ANALYSIS_INTERVAL 대기 없이 즉시 종료
+        try:
+            self.cmd_queue.put_nowait("stop")
+        except Exception:
+            pass
+        # 병렬 join으로 대기 시간 단축 (timeout 1초로 단축)
         procs = list(self._processes)
-        ts = [threading.Thread(target=lambda p=p: (p.join(timeout=2), p.terminate() if p.is_alive() else None), daemon=True)
+        ts = [threading.Thread(target=lambda p=p: (p.join(timeout=1), p.terminate() if p.is_alive() else None), daemon=True)
               for p in procs]
         for t in ts: t.start()
         for t in ts: t.join()
@@ -746,18 +756,20 @@ class LipSyncGUIRun:
             _active_overlays.clear()
         except Exception: pass
         self._save_pos()
-        self._stop_processes()
-        self._stop_oped_monitor()   # oped 모니터도 종료
         tray_ref = self._tray
         self._tray = None
 
-        def _stop_tray_bg():
-            if not tray_ref: return
-            try: tray_ref.stop()
-            except Exception: pass
+        # 프로세스 종료 + tray 정지를 백그라운드에서 처리 → UI 즉시 닫힘
+        def _shutdown_bg():
+            self._stop_processes()
+            self._stop_oped_monitor()
+            if tray_ref:
+                try: tray_ref.stop()
+                except Exception: pass
 
-        threading.Thread(target=_stop_tray_bg, daemon=True).start()
+        threading.Thread(target=_shutdown_bg, daemon=True).start()
+        # 다음 이벤트 루프 틱에서 즉시 창 파괴
         try:
-            self.root.after(320, self._destroy_app_root)
+            self.root.after(50, self._destroy_app_root)
         except Exception:
             self._destroy_app_root()

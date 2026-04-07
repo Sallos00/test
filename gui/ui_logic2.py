@@ -97,8 +97,8 @@ class LipSyncGUILogic2:
         popup.title("설정")
         popup.resizable(False, False)
         popup.configure(bg=self.BG)
-        popup.grab_set()
         # 위젯을 먼저 구성하고 마지막에 표시 → 깜빡임 방지
+        # grab_set은 withdraw 이후에 호출해야 순간 노출이 없음
         popup.withdraw()
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw = round(300*r); ph = round(350*r)
@@ -150,7 +150,8 @@ class LipSyncGUILogic2:
         bf.pack(pady=PV)
         tk.Button(bf, text="💾 저장", font=("Consolas", FB, "bold"), bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(16*r), pady=round(6*r), command=on_save).pack(side="left", padx=(0, round(8*r)))
         tk.Button(bf, text="닫기",   font=("Consolas", FB, "bold"), bg=self.BG3, fg=self.TEXT,   activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(16*r), pady=round(6*r), command=popup.destroy).pack(side="left")
-        # 위젯 구성 완료 후 배치/표시
+        # 위젯 구성 완료 후 배치/표시 (grab_set은 deiconify 직전에 호출해야 깜빡임 없음)
+        popup.grab_set()
         self._place_popup(popup, pw, ph)
 
 

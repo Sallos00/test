@@ -119,15 +119,13 @@ class LipSyncGUILogic:
         except Exception:
             return
         frame = self._hist_list_frame
-        # 깜빡임 방지: 스크롤 위치 보존 후 재생성
         canvas = self._hist_list_canvas
-        try:
-            ypos = canvas.yview()[0]
-        except Exception:
-            ypos = 0.0
-        frame.update_idletasks()
+
+        # 깜빡임 방지: 캔버스를 잠시 숨기고, 자식 전부 파괴 후 재생성, 다시 표시
+        canvas.pack_forget()
         for w in frame.winfo_children():
             w.destroy()
+
         cw = canvas.winfo_width()
         if cw > 1:
             canvas.itemconfig(self._hist_canvas_window, width=cw)
@@ -135,12 +133,17 @@ class LipSyncGUILogic:
         records  = self._load_history()
         r        = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         has_dir  = bool(getattr(self, "_hist_video_dir", ""))
+        mw_fn    = getattr(self, "_hist_mousewheel_fn", None)
 
         if not records:
-            tk.Label(frame, text="— 시청 기록 없음 —",
+            lbl = tk.Label(frame, text="— 시청 기록 없음 —",
                      font=("Consolas", self.F_MONO_S),
                      bg=self.BG, fg=self.TEXT_DIM,
-                     pady=round(12*r)).pack()
+                     pady=round(12*r))
+            lbl.pack()
+            if mw_fn:
+                lbl.bind("<MouseWheel>", mw_fn)
+            canvas.pack(side="left", fill="both", expand=True)
             return
 
         for i, rec in enumerate(reversed(records)):
@@ -163,19 +166,35 @@ class LipSyncGUILogic:
             else:
                 display_text = display_title
 
-            tk.Label(info, text=display_text,
+            title_lbl = tk.Label(info, text=display_text,
                      font=("Consolas", self.F_MONO_S, "bold"),
                      bg=row_bg, fg=self.TEXT,
                      anchor="w",
-                     justify="left").pack(anchor="w")
+                     justify="left")
+            title_lbl.pack(anchor="w")
+            ts_lbl = None
             if ts:
-                tk.Label(info, text=ts,
+                ts_lbl = tk.Label(info, text=ts,
                          font=("Consolas", max(6, self.F_MONO_S-1)),
                          bg=row_bg, fg=self.TEXT_DIM,
-                         anchor="w").pack(anchor="w")
+                         anchor="w")
+                ts_lbl.pack(anchor="w")
 
             btn_bg = self.BG3 if i % 2 == 0 else self.BG2
-            tk.Button(
+
+            # 🗑 버튼: 이어보기 오른쪽, 휴지통 아이콘 흰색
+            del_btn = tk.Button(
+                row, text="🗑",
+                font=("Consolas", max(7, round(8*r))),
+                bg=btn_bg, fg="#ffffff",
+                activebackground=self.BORDER,
+                relief="flat", cursor="hand2",
+                padx=round(4*r), pady=round(2*r),
+                command=lambda t=title: self._hist_delete_one(t)
+            )
+            del_btn.pack(side="right", anchor="center", padx=(0, round(4*r)))
+
+            resume_btn = tk.Button(
                 row, text="▶ 이어보기",
                 font=("Consolas", max(7, round(8*r)), "bold"),
                 bg=btn_bg, fg=self.ACCENT,
@@ -184,17 +203,17 @@ class LipSyncGUILogic:
                 padx=round(6*r), pady=round(2*r),
                 state="normal" if has_dir else "disabled",
                 command=lambda t=title: (self._hist_resume(t), self._switch_tab_fn("sync") if hasattr(self, "_switch_tab_fn") else None)
-            ).pack(side="right", anchor="center", padx=(0, round(4*r)))
+            )
+            resume_btn.pack(side="right", anchor="center", padx=(0, round(2*r)))
 
-            tk.Button(
-                row, text="🗑",
-                font=("Consolas", max(7, round(8*r))),
-                bg=btn_bg, fg=self.ACCENT2,
-                activebackground=self.BORDER,
-                relief="flat", cursor="hand2",
-                padx=round(4*r), pady=round(2*r),
-                command=lambda t=title: self._hist_delete_one(t)
-            ).pack(side="right", anchor="center", padx=(0, round(2*r)))
+            # 마우스휠 이벤트를 캔버스로 전달
+            if mw_fn:
+                for w in (row, info, title_lbl, resume_btn, del_btn):
+                    w.bind("<MouseWheel>", mw_fn)
+                if ts_lbl:
+                    ts_lbl.bind("<MouseWheel>", mw_fn)
+
+        canvas.pack(side="left", fill="both", expand=True)
 
     # ── history.json 로드/저장 ────────────────────────────────────────────────
     def _load_history(self):

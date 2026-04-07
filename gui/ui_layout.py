@@ -302,6 +302,18 @@ class LipSyncGUILayout:
                      bg=self.BG, fg=self.TEXT_DIM),
             bg="BG", fg="TEXT_DIM").pack(side="left")
 
+        # 전체 삭제 버튼
+        clear_all_btn = reg(
+            tk.Button(hdr_row, text="🗑 전체 삭제",
+                      font=("Consolas", max(6, self.F_MONO_S - 1), "bold"),
+                      bg=self.BG3, fg=self.ACCENT2,
+                      activebackground=self.BORDER,
+                      relief="flat", cursor="hand2",
+                      padx=round(6*r), pady=round(1*r),
+                      command=self._hist_clear_all),
+            bg="BG3", fg="ACCENT2", abg="BORDER")
+        clear_all_btn.pack(side="right")
+
         # 스크롤 영역: 스페이서 Frame으로 좌우 마진을 명시적으로 보장
         scroll_outer = tk.Frame(parent, bg=self.BG)
         scroll_outer.pack(fill="both", expand=True, pady=(round(4*r), 0))

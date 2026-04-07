@@ -10,7 +10,7 @@ import queue
 
 # ── 설정값 ──
 CFG = dict(
-    CAPTURE_FPS         = 30,
+    CAPTURE_FPS         = 15,    # 30→15fps: 싱크 보정 정밀도 유지하면서 P1 CPU 절반으로 감소
     AUDIO_SR            = 16000,
     BUFFER_SEC          = 3.0,
     ANALYSIS_INTERVAL   = 3.0,
@@ -170,6 +170,24 @@ def do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec=90):
     _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, int(new_pos))
     return new_pos, True
 
+# BITMAPINFOHEADER를 모듈 레벨에서 한 번만 정의 (매 캡처마다 재정의 방지)
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize",          ctypes.c_uint32),
+        ("biWidth",         ctypes.c_int32),
+        ("biHeight",        ctypes.c_int32),
+        ("biPlanes",        ctypes.c_uint16),
+        ("biBitCount",      ctypes.c_uint16),
+        ("biCompression",   ctypes.c_uint32),
+        ("biSizeImage",     ctypes.c_uint32),
+        ("biXPelsPerMeter", ctypes.c_int32),
+        ("biYPelsPerMeter", ctypes.c_int32),
+        ("biClrUsed",       ctypes.c_uint32),
+        ("biClrImportant",  ctypes.c_uint32),
+    ]
+
+_gdi32  = ctypes.windll.gdi32   # 모듈 레벨 캐시
+
 def capture_window(hwnd):
     """
     팟플레이어 창을 캡처하여 numpy BGRA 배열로 반환한다.
@@ -183,8 +201,8 @@ def capture_window(hwnd):
         return None
 
     import numpy as np
-    gdi32  = ctypes.windll.gdi32
-    user32 = ctypes.windll.user32
+    gdi32  = _gdi32
+    user32 = _user32
 
     # 창 크기
     rect = ctypes.wintypes.RECT()
@@ -193,22 +211,6 @@ def capture_window(hwnd):
     height = rect.bottom - rect.top
     if width <= 0 or height <= 0:
         return None
-
-    # BITMAPINFOHEADER (DIB, 32bpp, top-down)
-    class _BITMAPINFOHEADER(ctypes.Structure):
-        _fields_ = [
-            ("biSize",          ctypes.c_uint32),
-            ("biWidth",         ctypes.c_int32),
-            ("biHeight",        ctypes.c_int32),
-            ("biPlanes",        ctypes.c_uint16),
-            ("biBitCount",      ctypes.c_uint16),
-            ("biCompression",   ctypes.c_uint32),
-            ("biSizeImage",     ctypes.c_uint32),
-            ("biXPelsPerMeter", ctypes.c_int32),
-            ("biYPelsPerMeter", ctypes.c_int32),
-            ("biClrUsed",       ctypes.c_uint32),
-            ("biClrImportant",  ctypes.c_uint32),
-        ]
 
     bmi        = _BITMAPINFOHEADER()
     bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)

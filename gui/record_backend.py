@@ -480,22 +480,14 @@ class _AudioRecorder:
             try:
                 from audio_com import (
                     activate_process_loopback, audio_client_initialize,
-                    activate_global_loopback, audio_client_initialize_loopback,
                     audio_client_set_event, audio_client_start, audio_client_stop,
                     get_capture_client, get_next_packet_size, get_buffer,
                     release_buffer, _com_release, AUDCLNT_BUFFERFLAGS_SILENT,
                     qpc_freq,
                 )
-                import platform
-                _win_build = int(platform.version().split(".")[-1])
                 _freq  = qpc_freq()
-                if _win_build >= 19041:
-                    client = activate_process_loopback(pid)
-                    sr, ch = audio_client_initialize(client)
-                else:
-                    client = activate_global_loopback()
-                    sr, ch = audio_client_initialize_loopback(client)
-                
+                client = activate_process_loopback(pid)
+                sr, ch = audio_client_initialize(client)
                 recorder._sr, recorder._ch = sr, ch
                 h_event = kernel32.CreateEventW(None, False, False, None)
                 audio_client_set_event(client, h_event)
@@ -512,7 +504,7 @@ class _AudioRecorder:
                                 break
                             if pkt == 0:
                                 break
-                            data, num_frames, flg, _dp, qpc_ts = get_buffer(cap)
+                            data, num_frames, flg, qpc_ts = get_buffer(cap)
                             if num_frames > 0:
                                 if not (flg & AUDCLNT_BUFFERFLAGS_SILENT) and data.value:
                                     if qpc_ts:

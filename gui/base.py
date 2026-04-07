@@ -71,14 +71,14 @@ class LipSyncGUIBase:
             value=self._load_setting("close_potplayer_on_exit", False))
         self._apply_scale()
         self._apply_theme()
-        self._register_app_id()
         self._build_window()
         self._build_ui()
         self._refresh()
         self.root.after(0, self._ensure_settings_file)
         self.root.after(0, self._check_auth_on_start)
-        # 트레이 초기화(PIL 이미지 빌드 포함)는 창이 뜬 뒤 백그라운드에서 처리
-        self.root.after(50, self._setup_tray)
+        # 무거운 초기화는 창이 뜬 뒤 백그라운드/지연 처리
+        self.root.after(0,  self._register_app_id)   # winreg 쓰기 → 첫 틱으로 지연
+        self.root.after(50, self._setup_tray)         # PIL 이미지 빌드 포함
 
     def _build_cfg(self):
         try:

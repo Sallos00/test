@@ -101,21 +101,22 @@ class LipSyncGUILogic2:
         # grab_set은 withdraw 이후에 호출해야 순간 노출이 없음
         popup.withdraw()
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-        pw = round(300*r); ph = round(350*r)
+        pw = round(300*r); ph = round(370*r)
         FT = max(9, round(11*r)); FM = max(8, round(9*r)); FB = FM
         P  = round(14*r); P2 = round(18*r); PV = round(10*r)
         tk.Label(popup, text="⚙ 설정", font=("Segoe UI", FT, "bold"), bg=self.BG, fg=self.TEXT).pack(pady=(P, 0))
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", pady=(round(12*r), 0))
-        ts = tk.BooleanVar(value=self._startup_var.get())
-        ta = tk.BooleanVar(value=self._autostart_var.get())
-        td = tk.BooleanVar(value=self._darkmode_var.get())
-        tsc= tk.StringVar( value=self._scale_var.get())
-        to = tk.BooleanVar(value=self._oped_auto_var.get())
-        te = tk.StringVar( value=self._oped_skip_sec_var.get())
+        ts  = tk.BooleanVar(value=self._startup_var.get())
+        ta  = tk.BooleanVar(value=self._autostart_var.get())
+        td  = tk.BooleanVar(value=self._darkmode_var.get())
+        tsc = tk.StringVar( value=self._scale_var.get())
+        to  = tk.BooleanVar(value=self._oped_auto_var.get())
+        te  = tk.StringVar( value=self._oped_skip_sec_var.get())
+        tcp = tk.BooleanVar(value=getattr(self, "_close_pot_var", tk.BooleanVar(value=False)).get())
         CHK = dict(font=("Consolas", FM), bg=self.BG2, selectcolor=self.BG3, activebackground=self.BG2, activeforeground=self.TEXT, relief="flat", cursor="hand2")
         card = tk.Frame(popup, bg=self.BG2, padx=P2, pady=P)
         card.pack(fill="x", padx=P, pady=(PV, 0))
-        for text, var in [("Windows 시작 시 자동 실행", ts), ("프로그램 실행 시 자동 시작", ta), ("다크 모드", td), ("OP/ED 자동 스킵", to)]:
+        for text, var in [("Windows 시작 시 자동 실행", ts), ("프로그램 실행 시 자동 시작", ta), ("종료 시 팟플레이어 종료", tcp), ("다크 모드", td), ("OP/ED 자동 스킵", to)]:
             tk.Checkbutton(card, text=text, variable=var, fg=self.TEXT, **CHK).pack(anchor="w", pady=round(4*r))
         sr = tk.Frame(card, bg=self.BG2)
         sr.pack(anchor="w", pady=(round(6*r), 0))
@@ -136,6 +137,8 @@ class LipSyncGUILogic2:
             sc = tsc.get() != self._scale_var.get()
             self._darkmode_var.set(td.get()); self._scale_var.set(tsc.get())
             self._oped_auto_var.set(to.get())
+            if hasattr(self, "_close_pot_var"):
+                self._close_pot_var.set(tcp.get())
             try: sec = max(10, min(600, int(te.get())))
             except ValueError: sec = 90
             self._oped_skip_sec_var.set(str(sec))

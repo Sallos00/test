@@ -235,8 +235,12 @@ class LipSyncGUIBase:
     def _save_pos(self): self._save_settings()
 
     def _place_popup(self, popup, pw, ph):
+        # transient 설정: 팝업 클릭 시 메인창이 함께 앞으로 올라옴
+        popup.transient(self.root)
+        # 화면 밖에서 렌더링 완료 후 이동 -> 깜빡임 방지
         popup.withdraw()
-        self.root.update_idletasks()
+        popup.geometry(f"{pw}x{ph}+-9999+-9999")
+        popup.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width()  - pw) // 2
         y = self.root.winfo_y() + (self.root.winfo_height() - ph) // 2
         import ctypes as _ct

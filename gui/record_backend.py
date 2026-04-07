@@ -455,8 +455,21 @@ def _retiming_audio(chunks, sr: int, ch: int):
     return np.concatenate(out_parts).astype(np.float32), start_qpc
 
 # 오디오 캡처
+import platform as _platform
+
+def _get_windows_build() -> int:
+    try:
+        return int(_platform.version().split(".")[-1])
+    except Exception:
+        return 0
+
+_WIN_BUILD_REC = _get_windows_build()
+_SUPPORT_PROC_LOOPBACK_REC = (_WIN_BUILD_REC >= 19041)
+
+
 class _AudioRecorder:
-    """WASAPI QPC 타임스탬프 기반 오디오 캡처 + OBS ASRC 드리프트 보정."""
+    """WASAPI QPC 타임스탬프 기반 오디오 캡처 + OBS ASRC 드리프트 보정.
+    Windows 빌드 19041 미만에서는 GlobalLoopback으로 자동 전환."""
     def __init__(self):
         self._chunks  = []
         self._sr      = 48000
@@ -465,73 +478,116 @@ class _AudioRecorder:
         self._thread  = None
         self._first_audio_qpc_sec: float = 0.0
 
+    def _capture_loop(self, client, cap, h_event, sr, ch, kernel32):
+        """공통 캡처 루프 — ProcessLoopback / GlobalLoopback 양쪽에서 호출."""
+        import ctypes as ct
+        import numpy as np
+        from audio_com import (
+            get_next_packet_size, get_buffer, release_buffer,
+            AUDCLNT_BUFFERFLAGS_SILENT, qpc_freq,
+        )
+        _freq = qpc_freq()
+        try:
+            while self._running:
+                kernel32.WaitForSingleObject(h_event, 10)
+                while self._running:
+                    try:
+                        pkt = get_next_packet_size(cap)
+                    except OSError:
+                        self._running = False
+                        break
+                    if pkt == 0:
+                        break
+                    # get_buffer returns: data, num_frames, flags, dp, qp
+                    data, num_frames, flg, dp, qp = get_buffer(cap)
+                    if num_frames > 0:
+                        if not (flg & AUDCLNT_BUFFERFLAGS_SILENT) and data.value:
+                            if qp:
+                                chunk_qpc_sec = qp / _freq
+                            else:
+                                _q = ct.c_ulonglong()
+                                kernel32.QueryPerformanceCounter(ct.byref(_q))
+                                chunk_qpc_sec = _q.value / _freq
+                            if not self._first_audio_qpc_sec:
+                                self._first_audio_qpc_sec = chunk_qpc_sec
+                                _log(f"[OBS싱크] 첫 오디오 QPC: {chunk_qpc_sec:.6f}s")
+                            buf = (ct.c_float * (num_frames * ch)).from_address(data.value)
+                            self._chunks.append(
+                                (chunk_qpc_sec, np.frombuffer(buf, dtype=np.float32).copy()))
+                        elif self._first_audio_qpc_sec and qp:
+                            self._chunks.append(
+                                (qp / _freq, np.zeros(num_frames * ch, dtype=np.float32)))
+                    release_buffer(cap, num_frames)
+        except Exception as e:
+            _log(f"오디오 캡처 루프 오류: {e}")
+            self._running = False
+
     def start(self, pid: int):
         self._chunks  = []
         self._running = True
         recorder = self
 
+        if _SUPPORT_PROC_LOOPBACK_REC:
+            _log(f"[AudioRecorder] ProcessLoopback 사용 (빌드 {_WIN_BUILD_REC})")
+        else:
+            _log(f"[AudioRecorder] 빌드 {_WIN_BUILD_REC} < 19041 → GlobalLoopback 사용")
+
         def _session_mta():
             import ctypes as ct
-            import numpy as np
             ole32    = ct.windll.ole32
             kernel32 = ct.windll.kernel32
             hr_co = ole32.CoInitializeEx(None, 0x0)
             co_ok = hr_co in (0, 1, 0x80010106)
+            client  = None
+            cap     = None
+            h_event = None
             try:
                 from audio_com import (
                     activate_process_loopback, audio_client_initialize,
                     audio_client_set_event, audio_client_start, audio_client_stop,
-                    get_capture_client, get_next_packet_size, get_buffer,
-                    release_buffer, _com_release, AUDCLNT_BUFFERFLAGS_SILENT,
-                    qpc_freq,
+                    get_capture_client, _com_release,
+                    activate_global_loopback, audio_client_initialize_loopback,
                 )
-                _freq  = qpc_freq()
-                client = activate_process_loopback(pid)
-                sr, ch = audio_client_initialize(client)
+                if _SUPPORT_PROC_LOOPBACK_REC:
+                    client = activate_process_loopback(pid)
+                    sr, ch = audio_client_initialize(client)
+                else:
+                    client = activate_global_loopback()
+                    sr, ch = audio_client_initialize_loopback(client)
+
                 recorder._sr, recorder._ch = sr, ch
                 h_event = kernel32.CreateEventW(None, False, False, None)
                 audio_client_set_event(client, h_event)
                 cap = get_capture_client(client)
                 audio_client_start(client)
-                try:
-                    while recorder._running:
-                        kernel32.WaitForSingleObject(h_event, 10)
-                        while recorder._running:
-                            try:
-                                pkt = get_next_packet_size(cap)
-                            except OSError:
-                                recorder._running = False
-                                break
-                            if pkt == 0:
-                                break
-                            data, num_frames, flg, qpc_ts = get_buffer(cap)
-                            if num_frames > 0:
-                                if not (flg & AUDCLNT_BUFFERFLAGS_SILENT) and data.value:
-                                    if qpc_ts:
-                                        chunk_qpc_sec = qpc_ts / _freq
-                                    else:
-                                        _q = ct.c_ulonglong()
-                                        kernel32.QueryPerformanceCounter(ct.byref(_q))
-                                        chunk_qpc_sec = _q.value / _freq
-                                    if not recorder._first_audio_qpc_sec:
-                                        recorder._first_audio_qpc_sec = chunk_qpc_sec
-                                        _log(f"[OBS싱크] 첫 오디오 QPC: {chunk_qpc_sec:.6f}s")
-                                    buf = (ct.c_float * (num_frames * ch)).from_address(data.value)
-                                    recorder._chunks.append((chunk_qpc_sec, np.frombuffer(buf, dtype=np.float32).copy()))
-                                elif recorder._first_audio_qpc_sec and qpc_ts:
-                                    recorder._chunks.append((qpc_ts / _freq, np.zeros(num_frames * ch, dtype=np.float32)))
-                            release_buffer(cap, num_frames)
-                finally:
-                    try: audio_client_stop(client)
-                    except: pass
-                    _com_release(cap)
-                    _com_release(client)
-                    kernel32.CloseHandle(h_event)
+
+                recorder._capture_loop(client, cap, h_event, sr, ch, kernel32)
+
             except Exception as e:
-                _log(f"오디오 캡처 오류: {e}")
+                _log(f"오디오 캡처 초기화 오류: {e}")
                 recorder._running = False
             finally:
-                if co_ok: ole32.CoUninitialize()
+                if cap:
+                    try:
+                        from audio_com import audio_client_stop, _com_release
+                        audio_client_stop(client)
+                    except Exception:
+                        pass
+                    try:
+                        from audio_com import _com_release
+                        _com_release(cap)
+                    except Exception:
+                        pass
+                if client:
+                    try:
+                        from audio_com import _com_release
+                        _com_release(client)
+                    except Exception:
+                        pass
+                if h_event:
+                    kernel32.CloseHandle(h_event)
+                if co_ok:
+                    ole32.CoUninitialize()
 
         self._thread = threading.Thread(target=_session_mta, daemon=True)
         self._thread.start()

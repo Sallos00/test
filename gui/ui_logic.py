@@ -121,8 +121,7 @@ class LipSyncGUILogic:
         frame = self._hist_list_frame
         canvas = self._hist_list_canvas
 
-        # 깜빡임 방지: 캔버스를 잠시 숨기고, 자식 전부 파괴 후 재생성, 다시 표시
-        canvas.pack_forget()
+        # 깜빡임 방지: 자식 위젯만 파괴 (canvas는 숨기지 않음)
         for w in frame.winfo_children():
             w.destroy()
 
@@ -143,7 +142,6 @@ class LipSyncGUILogic:
             lbl.pack()
             if mw_fn:
                 lbl.bind("<MouseWheel>", mw_fn)
-            canvas.pack(side="left", fill="both", expand=True)
             return
 
         for i, rec in enumerate(reversed(records)):
@@ -212,8 +210,6 @@ class LipSyncGUILogic:
                     w.bind("<MouseWheel>", mw_fn)
                 if ts_lbl:
                     ts_lbl.bind("<MouseWheel>", mw_fn)
-
-        canvas.pack(side="left", fill="both", expand=True)
 
     # ── history.json 로드/저장 ────────────────────────────────────────────────
     def _load_history(self):
@@ -418,8 +414,10 @@ class LipSyncGUILogic:
         bx = self._gear_btn.winfo_rootx() - rx
         by = self._gear_btn.winfo_rooty() - ry + self._gear_btn.winfo_height() + 2
         mw = round(140 * r)
+        # 깜빡임 방지: 먼저 화면 밖에 place 해두고 위젯 구성 후 정확한 위치로 이동
         frame = tk.Frame(self.root, bg=self.BORDER, bd=1, relief="solid")
         self._gear_menu_frame = frame
+        frame.place(x=-9999, y=-9999)          # 화면 밖에 숨김
         ITEM = dict(font=("Consolas", max(8, round(9*r))), bg=self.BG2, fg=self.TEXT, relief="flat", cursor="hand2", activebackground=self.BG3, activeforeground=self.TEXT, anchor="w", padx=round(14*r), pady=round(7*r))
         def pick(fn):
             self._close_gear_menu(); fn()
@@ -428,8 +426,8 @@ class LipSyncGUILogic:
         tk.Button(frame, text="🎬 녹화 및 캡처", command=lambda: pick(self._open_record_capture), **ITEM).pack(fill="x")
         tk.Frame(frame, bg=self.BORDER, height=1).pack(fill="x")
         tk.Button(frame, text="📋 로그 보기",    command=lambda: pick(self._open_log_popup),      **ITEM).pack(fill="x")
-        frame.update_idletasks()
-        frame.place(x=bx + self._gear_btn.winfo_width() - mw, y=by)
+        frame.update_idletasks()               # 크기 확정
+        frame.place(x=bx + self._gear_btn.winfo_width() - mw, y=by)   # 정확한 위치로 이동
         frame.lift()
         def on_root_click(e):
             try:

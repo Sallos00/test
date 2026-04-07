@@ -342,7 +342,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         oped_prompted = {"오프닝": False,  "엔딩": False}
         pending_prompt[0] = None
 
-    time.sleep(BUF_SEC)
+    # BUF_SEC 동안 대기하되 stop_flag가 세워지면 즉시 탈출
+    _buf_end = time.perf_counter() + BUF_SEC
+    while not stop_flag.value and time.perf_counter() < _buf_end:
+        time.sleep(0.05)
+    if stop_flag.value:
+        return
 
     while not stop_flag.value:
         t0 = time.perf_counter()

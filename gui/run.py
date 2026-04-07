@@ -408,13 +408,13 @@ class LipSyncGUIRun:
                     self._om_shared_dur.value = dv
 
         # oped 모니터 상태 진단 (매 30초마다)
-        import time as _diag_t
-        if _diag_t.time() - getattr(self, "_diag_t", 0) > 30:
-            self._diag_t = _diag_t.time()
+        if time.time() - getattr(self, "_diag_t", 0) > 30:
+            self._diag_t = time.time()
             running = getattr(self, "_oped_monitor_running", False)
             procs   = getattr(self, "_om_processes", [])
             alive   = [p.is_alive() for p in procs]
-            msg = (f"[{_diag_t.strftime('%H:%M:%S')}] 🔧 oped_monitor={running} "
+            import datetime as _dt
+            msg = (f"[{_dt.datetime.now().strftime('%H:%M:%S')}] 🔧 oped_monitor={running} "
                    f"procs={len(procs)} alive={alive}")
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)

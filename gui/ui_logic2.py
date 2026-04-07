@@ -11,9 +11,10 @@ class LipSyncGUILogic2:
         popup.title("로그")
         popup.resizable(False, True)
         popup.configure(bg=self.BG)
+        # 위젯을 먼저 구성하고 마지막에 표시 → 깜빡임 방지
+        popup.withdraw()
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw = round(320*r); ph = round(280*r)
-        self._place_popup(popup, pw, ph)
         FT = max(9, round(11*r)); FB = max(8, round(9*r)); P = round(10*r); P2 = round(14*r)
         tk.Label(popup, text="📋 로그", font=("Segoe UI", FT, "bold"), bg=self.BG, fg=self.TEXT).pack(pady=(P, 0))
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", pady=(round(6*r), 0))
@@ -48,6 +49,8 @@ class LipSyncGUILogic2:
         _cf[0] = _close
         popup.protocol("WM_DELETE_WINDOW", _close)
         self._update_log_popup()
+        # 위젯 구성 완료 후 배치/표시
+        self._place_popup(popup, pw, ph)
         def _refresh():
             if popup.winfo_exists(): self._update_log_popup(); popup.after(1000, _refresh)
         popup.after(1000, _refresh)
@@ -95,9 +98,10 @@ class LipSyncGUILogic2:
         popup.resizable(False, False)
         popup.configure(bg=self.BG)
         popup.grab_set()
+        # 위젯을 먼저 구성하고 마지막에 표시 → 깜빡임 방지
+        popup.withdraw()
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw = round(300*r); ph = round(350*r)
-        self._place_popup(popup, pw, ph)
         FT = max(9, round(11*r)); FM = max(8, round(9*r)); FB = FM
         P  = round(14*r); P2 = round(18*r); PV = round(10*r)
         tk.Label(popup, text="⚙ 설정", font=("Segoe UI", FT, "bold"), bg=self.BG, fg=self.TEXT).pack(pady=(P, 0))
@@ -146,5 +150,7 @@ class LipSyncGUILogic2:
         bf.pack(pady=PV)
         tk.Button(bf, text="💾 저장", font=("Consolas", FB, "bold"), bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(16*r), pady=round(6*r), command=on_save).pack(side="left", padx=(0, round(8*r)))
         tk.Button(bf, text="닫기",   font=("Consolas", FB, "bold"), bg=self.BG3, fg=self.TEXT,   activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(16*r), pady=round(6*r), command=popup.destroy).pack(side="left")
+        # 위젯 구성 완료 후 배치/표시
+        self._place_popup(popup, pw, ph)
 
 

@@ -23,8 +23,8 @@ class LipSyncGUIRecordOpen:
         popup.title("녹화 및 캡처")
         popup.resizable(False, False)
         popup.configure(bg=self.BG)
-        popup.grab_set()
-        self._place_popup(popup, pw, ph)
+        # 위젯을 먼저 구성하고 마지막에 표시 → 깜빡임 방지
+        popup.withdraw()
 
         F_TITLE = max(9,  round(11 * r))
         F_MONO  = max(8,  round(9  * r))
@@ -563,3 +563,6 @@ class LipSyncGUIRecordOpen:
                   padx=round(16*r), pady=round(5*r),
                   command=on_close).pack(pady=PAD_V)
         popup.protocol("WM_DELETE_WINDOW", on_close)
+        # 위젯 구성 완료 후 배치/표시 (grab_set은 deiconify 직전에 호출해야 깜빡임 없음)
+        popup.grab_set()
+        self._place_popup(popup, pw, ph)

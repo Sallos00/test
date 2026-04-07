@@ -58,17 +58,7 @@ jobs:
         shell: cmd
 
       - name: 난독화 (gui 패키지)
-        run: |
-          pyarmor gen --output dist_obf\gui ^
-            gui\__init__.py ^
-            gui\base.py ^
-            gui\ui_layout.py ^
-            gui\ui_logic.py ^
-            gui\ui_logic2.py ^
-            gui\run.py ^
-            gui\auth.py ^
-            gui\record_open.py ^
-            gui\record_backend.py
+        run: pyarmor gen --output dist_obf -r gui
         shell: cmd
 
       # main.py 는 PyInstaller 진입점 — 난독화 없이 복사

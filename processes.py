@@ -28,8 +28,9 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
 
     _freq          = qpc_freq()
     interval       = 1.0 / cfg["CAPTURE_FPS"]
-    DETECT_EVERY_N = 5          # N 프레임마다 얼굴 재탐지
-    LIP_ROI_SIZE   = (64, 16)   # 입술 패치 리사이즈 크기
+    DETECT_EVERY_N    = 8           # N 프레임마다 얼굴 재탐지 (15fps 기준 ~1.9초 주기)
+    LIP_ROI_SIZE      = (64, 16)    # 입술 패치 리사이즈 크기
+    DETECT_SCALE      = 0.5         # 얼굴 감지용 다운스케일 비율 (감지 비용 75% 절감)
 
     last_roi           = None
     frame_count        = 0
@@ -39,6 +40,8 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
     lip_y_ratio        = 0.70   # 얼굴 높이 대비 입술 시작 위치 (동적 갱신)
     lip_ratio_update_n = 0
     no_face_count      = 0      # 연속 얼굴 미감지 횟수
+    _hwnd_cache_t      = 0.0    # hwnd 캐시 갱신 시각 (1초마다 재조회)
+    _cached_hwnd       = None   # P1 로컬 hwnd 캐시
 
     def _estimate_lip_y_ratio(face_gray):  # 얼굴 하위 50~92%에서 가장 어두운 행 → 입술 위치
         h            = face_gray.shape[0]
@@ -52,7 +55,13 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
 
     while not stop_flag.value:
         t0   = time.perf_counter()
-        hwnd = find_potplayer_hwnd()
+
+        # hwnd는 1초마다만 재조회 (find_potplayer_hwnd 비용 절감)
+        _t_now = time.perf_counter()
+        if _t_now - _hwnd_cache_t >= 1.0:
+            _cached_hwnd = find_potplayer_hwnd()
+            _hwnd_cache_t = _t_now
+        hwnd = _cached_hwnd
 
         qp_now_val = qpc_now()
         raw  = capture_window(hwnd) if hwnd else None
@@ -89,12 +98,20 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
         motion = 0.0
 
         if frame_count % DETECT_EVERY_N == 1 or last_roi is None:
+            # 다운스케일된 이미지로 얼굴 감지 → 연산량 대폭 감소
+            dw = max(1, int(gray.shape[1] * DETECT_SCALE))
+            dh = max(1, int(gray.shape[0] * DETECT_SCALE))
+            gray_small = cv2.resize(gray, (dw, dh), interpolation=cv2.INTER_LINEAR)
             faces = cascade.detectMultiScale(
-                cv2.equalizeHist(gray),
-                scaleFactor=1.1, minNeighbors=10, minSize=(60, 60),
+                cv2.equalizeHist(gray_small),
+                scaleFactor=1.1, minNeighbors=10, minSize=(30, 30),
             )
             if len(faces):
+                # 좌표를 원본 해상도로 역변환
+                inv = 1.0 / DETECT_SCALE
                 x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+                x  = int(x  * inv); y  = int(y  * inv)
+                fw = int(fw * inv); fh = int(fh * inv)
                 last_roi      = (x, y, fw, fh)
                 no_face_count = 0
                 lip_ratio_update_n += 1

@@ -759,10 +759,20 @@ class LipSyncGUIRun:
         tray_ref = self._tray
         self._tray = None
 
-        # 프로세스 종료 + tray 정지를 백그라운드에서 처리 → UI 즉시 닫힘
+        # 프로세스 종료 + tray 정지 + 팟플레이어 종료(옵션)를 백그라운드에서 처리 → UI 즉시 닫힘
         def _shutdown_bg():
             self._stop_processes()
             self._stop_oped_monitor()
+            # "종료 시 팟플레이어 종료" 설정이 켜져 있으면 WM_CLOSE 전송
+            if getattr(self, "_close_pot_var", None) and self._close_pot_var.get():
+                try:
+                    import ctypes as _ct
+                    hwnd = find_potplayer_hwnd()
+                    if hwnd:
+                        WM_CLOSE = 0x0010
+                        _ct.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                except Exception:
+                    pass
             if tray_ref:
                 try: tray_ref.stop()
                 except Exception: pass

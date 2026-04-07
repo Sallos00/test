@@ -111,105 +111,111 @@ class LipSyncGUILogic:
 
     # ── 시청 기록 목록 갱신 ───────────────────────────────────────────────────
     def _refresh_history_list(self):
-        if not hasattr(self, "_hist_list_frame"):
+        if not hasattr(self, "_hist_list_canvas"):
             return
+        canvas = self._hist_list_canvas
         try:
-            if not self._hist_list_frame.winfo_exists():
+            if not canvas.winfo_exists():
                 return
         except Exception:
             return
-        frame = self._hist_list_frame
-        canvas = self._hist_list_canvas
 
-        # 깜빡임 방지: 자식 위젯만 파괴 (canvas는 숨기지 않음)
-        for w in frame.winfo_children():
-            w.destroy()
+        records = self._load_history()
+        r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        has_dir = bool(getattr(self, "_hist_video_dir", ""))
+        mw_fn   = getattr(self, "_hist_mousewheel_fn", None)
+        cw      = canvas.winfo_width()
 
-        cw = canvas.winfo_width()
-        if cw > 1:
-            canvas.itemconfig(self._hist_canvas_window, width=cw)
+        # ── 깜빡임 방지 핵심 ──────────────────────────────────────────────────
+        # 새 Frame을 canvas 바깥(오프스크린)에 먼저 완전히 구성한 뒤,
+        # canvas window를 교체하고 구 Frame을 파괴한다.
+        # 이렇게 하면 <Configure> 이벤트가 교체 시 단 한 번만 발생해 깜빡임이 없다.
+        new_frame = tk.Frame(canvas, bg=self.BG)
 
-        records  = self._load_history()
-        r        = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-        has_dir  = bool(getattr(self, "_hist_video_dir", ""))
-        mw_fn    = getattr(self, "_hist_mousewheel_fn", None)
+        import os as _os
 
         if not records:
-            lbl = tk.Label(frame, text="— 시청 기록 없음 —",
-                     font=("Consolas", self.F_MONO_S),
-                     bg=self.BG, fg=self.TEXT_DIM,
-                     pady=round(12*r))
+            lbl = tk.Label(new_frame, text="— 시청 기록 없음 —",
+                           font=("Consolas", self.F_MONO_S),
+                           bg=self.BG, fg=self.TEXT_DIM,
+                           pady=round(12 * r))
             lbl.pack()
             if mw_fn:
                 lbl.bind("<MouseWheel>", mw_fn)
-            return
+        else:
+            for i, rec in enumerate(reversed(records)):
+                title  = rec.get("title", "")
+                ts     = rec.get("timestamp", "")
+                row_bg = self.BG2 if i % 2 == 0 else self.BG3
+                btn_bg = self.BG3 if i % 2 == 0 else self.BG2
 
-        for i, rec in enumerate(reversed(records)):
-            title   = rec.get("title", "")
-            ts      = rec.get("timestamp", "")
-            row_bg  = self.BG2 if i % 2 == 0 else self.BG3
+                row = tk.Frame(new_frame, bg=row_bg, pady=round(5 * r))
+                row.pack(fill="x", pady=(0, 1))
 
-            row = tk.Frame(frame, bg=row_bg, pady=round(5*r))
-            row.pack(fill="x", pady=(0, 1))
+                info = tk.Frame(row, bg=row_bg)
+                info.pack(side="left", fill="x", expand=True, padx=(round(8 * r), 0))
 
-            info = tk.Frame(row, bg=row_bg)
-            info.pack(side="left", fill="x", expand=True, padx=(round(8*r), 0))
+                display_title = _os.path.splitext(title)[0]
+                if " - " in display_title:
+                    first, rest = display_title.split(" - ", 1)
+                    display_text = first + "\n- " + rest
+                else:
+                    display_text = display_title
 
-            # 확장자 제거 후 ' - ' 기준으로 첫 번째 줄 / 나머지 줄 분리
-            import os as _os
-            display_title = _os.path.splitext(title)[0]
-            if " - " in display_title:
-                first, rest = display_title.split(" - ", 1)
-                display_text = first + "\n- " + rest
-            else:
-                display_text = display_title
+                title_lbl = tk.Label(info, text=display_text,
+                                     font=("Consolas", self.F_MONO_S, "bold"),
+                                     bg=row_bg, fg=self.TEXT,
+                                     anchor="w", justify="left")
+                title_lbl.pack(anchor="w")
+                ts_lbl = None
+                if ts:
+                    ts_lbl = tk.Label(info, text=ts,
+                                      font=("Consolas", max(6, self.F_MONO_S - 1)),
+                                      bg=row_bg, fg=self.TEXT_DIM, anchor="w")
+                    ts_lbl.pack(anchor="w")
 
-            title_lbl = tk.Label(info, text=display_text,
-                     font=("Consolas", self.F_MONO_S, "bold"),
-                     bg=row_bg, fg=self.TEXT,
-                     anchor="w",
-                     justify="left")
-            title_lbl.pack(anchor="w")
-            ts_lbl = None
-            if ts:
-                ts_lbl = tk.Label(info, text=ts,
-                         font=("Consolas", max(6, self.F_MONO_S-1)),
-                         bg=row_bg, fg=self.TEXT_DIM,
-                         anchor="w")
-                ts_lbl.pack(anchor="w")
+                del_btn = tk.Button(
+                    row, text="🗑",
+                    font=("Consolas", max(7, round(8 * r))),
+                    bg=btn_bg, fg="#ffffff",
+                    activebackground=self.BORDER,
+                    relief="flat", cursor="hand2",
+                    padx=round(4 * r), pady=round(2 * r),
+                    command=lambda t=title: self._hist_delete_one(t))
+                del_btn.pack(side="right", anchor="center", padx=(0, round(4 * r)))
 
-            btn_bg = self.BG3 if i % 2 == 0 else self.BG2
+                resume_btn = tk.Button(
+                    row, text="▶ 이어보기",
+                    font=("Consolas", max(7, round(8 * r)), "bold"),
+                    bg=btn_bg, fg=self.ACCENT,
+                    activebackground=self.BORDER,
+                    relief="flat", cursor="hand2",
+                    padx=round(6 * r), pady=round(2 * r),
+                    state="normal" if has_dir else "disabled",
+                    command=lambda t=title: (
+                        self._hist_resume(t),
+                        self._switch_tab_fn("sync") if hasattr(self, "_switch_tab_fn") else None))
+                resume_btn.pack(side="right", anchor="center", padx=(0, round(2 * r)))
 
-            # 🗑 버튼: 이어보기 오른쪽, 휴지통 아이콘 흰색
-            del_btn = tk.Button(
-                row, text="🗑",
-                font=("Consolas", max(7, round(8*r))),
-                bg=btn_bg, fg="#ffffff",
-                activebackground=self.BORDER,
-                relief="flat", cursor="hand2",
-                padx=round(4*r), pady=round(2*r),
-                command=lambda t=title: self._hist_delete_one(t)
-            )
-            del_btn.pack(side="right", anchor="center", padx=(0, round(4*r)))
+                if mw_fn:
+                    for w in (row, info, title_lbl, resume_btn, del_btn):
+                        w.bind("<MouseWheel>", mw_fn)
+                    if ts_lbl:
+                        ts_lbl.bind("<MouseWheel>", mw_fn)
 
-            resume_btn = tk.Button(
-                row, text="▶ 이어보기",
-                font=("Consolas", max(7, round(8*r)), "bold"),
-                bg=btn_bg, fg=self.ACCENT,
-                activebackground=self.BORDER,
-                relief="flat", cursor="hand2",
-                padx=round(6*r), pady=round(2*r),
-                state="normal" if has_dir else "disabled",
-                command=lambda t=title: (self._hist_resume(t), self._switch_tab_fn("sync") if hasattr(self, "_switch_tab_fn") else None)
-            )
-            resume_btn.pack(side="right", anchor="center", padx=(0, round(2*r)))
-
-            # 마우스휠 이벤트를 캔버스로 전달
-            if mw_fn:
-                for w in (row, info, title_lbl, resume_btn, del_btn):
-                    w.bind("<MouseWheel>", mw_fn)
-                if ts_lbl:
-                    ts_lbl.bind("<MouseWheel>", mw_fn)
+        # 구 Frame 참조 저장 후 canvas window를 새 Frame으로 원자적 교체
+        old_frame = getattr(self, "_hist_list_frame", None)
+        self._hist_list_frame = new_frame
+        canvas.itemconfig(self._hist_canvas_window, window=new_frame)
+        if cw > 1:
+            canvas.itemconfig(self._hist_canvas_window, width=cw)
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        # 구 Frame 파괴 (화면에서 이미 분리된 뒤이므로 깜빡임 없음)
+        if old_frame is not None:
+            try:
+                old_frame.destroy()
+            except Exception:
+                pass
 
     # ── history.json 로드/저장 ────────────────────────────────────────────────
     def _load_history(self):

@@ -455,16 +455,12 @@ def _retiming_audio(chunks, sr: int, ch: int):
     return np.concatenate(out_parts).astype(np.float32), start_qpc
 
 # 오디오 캡처
-import platform as _platform
-
-def _get_windows_build() -> int:
-    try:
-        return int(_platform.version().split(".")[-1])
-    except Exception:
-        return 0
-
-_WIN_BUILD_REC = _get_windows_build()
-_SUPPORT_PROC_LOOPBACK_REC = (_WIN_BUILD_REC >= 19041)
+try:
+    from audio_capture import _WIN_BUILD as _WIN_BUILD_REC, _SUPPORT_PROCESS_LOOPBACK as _SUPPORT_PROC_LOOPBACK_REC
+except Exception:
+    import platform as _pl
+    _WIN_BUILD_REC = int(_pl.version().split(".")[-1])
+    _SUPPORT_PROC_LOOPBACK_REC = (_WIN_BUILD_REC >= 19041)
 
 
 class _AudioRecorder:

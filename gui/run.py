@@ -19,7 +19,8 @@ from win32_utils import (
     get_playback_info,
 )
 from gui.ui_logic import _extract_potplayer_title
-from processes import proc_lip_capture, proc_audio_capture, proc_analyzer
+# processes 모듈은 numpy/psutil 등 무거운 패키지를 포함하므로 실제 사용 시점에 import
+# (모듈 레벨 import 시 메인스레드를 블로킹해 시작 속도 저하 유발)
 
 class LipSyncGUIRun:
 
@@ -48,6 +49,7 @@ class LipSyncGUIRun:
 
             self._om_stream_anchor = Array(ctypes.c_double, [0, 48000, 1])
 
+            from processes import proc_audio_capture, proc_analyzer  # lazy import
             self._om_processes = []
             for target, args in [
                 (proc_audio_capture, (
@@ -302,6 +304,7 @@ class LipSyncGUIRun:
         # 싱크 ON 상태 전용 로그 큐 (P2 → GUI 직접 전달)
         self._main_log_queue = Queue(maxsize=200)
 
+        from processes import proc_lip_capture, proc_audio_capture, proc_analyzer  # lazy import
         for target, args in [
             (proc_lip_capture,   (self._lip_queue,   self.stop_flag, runtime_cfg,
                                   self._stream_anchor)),
@@ -773,18 +776,19 @@ class LipSyncGUIRun:
             except Exception:
                 pass
 
-        # 프로세스 종료 + tray 정지를 백그라운드에서 처리 → UI 즉시 닫힘
-        # daemon=False: 메인 프로세스 종료 후에도 스레드가 끝까지 실행되도록 보장
+        # 창은 즉시 파괴 → 사용자에게 즉각 반응
+        # 프로세스 정리·tray 정지는 백그라운드에서 병렬 처리
+        self._destroy_app_root()
+
         def _shutdown_bg():
-            self._stop_processes()
-            self._stop_oped_monitor()
+            # _stop_processes와 _stop_oped_monitor를 병렬 실행해 대기 시간 절반으로 단축
+            import threading as _th
+            t1 = _th.Thread(target=self._stop_processes,   daemon=True)
+            t2 = _th.Thread(target=self._stop_oped_monitor, daemon=True)
+            t1.start(); t2.start()
+            t1.join();  t2.join()
             if tray_ref:
                 try: tray_ref.stop()
                 except Exception: pass
-            # 모든 정리 완료 후 창 파괴 (Tk 메인스레드에 예약)
-            try:
-                self.root.after(0, self._destroy_app_root)
-            except Exception:
-                pass
 
         threading.Thread(target=_shutdown_bg, daemon=False, name="shutdown").start()

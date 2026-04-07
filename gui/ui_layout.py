@@ -326,6 +326,7 @@ class LipSyncGUILayout:
         # 스크롤바 없이 캔버스만 (마우스휠로만 스크롤)
         canvas = tk.Canvas(scroll_outer, bg=self.BG, highlightthickness=0)
         canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=lambda *args: None)
 
         self._hist_list_canvas = canvas
         self._hist_list_frame  = tk.Frame(canvas, bg=self.BG)
@@ -339,10 +340,14 @@ class LipSyncGUILayout:
             canvas.itemconfig(self._hist_canvas_window, width=e.width)
             self._hist_list_frame.config(width=e.width)
 
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
         self._hist_list_frame.bind("<Configure>", _on_frame_cfg)
         canvas.bind("<Configure>", _on_canvas_cfg)
-        canvas.bind("<MouseWheel>",
-                    lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        # 내부 자식 위젯에서도 마우스휠이 캔버스로 전달되도록 저장
+        self._hist_mousewheel_fn = _on_mousewheel
 
         # 저장된 폴더 복원
         saved_dir = self._load_setting("history_video_dir", "")

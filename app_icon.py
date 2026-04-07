@@ -162,10 +162,33 @@ def apply_windows_ico_bitmap(widget):
 
 
 def apply_to_root_window(root):
+    # iconphoto는 메인스레드에서 즉시 적용 (창 표시에 필요)
     ref = apply_iconphoto(root)
-    apply_windows_ico_bitmap(root)
     root._app_icon_photo_ref = ref
+
+    # iconbitmap(ICO 파일 생성)은 무거운 작업이므로 백그라운드에서 처리
+    # 번들된 app.ico가 있으면 빠르게 끝나고, 없으면 PNG 생성 비용을 메인스레드에서 제거
+    import threading as _threading
+    def _set_ico():
+        try:
+            path = ico_path_for_windows()
+            root.after(0, lambda: _apply_ico_safe(root, path))
+        except Exception:
+            pass
+    _threading.Thread(target=_set_ico, daemon=True, name="ico-build").start()
     return ref
+
+
+def _apply_ico_safe(root, path):
+    """메인스레드에서 호출되어 iconbitmap 적용. 창이 이미 파괴된 경우 무시."""
+    try:
+        if root.winfo_exists():
+            root.iconbitmap(default=path)
+    except Exception:
+        try:
+            root.wm_iconbitmap(path)
+        except Exception:
+            pass
 
 
 def apply_to_toplevel(popup, master):

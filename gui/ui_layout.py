@@ -1,355 +1,519 @@
-"""gui/ui_layout.py -- GUI 창/윈도우·탭·위젯 레이아웃 구성 메서드
+"""gui/ui_logic.py -- 팝업·시청기록·PotPlayer 연동 로직 메서드
 
 포함 메서드:
-  _tray_show, _tray_quit     — 트레이 아이콘 콜백
-  _build_window              — 루트 윈도우 초기화
-  _build_ui                  — 메인 UI 레이아웃 전체 구성 (헤더·탭바·카드·버튼)
-  _build_history_tab         — 시청 기록 탭 위젯 구성
+  시청 기록 : _hist_browse_dir, _hist_open_dir, _hist_resume,
+              _refresh_history_list, _load_history, _save_history,
+              record_video_history
+  PotPlayer : _pip_toggle, _update_oped_btn, _oped_skip,
+              _poll_playback_info, _start_title_watcher
+  팝업      : _toggle_gear_menu, _open_gear_menu, _close_gear_menu,
+              _open_log_popup, _update_log_popup, _clear_log, _open_settings
+
+모듈 함수  : _strip_episode_number, _extract_potplayer_title
 """
 import os
+import re
+import json
 import tkinter as tk
 import tkinter.filedialog as fd
-from app_icon import apply_to_root_window
 from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip, pip_send
 
 
-class LipSyncGUILayout:
+class LipSyncGUILogic:
 
-    def _tray_show(self, icon=None, item=None):
-        self.root.after(0, self.root.deiconify)
+    # ── 폴더 지정 / 열기 ──────────────────────────────────────────────────────
+    def _hist_browse_dir(self):
+        init = self._hist_video_dir if getattr(self, "_hist_video_dir", "") else "/"
+        d = fd.askdirectory(title="동영상 폴더 지정", initialdir=init)
+        if not d:
+            return
+        self._hist_video_dir = d
+        self._hist_dir_lbl.config(text=d, fg=self.TEXT)
+        self._hist_open_btn.config(state="normal")
+        self._save_settings()
+        self._refresh_history_list()
 
-    def _tray_quit(self, icon=None, item=None):
-        try:
-            self.root.after(120, self._on_close)
-        except Exception:
-            try: self._on_close()
+    def _hist_open_dir(self):
+        d = getattr(self, "_hist_video_dir", "")
+        if d and os.path.isdir(d):
+            try: os.startfile(d)
             except Exception: pass
 
-    def _build_window(self):
-        r = self.root
-        r.withdraw()
-        r.title("Auto Sync")
-        r.geometry(f"{self.W}x{self.H}")
-        r.resizable(False, False)
-        r.configure(bg=self.BG)
-        try: apply_to_root_window(r)
-        except Exception: pass
-        r.update_idletasks()
-        x, y = self._load_pos()
-        r.geometry(f"{self.W}x{self.H}+{x}+{y}")
-        r.deiconify()
+    # ── 이어보기 ──────────────────────────────────────────────────────────────
+    def _hist_resume(self, title: str):
+        d = getattr(self, "_hist_video_dir", "")
+        if not d or not os.path.isdir(d):
+            return
+        VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv",
+                      ".ts", ".m2ts", ".flv", ".webm", ".m4v"}
+        base = _strip_episode_number(title)
+        # 제목에서 화수 숫자 추출: "17화", "17편", "S01E17", 순수 숫자 등
+        ep_num = None
+        m = re.search(r'제?(\d+)\s*[화편부회장권]', title)
+        if not m:
+            m = re.search(r'[Ss]\d{1,2}[Ee](\d{1,3})', title)
+        if not m:
+            nums = re.findall(r'(?<!\d)(\d+)(?!\d)', title)
+            if nums:
+                m_val = nums[-1]
+                ep_num = m_val
+        if m and ep_num is None:
+            ep_num = m.group(1)
 
-    def _build_ui(self):
-        MONO   = ("Consolas", self.F_MONO)
-        MONO_S = ("Consolas", self.F_MONO_S)
-        r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-        P  = max(10, round(18 * r))
-        P2 = max(8,  round(14 * r))
-        self._theme_widgets = []
-        def reg(w, bg=None, fg=None, abg=None, afg=None, obg=None):
-            self._theme_widgets.append((w, bg, fg, abg, afg, obg))
-            return w
+        found = None
+        exact_match = None
+        series_match = None
 
-        # ── 헤더 ──────────────────────────────────────────────────────────────
-        hdr = reg(tk.Frame(self.root, bg=self.BG, pady=0), bg="BG")
-        hdr.pack(fill="x", padx=P, ipady=P2)
-        ic = round(32 * r)
-        self._icon_canvas = tk.Canvas(hdr, width=ic, height=ic, bg=self.BG, highlightthickness=0)
-        self._icon_canvas.pack(side="left", anchor="center")
-        self._icon_canvas.create_oval(1, 1, ic-1, ic-1, fill=self.BG3, outline=self.ACCENT, width=2)
-        self._icon_canvas.create_polygon(round(12*r), round(8*r), round(12*r), round(24*r), round(26*r), round(16*r), fill=self.ACCENT, outline="")
-        tf = reg(tk.Frame(hdr, bg=self.BG), bg="BG")
-        tf.pack(side="left", padx=10, anchor="center")
-        reg(tk.Label(tf, text="Auto Sync", font=("Segoe UI", self.F_TITLE, "bold"), bg=self.BG, fg=self.TEXT), bg="BG", fg="TEXT").pack(anchor="w")
-        reg(tk.Label(tf, text="PotPlayer 자동 싱크 보정 | 멀티코어", font=("Segoe UI", max(7, self.F_TITLE-5)), bg=self.BG, fg=self.TEXT_MID), bg="BG", fg="TEXT_MID").pack(anchor="w")
-        rf = reg(tk.Frame(hdr, bg=self.BG), bg="BG")
-        rf.pack(side="right", anchor="center")
-        reg(tk.Label(rf, text="v2.0", font=("Consolas", 7), bg=self.ACCENT, fg="#0e0e0e", padx=5, pady=2), bg="ACCENT").pack(anchor="e")
-        gfg = self.ACCENT if self._darkmode_var.get() else self.TEXT
-        self._gear_btn = reg(tk.Button(rf, text="⚙", font=("Segoe UI", self.F_GEAR), bg=self.BG, fg=gfg, activebackground=self.BG2, activeforeground=gfg, relief="flat", cursor="hand2", bd=0, padx=2, pady=2, command=self._toggle_gear_menu), bg="BG", fg="GEAR_FG", abg="BG2", afg="GEAR_FG")
-        self._gear_btn.pack(anchor="e", pady=(4, 0))
-        reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x")
+        for dirpath, _, fnames in os.walk(d):
+            for fname in fnames:
+                if os.path.splitext(fname)[1].lower() not in VIDEO_EXTS:
+                    continue
+                fname_noext = os.path.splitext(fname)[0]
+                # 1순위: 완전 일치
+                if fname_noext == title or fname == title:
+                    exact_match = os.path.join(dirpath, fname)
+                    break
+                # 2순위: 같은 시리즈 + 화수 일치
+                if _strip_episode_number(fname) == base and ep_num is not None:
+                    # fname 안에서 같은 위치의 숫자가 ep_num과 일치하는지 확인
+                    fname_nums = re.findall(r'(?<!\d)(\d+)(?!\d)', fname_noext)
+                    if ep_num in fname_nums:
+                        series_match = os.path.join(dirpath, fname)
+            if exact_match:
+                break
+            if found:
+                break
 
-        # ── 탭 바 ──────────────────────────────────────────────────────────────
-        TAB_F = max(8, round(9 * r))
-        tab_bar = reg(tk.Frame(self.root, bg=self.BG2), bg="BG2")
-        tab_bar.pack(fill="x")
-        self._tab_var = getattr(self, "_tab_var", tk.StringVar(value="history"))
-        self._tab_frames = {}
-        self._tab_btn_sync    = None
-        self._tab_btn_history = None
-
-        tab_inner = tk.Frame(tab_bar, bg=self.BG2)
-        tab_inner.pack(side="left", padx=P2, pady=(round(6*r), 0))
-
-        # PIP 버튼 — 탭바 오른쪽에 배치
-        self._pip_on = bool(self._load_setting("pip_on", False))
-        pip_text   = "⧉ PIP ON" if self._pip_on else "⧉ PIP OFF"
-        pip_fg     = self.ACCENT3 if self._pip_on else self.TEXT_MID
-        pip_bg     = "#0e0e0e"
-        self._pip_btn = reg(
-            tk.Button(tab_bar, text=pip_text,
-                      font=("Consolas", max(7, round(8*r)), "bold"),
-                      bg=pip_bg, fg=pip_fg,
-                      activebackground=self.BG3, activeforeground=self.TEXT,
-                      relief="solid", cursor="hand2",
-                      padx=round(7*r), pady=round(3*r),
-                      bd=1, highlightthickness=0,
-                      command=self._pip_toggle),
-            bg="BG2", fg="TEXT_MID", abg="BG3")
-
-        def _switch_tab(name):
-            self._tab_var.set(name)
-            for n, frame in self._tab_frames.items():
-                if n == name:
-                    frame.pack(fill="both", expand=True)
-                else:
-                    frame.pack_forget()
-            _update_tab_styles()
-
-        def _update_tab_styles():
-            cur = self._tab_var.get()
-            for name, btn in [("sync", self._tab_btn_sync), ("history", self._tab_btn_history)]:
-                if btn is None: continue
-                if name == cur:
-                    btn.config(bg=self.BG, fg=self.ACCENT, font=("Consolas", TAB_F, "bold"))
-                else:
-                    btn.config(bg=self.BG2, fg=self.TEXT_MID, font=("Consolas", TAB_F))
-
-        self._pip_btn.pack(side="right", padx=(0, P2), pady=(round(4*r), round(4*r)))
-
-        self._tab_btn_sync = tk.Button(
-            tab_inner, text="싱크 보정",
-            font=("Consolas", TAB_F, "bold"),
-            bg=self.BG, fg=self.ACCENT,
-            activebackground=self.BG3, activeforeground=self.ACCENT,
-            relief="flat", cursor="hand2", padx=round(10*r), pady=round(4*r),
-            bd=0, command=lambda: _switch_tab("sync"))
-        self._tab_btn_sync.pack(side="left")
-
-        self._tab_btn_history = tk.Button(
-            tab_inner, text="시청 기록",
-            font=("Consolas", TAB_F),
-            bg=self.BG2, fg=self.TEXT_MID,
-            activebackground=self.BG3, activeforeground=self.TEXT,
-            relief="flat", cursor="hand2", padx=round(10*r), pady=round(4*r),
-            bd=0, command=lambda: _switch_tab("history"))
-        self._tab_btn_history.pack(side="left")
-
-        self._switch_tab_fn        = _switch_tab
-        self._update_tab_styles_fn = _update_tab_styles
-
-        reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x")
-
-        # ── 하단 버튼을 container보다 먼저 pack (tkinter는 pack 등록 순서대로 공간 배분)
-        # side="bottom" 은 역순으로 쌓이므로: 선을 나중에 pack해야 버튼 위에 표시됨
-        bf = reg(tk.Frame(self.root, bg=self.BG, padx=round(10*r), pady=round(6*r)), bg="BG")
-        bf.pack(fill="x", side="bottom")
-        reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", side="bottom")
-        bf.columnconfigure(2, weight=1)
-        bf.rowconfigure(0, minsize=round(32*r))
-        BTN = dict(font=("Consolas", max(8, round(9*r)), "bold"), relief="flat", cursor="hand2", padx=round(8*r), pady=0, anchor="center")
-        self._start_btn = reg(tk.Button(bf, text="▶ 시작", bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER, command=self._toggle, **BTN), bg="BG3", fg="ACCENT", abg="BORDER")
-        self._start_btn.grid(row=0, column=0, padx=(0, 2), sticky="nsew")
-        self._reset_btn = reg(tk.Button(bf, text="↺ 초기화", bg=self.BG3, fg=self.TEXT_MID, activebackground=self.BORDER, command=self._reset, **BTN), bg="BG3", fg="TEXT_MID", abg="BORDER")
-        self._reset_btn.grid(row=0, column=1, padx=2, sticky="nsew")
-        reg(tk.Frame(bf, bg=self.BG), bg="BG").grid(row=0, column=2, sticky="nsew")
-        self._close_btn = reg(tk.Button(bf, text="✕ 종료", bg=self.BG3, fg=self.ACCENT2, activebackground=self.BORDER, command=self._on_close, **BTN), bg="BG3", fg="ACCENT2", abg="BORDER")
-        self._close_btn.grid(row=0, column=3, padx=(2, 0), sticky="nsew")
-
-        # ── 탭 컨테이너 (하단 버튼 다음에 pack → 남은 공간만 차지)
-        container = reg(tk.Frame(self.root, bg=self.BG), bg="BG")
-        container.pack(fill="both", expand=True)
-
-        # ════════════════════════════════════════════════════════
-        # 탭1: 싱크 보정
-        # ════════════════════════════════════════════════════════
-        sync_frame = reg(tk.Frame(container, bg=self.BG), bg="BG")
-        self._tab_frames["sync"] = sync_frame
-
-        card = reg(tk.Frame(sync_frame, bg=self.BG2, pady=12, padx=16), bg="BG2")
-        card.pack(fill="x", padx=P2, pady=(round(12*r), 0))
-        def status_row(parent, label):
-            row = reg(tk.Frame(parent, bg=self.BG2), bg="BG2")
-            row.pack(fill="x", pady=2)
-            reg(tk.Label(row, text=label, font=MONO, bg=self.BG2, fg=self.TEXT_MID, width=11, anchor="w"), bg="BG2", fg="TEXT_MID").pack(side="left", anchor="center")
-            dot = reg(tk.Label(row, text="●", font=("Consolas", 8), bg=self.BG2, fg=self.TEXT_DIM), bg="BG2", fg="TEXT_DIM")
-            dot.pack(side="left", anchor="center")
-            lbl = reg(tk.Label(row, text="—", font=MONO, bg=self.BG2, fg=self.TEXT_MID), bg="BG2", fg="TEXT_MID")
-            lbl.pack(side="left", padx=4, anchor="center")
-            return dot, lbl
-        self._pot_dot, self._pot_lbl = status_row(card, "팟플레이어")
-        self._aud_dot, self._aud_lbl = status_row(card, "오디오 장치")
-        pr = reg(tk.Frame(card, bg=self.BG2), bg="BG2")
-        pr.pack(fill="x", pady=(6, 0))
-        reg(tk.Label(pr, text="프로세스", font=MONO, bg=self.BG2, fg=self.TEXT_MID, width=11, anchor="w"), bg="BG2", fg="TEXT_MID").pack(side="left", anchor="center")
-        self._proc_dot = reg(tk.Label(pr, text="●", font=("Consolas", 8), bg=self.BG2, fg=self.TEXT_DIM), bg="BG2", fg="TEXT_DIM")
-        self._proc_dot.pack(side="left", anchor="center")
-        self._proc_lbl = reg(tk.Label(pr, text="대기 중", font=MONO, bg=self.BG2, fg=self.TEXT_MID), bg="BG2", fg="TEXT_MID")
-        self._proc_lbl.pack(side="left", padx=4, anchor="center")
-        dr = reg(tk.Frame(card, bg=self.BG2), bg="BG2")
-        dr.pack(fill="x", pady=(4, 0))
-        reg(tk.Label(dr, text="재생 위치", font=MONO, bg=self.BG2, fg=self.TEXT_MID, width=11, anchor="w"), bg="BG2", fg="TEXT_MID").pack(side="left", anchor="center")
-        self._dur_lbl = reg(tk.Label(dr, text="— / —", font=MONO, bg=self.BG2, fg=self.TEXT_MID), bg="BG2", fg="TEXT_MID")
-        self._dur_lbl.pack(side="left", padx=4, anchor="center")
-        or_ = reg(tk.Frame(sync_frame, bg=self.BG, padx=P), bg="BG")
-        or_.pack(fill="x", pady=(round(12*r), 0))
-        self._oped_btn = reg(tk.Button(or_, font=("Consolas", max(8, round(9*r)), "bold"), relief="flat", cursor="hand2", padx=round(8*r), pady=0, command=self._oped_skip), bg="BG3", fg="ACCENT3", abg="BORDER")
-        self._oped_btn.pack(fill="x")
-        self._update_oped_btn()
-        reg(tk.Frame(sync_frame, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x", padx=P2, pady=(round(8*r), 0))
-        mf = reg(tk.Frame(sync_frame, bg=self.BG, pady=round(6*r), padx=P), bg="BG")
-        mf.pack(fill="x")
-        tp = reg(tk.Frame(mf, bg=self.BG), bg="BG")
-        tp.pack(fill="x")
-        reg(tk.Label(tp, text="OFFSET", font=("Consolas", 7, "bold"), bg=self.BG, fg=self.TEXT_DIM), bg="BG", fg="TEXT_DIM").pack(side="left")
-        self._badge = reg(tk.Label(tp, text=" 대기 중 ", font=("Consolas", max(7, round(8*r)), "bold"), bg=self.BG3, fg=self.TEXT, padx=round(6*r), pady=2), bg="BG3", fg="TEXT")
-        self._badge.pack(side="right")
-        offr = reg(tk.Frame(mf, bg=self.BG), bg="BG")
-        offr.pack(fill="x", pady=(2, 0))
-        self._offset_lbl = reg(tk.Label(offr, text="— ms", font=("Consolas", self.F_OFFSET, "bold"), bg=self.BG, fg=self.ACCENT), bg="BG", fg="ACCENT")
-        self._offset_lbl.pack(side="left", anchor="w")
-        bar_bg = reg(tk.Frame(mf, bg=self.BG3, height=4), bg="BG3")
-        bar_bg.pack(fill="x", pady=(4, 0))
-        bar_bg.pack_propagate(False)
-        self._bar = tk.Frame(bar_bg, bg=self.ACCENT, height=4)
-        self._bar.place(x=0, y=0, width=0, height=4)
-        self._bar_ref = bar_bg
-        r1 = reg(tk.Frame(mf, bg=self.BG), bg="BG")
-        r1.pack(fill="x", pady=(6, 0))
-        reg(tk.Label(r1, text="이미지 샘플", font=MONO_S, bg=self.BG, fg=self.TEXT_MID), bg="BG", fg="TEXT_MID").pack(side="left")
-        self._lip_cnt = reg(tk.Label(r1, text="0", font=MONO_S, bg=self.BG, fg=self.TEXT), bg="BG", fg="TEXT")
-        self._lip_cnt.pack(side="left", padx=(4, 16))
-        reg(tk.Label(r1, text="오디오 샘플", font=MONO_S, bg=self.BG, fg=self.TEXT_MID), bg="BG", fg="TEXT_MID").pack(side="left")
-        self._aud_cnt = reg(tk.Label(r1, text="0", font=MONO_S, bg=self.BG, fg=self.TEXT), bg="BG", fg="TEXT")
-        self._aud_cnt.pack(side="left", padx=(4, 0))
-        r2 = reg(tk.Frame(mf, bg=self.BG), bg="BG")
-        r2.pack(fill="x", pady=(3, 0))
-        reg(tk.Label(r2, text="누적 보정", font=MONO_S, bg=self.BG, fg=self.TEXT_MID), bg="BG", fg="TEXT_MID").pack(side="left")
-        self._corr_lbl = reg(tk.Label(r2, text="+0 ms", font=MONO_S, bg=self.BG, fg=self.TEXT), bg="BG", fg="TEXT")
-        self._corr_lbl.pack(side="left", padx=(4, 0))
-
-        # ════════════════════════════════════════════════════════
-        # 탭2: 시청 기록
-        # ════════════════════════════════════════════════════════
-        hist_frame = reg(tk.Frame(container, bg=self.BG), bg="BG")
-        self._tab_frames["history"] = hist_frame
-        self._build_history_tab(hist_frame, r, P, P2, MONO, MONO_S)
-
-        # 시청 기록 탭 먼저 표시
-        _switch_tab("history")
-        self.root.after(1000, self._poll_playback_info)
-        self.root.after(500,  self._start_title_watcher)
-
-    # ── 시청 기록 탭 구성 ─────────────────────────────────────────────────────
-    def _build_history_tab(self, parent, r, P, P2, MONO, MONO_S):
-        reg = lambda w, bg=None, fg=None, abg=None, afg=None, obg=None: (
-            self._theme_widgets.append((w, bg, fg, abg, afg, obg)), w)[1]
-
-        BTN_S = dict(font=("Consolas", max(7, round(8*r)), "bold"),
-                     relief="flat", cursor="hand2",
-                     padx=round(6*r), pady=round(3*r))
-
-        # 상단 폴더 지정 카드
-        top = tk.Frame(parent, bg=self.BG2, padx=round(10*r), pady=round(8*r))
-        top.pack(fill="x", padx=P2, pady=(round(10*r), 0))
-        reg(top, bg="BG2")
-
-        reg(tk.Label(top, text="동영상 폴더",
-                     font=("Consolas", self.F_MONO_S, "bold"),
-                     bg=self.BG2, fg=self.TEXT_MID),
-            bg="BG2", fg="TEXT_MID").pack(anchor="w")
-
-        dir_row = tk.Frame(top, bg=self.BG2)
-        dir_row.pack(fill="x", pady=(round(4*r), 0))
-        reg(dir_row, bg="BG2")
-
-        self._hist_dir_lbl = reg(
-            tk.Label(dir_row, text="(지정 안 됨)",
-                     font=("Consolas", self.F_MONO_S),
-                     bg=self.BG3, fg=self.TEXT_DIM,
-                     anchor="w", padx=6, width=1),
-            bg="BG3", fg="TEXT_DIM")
-        self._hist_dir_lbl.pack(side="left", fill="x", expand=True)
-
-        self._hist_browse_btn = reg(
-            tk.Button(dir_row, text="📂",
-                      bg=self.BG3, fg=self.TEXT,
-                      activebackground=self.BORDER,
-                      command=self._hist_browse_dir, **BTN_S),
-            bg="BG3", fg="TEXT", abg="BORDER")
-        self._hist_browse_btn.pack(side="left", padx=(round(4*r), 0))
-
-        self._hist_open_btn = reg(
-            tk.Button(dir_row, text="열기",
-                      bg=self.BG3, fg=self.TEXT,
-                      activebackground=self.BORDER,
-                      state="disabled",
-                      command=self._hist_open_dir, **BTN_S),
-            bg="BG3", fg="TEXT", abg="BORDER")
-        self._hist_open_btn.pack(side="left", padx=(round(4*r), 0))
-
-        # 구분선
-        reg(tk.Frame(parent, bg=self.BORDER, height=1),
-            bg="BORDER").pack(fill="x", padx=P2, pady=(round(8*r), 0))
-
-        # 기록 목록 헤더
-        hdr_row = tk.Frame(parent, bg=self.BG, padx=P2)
-        hdr_row.pack(fill="x", pady=(round(6*r), 0))
-        reg(hdr_row, bg="BG")
-        reg(tk.Label(hdr_row, text="시청 기록",
-                     font=("Consolas", self.F_MONO_S, "bold"),
-                     bg=self.BG, fg=self.TEXT_DIM),
-            bg="BG", fg="TEXT_DIM").pack(side="left")
-        clear_fg = self.TEXT if self._darkmode_var.get() else self.TEXT_MID
-        self._hist_clear_btn = reg(
-            tk.Button(hdr_row, text="🗑 전체 삭제",
-                      font=("Consolas", max(7, round(8*r)), "bold"),
-                      bg=self.BG, fg=clear_fg,
-                      activebackground=self.BG2, activeforeground=self.ACCENT2,
-                      relief="flat", cursor="hand2",
-                      padx=round(6*r), pady=0,
-                      command=self._hist_clear_all),
-            bg="BG", fg="TEXT_MID", abg="BG2", afg="ACCENT2")
-        self._hist_clear_btn.pack(side="right")
-
-        # 스크롤 영역: 스페이서 Frame으로 좌우 마진을 명시적으로 보장
-        scroll_outer = tk.Frame(parent, bg=self.BG)
-        scroll_outer.pack(fill="both", expand=True, pady=(round(4*r), 0))
-        reg(scroll_outer, bg="BG")
-
-        # 좌우 마진 스페이서 (P2)
-        tk.Frame(scroll_outer, bg=self.BG, width=P2).pack(side="right", fill="y")
-        tk.Frame(scroll_outer, bg=self.BG, width=P2).pack(side="left", fill="y")
-
-        # 스크롤바 없이 캔버스만 (마우스휠로만 스크롤)
-        canvas = tk.Canvas(scroll_outer, bg=self.BG, highlightthickness=0)
-        canvas.pack(side="left", fill="both", expand=True)
-
-        self._hist_list_canvas = canvas
-        self._hist_list_frame  = tk.Frame(canvas, bg=self.BG)
-        self._hist_canvas_window = canvas.create_window(
-            (0, 0), window=self._hist_list_frame, anchor="nw")
-
-        def _on_frame_cfg(e):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _on_canvas_cfg(e):
-            canvas.itemconfig(self._hist_canvas_window, width=e.width)
-            self._hist_list_frame.config(width=e.width)
-
-        self._hist_list_frame.bind("<Configure>", _on_frame_cfg)
-        canvas.bind("<Configure>", _on_canvas_cfg)
-        canvas.bind("<MouseWheel>",
-                    lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-
-        # 저장된 폴더 복원
-        saved_dir = self._load_setting("history_video_dir", "")
-        if saved_dir and os.path.isdir(saved_dir):
-            self._hist_video_dir = saved_dir
-            self._hist_dir_lbl.config(text=saved_dir, fg=self.TEXT)
-            self._hist_open_btn.config(state="normal")
+        found = exact_match or series_match
+        if found:
+            try: os.startfile(found)
+            except Exception: pass
         else:
-            self._hist_video_dir = ""
+            import tkinter.messagebox as mb
+            mb.showwarning("이어보기",
+                           f"폴더에서 해당 동영상을 찾을 수 없습니다.\n\n"
+                           f"제목: {title}\n폴더: {d}")
 
+    # ── 시청 기록 목록 갱신 ───────────────────────────────────────────────────
+    def _refresh_history_list(self):
+        if not hasattr(self, "_hist_list_frame"):
+            return
+        try:
+            if not self._hist_list_frame.winfo_exists():
+                return
+        except Exception:
+            return
+
+        records = self._load_history()
+        r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        has_dir = bool(getattr(self, "_hist_video_dir", ""))
+
+        import os as _os
+
+        # 표시할 데이터 목록 (최신순)
+        entries = list(reversed(records))
+
+        # 캐시된 행 위젯 목록 (재활용)
+        if not hasattr(self, "_hist_row_cache"):
+            self._hist_row_cache = []
+
+        cache     = self._hist_row_cache
+        frame     = self._hist_list_frame
+        canvas    = self._hist_list_canvas
+
+        # ── 빈 상태 레이블 처리 ──────────────────────────────────────────────
+        empty_lbl = getattr(self, "_hist_empty_lbl", None)
+        if not entries:
+            # 캐시 행 숨기기
+            for cached in cache:
+                cached["row"].pack_forget()
+            if empty_lbl is None or not empty_lbl.winfo_exists():
+                self._hist_empty_lbl = tk.Label(
+                    frame, text="— 시청 기록 없음 —",
+                    font=("Consolas", self.F_MONO_S),
+                    bg=self.BG, fg=self.TEXT_DIM,
+                    pady=round(12*r))
+                self._hist_empty_lbl.pack()
+            else:
+                self._hist_empty_lbl.pack()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            return
+        else:
+            if empty_lbl is not None:
+                try:
+                    empty_lbl.pack_forget()
+                except Exception:
+                    pass
+
+        # ── 캐시 행 부족하면 새로 생성 ──────────────────────────────────────
+        while len(cache) < len(entries):
+            idx     = len(cache)
+            row_bg  = self.BG2 if idx % 2 == 0 else self.BG3
+            btn_bg  = self.BG3 if idx % 2 == 0 else self.BG2
+
+            row  = tk.Frame(frame, bg=row_bg, pady=round(5*r))
+            info = tk.Frame(row,  bg=row_bg)
+            info.pack(side="left", fill="x", expand=True, padx=(round(8*r), 0))
+
+            title_lbl = tk.Label(info, text="",
+                                 font=("Consolas", self.F_MONO_S, "bold"),
+                                 bg=row_bg, fg=self.TEXT,
+                                 anchor="w", justify="left")
+            title_lbl.pack(anchor="w")
+
+            ts_lbl = tk.Label(info, text="",
+                              font=("Consolas", max(6, self.F_MONO_S-1)),
+                              bg=row_bg, fg=self.TEXT_DIM,
+                              anchor="w")
+            ts_lbl.pack(anchor="w")
+
+            del_btn = tk.Button(row, text="🗑",
+                                font=("Consolas", max(7, round(8*r))),
+                                bg=btn_bg, fg=self.TEXT if self._darkmode_var.get() else self.TEXT_MID,
+                                activebackground=self.BORDER, activeforeground=self.ACCENT2,
+                                relief="flat", cursor="hand2",
+                                padx=round(4*r), pady=round(2*r))
+            del_btn.pack(side="right", anchor="center", padx=(0, round(4*r)))
+
+            btn = tk.Button(row, text="▶ 이어보기",
+                            font=("Consolas", max(7, round(8*r)), "bold"),
+                            bg=btn_bg, fg=self.ACCENT,
+                            activebackground=self.BORDER,
+                            relief="flat", cursor="hand2",
+                            padx=round(6*r), pady=round(2*r))
+            btn.pack(side="right", anchor="center", padx=(0, round(4*r)))
+
+            cache.append({"row": row, "title_lbl": title_lbl,
+                          "ts_lbl": ts_lbl, "btn": btn, "del_btn": del_btn})
+
+        # ── 기존 행 내용만 업데이트 (위젯 재활용) ───────────────────────────
+        for i, rec in enumerate(entries):
+            title  = rec.get("title", "")
+            ts     = rec.get("timestamp", "")
+            cached = cache[i]
+
+            display_title = _os.path.splitext(title)[0]
+            if " - " in display_title:
+                first, rest = display_title.split(" - ", 1)
+                display_text = first + "\n- " + rest
+            else:
+                display_text = display_title
+
+            cached["title_lbl"].config(text=display_text)
+            cached["ts_lbl"].config(text=ts if ts else "")
+            cached["btn"].config(
+                state="normal" if has_dir else "disabled",
+                command=lambda t=title: self._hist_resume(t)
+            )
+            cached["del_btn"].config(
+                command=lambda t=title: self._hist_delete_one(t)
+            )
+            cached["row"].pack(fill="x", pady=(0, 1))
+
+        # ── 남는 캐시 행은 숨기기 ────────────────────────────────────────────
+        for i in range(len(entries), len(cache)):
+            cache[i]["row"].pack_forget()
+
+        cw = canvas.winfo_width()
+        if cw > 1:
+            canvas.itemconfig(self._hist_canvas_window, width=cw)
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    # ── history.json 로드/저장 ────────────────────────────────────────────────
+    def _hist_delete_one(self, title: str):
+        records = self._load_history()
+        records = [r for r in records if r.get("title") != title]
+        self._save_history(records)
+        # 캐시 초기화 없이 바로 갱신 — _refresh_history_list 내부의
+        # 캐시 재활용 로직이 항목 수 감소(마지막 행 pack_forget)를 처리함.
+        # 캐시를 []로 리셋하면 기존 pack()된 Frame이 frame에 잔류하여
+        # 새 위젯과 중복 표시되는 버그가 발생하므로 제거.
         self._refresh_history_list()
+
+    def _hist_clear_all(self):
+        import tkinter.messagebox as mb
+        if not mb.askyesno("전체 삭제", "시청 기록을 모두 삭제할까요?"):
+            return
+        self._save_history([])
+        # 기존 캐시 위젯을 명시적으로 destroy하여 frame에 잔류하지 않도록 함
+        for cached in getattr(self, "_hist_row_cache", []):
+            try:
+                cached["row"].destroy()
+            except Exception:
+                pass
+        self._hist_row_cache = []
+        self._refresh_history_list()
+
+    def _load_history(self):
+        try:
+            p = os.path.join(self.APP_DIR, "history.json")
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def _save_history(self, records):
+        import collections, time as _t
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+        try:
+            os.makedirs(self.APP_DIR, exist_ok=True)
+            p = os.path.join(self.APP_DIR, "history.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] ❌ _save_history 오류: {e}")
+
+    def record_video_history(self, title: str):
+        """동영상 재생 감지 또는 제목 변경 시 호출.
+        기록 기준:
+          1. 완전히 동일한 제목 → 타임스탬프만 갱신 (중복 추가 방지)
+          2. 같은 시리즈명인데 화수만 다름 → 기존 기록 덮어쓰기
+          3. 새로운 작품 → 신규 기록 추가
+        """
+        import time as _t, collections
+        if not title or not title.strip():
+            return
+
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        try:
+            ts      = _t.strftime("%Y-%m-%d %H:%M")
+            records = self._load_history()
+            base    = _strip_series_name(title)
+
+            for rec in records:
+                existing_title = rec.get("title", "")
+
+                # 완전히 동일한 제목 → 타임스탬프만 갱신
+                if existing_title == title:
+                    rec["timestamp"] = ts
+                    self._save_history(records)
+                    self._refresh_history_list()
+                    self._log_lines.append(
+                        f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 갱신: {title}")
+                    return
+
+                # 같은 시리즈명, 화수만 다름 → 덮어쓰기
+                existing_base = _strip_series_name(existing_title)
+                if existing_base and base and existing_base == base:
+                    old_title        = existing_title
+                    rec["title"]     = title
+                    rec["timestamp"] = ts
+                    self._save_history(records)
+                    self._refresh_history_list()
+                    self._log_lines.append(
+                        f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 덮어쓰기: {old_title} → {title}")
+                    return
+
+            # 신규 기록 추가
+            records.append({"title": title, "timestamp": ts})
+            self._save_history(records)
+            self._refresh_history_list()
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] 📺 시청 기록 추가: {title}")
+
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] ❌ record_video_history 오류: {e}")
+
+    # ── PIP ───────────────────────────────────────────────────────────────────
+    def _pip_toggle(self):
+        hwnd = find_potplayer_hwnd()
+        if not hwnd: return
+        pip_send(hwnd)
+        if self._pip_on:
+            self._pip_on = False
+            self._pip_btn.config(text="⧉ PIP OFF", fg=self.TEXT_MID,
+                                 bg="#0e0e0e", relief="solid", bd=1)
+        else:
+            self._pip_on = True
+            self._pip_btn.config(text="⧉ PIP ON", fg=self.ACCENT3,
+                                 bg="#0e0e0e", relief="solid", bd=1)
+        self._save_settings()
+
+    def _update_oped_btn(self):
+        if not hasattr(self, "_oped_btn"): return
+        try: sec = int(self._oped_skip_sec_var.get())
+        except (ValueError, AttributeError): sec = 90
+        if self._oped_auto_var.get():
+            self._oped_btn.config(text=f"⏭ 자동 스킵 ON  ({sec}초)", state="disabled", bg=self.BG3, fg=self.TEXT_DIM, activebackground=self.BORDER)
+        else:
+            self._oped_btn.config(text=f"⏭ OP/ED 스킵  ({sec}초)", state="normal", bg=self.BG3, fg=self.ACCENT3, activebackground=self.BORDER)
+
+    def _oped_skip(self):
+        hwnd = find_potplayer_hwnd()
+        if not hwnd: return
+        pos_ms, dur_ms = get_playback_info(hwnd)
+        if pos_ms is None: return
+        try: skip_sec = max(10, min(600, int(self._oped_skip_sec_var.get())))
+        except (ValueError, AttributeError): skip_sec = 90
+        new_pos, ok = do_oped_skip(hwnd, pos_ms, dur_ms, skip_sec)
+        if ok:
+            def fmt(ms):
+                s = ms // 1000
+                return f"{s//60}:{s%60:02d}"
+            if hasattr(self, "_log_lines"):
+                import time as _t
+                self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] ⏭ 수동 스킵: {fmt(pos_ms)} → {fmt(new_pos)}  (전체 {fmt(dur_ms)})")
+
+    def _poll_playback_info(self):
+        try:
+            hwnd = find_potplayer_hwnd()
+            if hwnd:
+                pos_ms, dur_ms = get_playback_info(hwnd)
+                if pos_ms is not None:
+                    def fmt(ms):
+                        s = ms // 1000
+                        return f"{s//60}:{s%60:02d}"
+                    txt = f"{fmt(pos_ms)} / {fmt(dur_ms)}" if dur_ms is not None else f"{fmt(pos_ms)} / —"
+                    self._dur_lbl.config(text=txt, fg=self.ACCENT3)
+                else:
+                    self._dur_lbl.config(text="— / —", fg=self.TEXT_MID)
+            else:
+                self._dur_lbl.config(text="— / —", fg=self.TEXT_MID)
+        except Exception: pass
+        if not self._closing:
+            self.root.after(1000, self._poll_playback_info)
+
+    def _start_title_watcher(self):
+        """PotPlayer 창 제목을 1초마다 감시해 변경 시 시청 기록 저장.
+
+        기록 기준:
+          - 기준1(재생 감지 팝업)과 기준2(제목 변경) 모두 이 watcher 하나로 처리.
+          - 팝업 기록과의 중복은 record_video_history 내부에서
+            '완전히 동일한 제목 → 타임스탬프만 갱신' 처리로 자연스럽게 방지됨.
+          - 팟플레이어가 닫혔다가 다시 열리거나 다른 영상을 열면 항상 기록.
+        """
+        import threading, ctypes, time as _t, collections
+
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        def _watch():
+            prev_title  = ""
+            was_running = False          # 이전 루프에서 PotPlayer가 있었는지
+            user32      = ctypes.windll.user32
+            buf         = ctypes.create_unicode_buffer(512)
+
+            while not getattr(self, "_closing", False):
+                try:
+                    hwnd = find_potplayer_hwnd()
+                    if hwnd:
+                        user32.GetWindowTextW(hwnd, buf, 512)
+                        title = _extract_potplayer_title(buf.value)
+
+                        if title and title != prev_title:
+                            prev_title  = title
+                            was_running = True
+                            self._log_lines.append(
+                                f"[{_t.strftime('%H:%M:%S')}] 🔍 제목 감지: {title}")
+                            self.root.after(
+                                0, lambda t=title: self.record_video_history(t))
+                        else:
+                            was_running = True
+                    else:
+                        # PotPlayer가 닫히면 prev_title 초기화
+                        # → 같은 영상을 다시 열면 다시 기록됨
+                        if was_running:
+                            prev_title  = ""
+                            was_running = False
+                except Exception as e:
+                    try:
+                        self._log_lines.append(
+                            f"[{_t.strftime('%H:%M:%S')}] ⚠ 타이틀 감시 오류: {e}")
+                    except Exception:
+                        pass
+                _t.sleep(1.0)
+
+        t = threading.Thread(target=_watch, daemon=True, name="title-watcher")
+        t.start()
+
+    def _toggle_gear_menu(self):
+        if self._gear_menu_open: self._close_gear_menu()
+        else: self._open_gear_menu()
+
+    def _open_gear_menu(self):
+        self._gear_menu_open = True
+        self.root.update_idletasks()
+        r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        rx = self.root.winfo_rootx(); ry = self.root.winfo_rooty()
+        bx = self._gear_btn.winfo_rootx() - rx
+        by = self._gear_btn.winfo_rooty() - ry + self._gear_btn.winfo_height() + 2
+        mw = round(140 * r)
+        frame = tk.Frame(self.root, bg=self.BORDER, bd=1, relief="solid")
+        self._gear_menu_frame = frame
+        ITEM = dict(font=("Consolas", max(8, round(9*r))), bg=self.BG2, fg=self.TEXT, relief="flat", cursor="hand2", activebackground=self.BG3, activeforeground=self.TEXT, anchor="w", padx=round(14*r), pady=round(7*r))
+        def pick(fn):
+            self._close_gear_menu(); fn()
+        tk.Button(frame, text="⚙ 설정",        command=lambda: pick(self._open_settings),       **ITEM).pack(fill="x")
+        tk.Frame(frame, bg=self.BORDER, height=1).pack(fill="x")
+        tk.Button(frame, text="🎬 녹화 및 캡처", command=lambda: pick(self._open_record_capture), **ITEM).pack(fill="x")
+        tk.Frame(frame, bg=self.BORDER, height=1).pack(fill="x")
+        tk.Button(frame, text="📋 로그 보기",    command=lambda: pick(self._open_log_popup),      **ITEM).pack(fill="x")
+        frame.update_idletasks()
+        frame.place(x=bx + self._gear_btn.winfo_width() - mw, y=by)
+        frame.lift()
+        def on_root_click(e):
+            try:
+                fx1=frame.winfo_rootx(); fy1=frame.winfo_rooty()
+                fx2=fx1+frame.winfo_width(); fy2=fy1+frame.winfo_height()
+                gx1=self._gear_btn.winfo_rootx(); gy1=self._gear_btn.winfo_rooty()
+                gx2=gx1+self._gear_btn.winfo_width(); gy2=gy1+self._gear_btn.winfo_height()
+                if not (fx1<=e.x_root<=fx2 and fy1<=e.y_root<=fy2) and \
+                   not (gx1<=e.x_root<=gx2 and gy1<=e.y_root<=gy2):
+                    self._close_gear_menu()
+            except Exception: self._close_gear_menu()
+        self.root.bind("<Button-1>", on_root_click)
+
+    def _close_gear_menu(self):
+        self._gear_menu_open = False
+        if hasattr(self, "_gear_menu_frame") and self._gear_menu_frame:
+            try: self._gear_menu_frame.destroy()
+            except Exception: pass
+        self._gear_menu_frame = None
+        try: self.root.unbind("<Button-1>")
+        except Exception: pass
+
+def _strip_series_name(name: str) -> str:
+    """파일명/제목에서 화수 정보만 제거해 시리즈명을 추출.
+    예: '디지몬 어드벤처 1화' → '디지몬 어드벤처'
+        'Attack on Titan S01E03' → 'attack on titan'
+        '[SubGroup] One Piece - 1050' → 'one piece'
+    """
+    name = os.path.splitext(name)[0]
+    name = re.sub(r'^[\[\(][^\]\)]{1,30}[\]\)]\s*', '', name)
+    name = re.sub(r'[\[\(](?:1080|720|480|2160|4K|BluRay|WEB|HDTV|HEVC|x264|x265|AAC|AC3)[^\]\)]*[\]\)]', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\bS\d{1,2}E\d{1,3}\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b[Ee]p(?:isode)?[.\s]*\d+\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'제?\d+\s*[화편부회장권화]', '', name)
+    name = re.sub(r'(?<![\w가-힣])[-_\s]*\d{1,4}(?![\w가-힣])', '', name)
+    name = re.sub(r'[\s_\-\.]+', ' ', name).strip()
+    return name.lower()
+
+def _strip_episode_number(name: str) -> str:
+    """하위호환용 alias."""
+    return _strip_series_name(name)
+
+def _extract_potplayer_title(window_title: str) -> str:
+    """PotPlayer 창 제목에서 동영상 파일명을 추출.
+    지원 형식:
+      파일명 - PotPlayer64
+      파일명 - PotPlayer
+      PotPlayer64 - 파일명  (일부 버전)
+    """
+    if not window_title:
+        return ""
+    m = re.match(r'^(.+?)\s*-\s*(?:PotPlayer(?:64)?|팟플레이어(?:64)?)(?:\s.*)?$', window_title, re.IGNORECASE)
+    if m:
+        title = m.group(1).strip()
+        if title and title not in ("", "-"):
+            return title
+    m = re.match(r'^(?:PotPlayer(?:64)?|팟플레이어(?:64)?)\s*-\s*(.+)$', window_title, re.IGNORECASE)
+    if m:
+        title = m.group(1).strip()
+        if title and title not in ("", "-"):
+            return title
+    return ""

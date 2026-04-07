@@ -221,11 +221,12 @@ class LipSyncGUIRun:
         popup.resizable(False, False)
         popup.configure(bg=self.BG)
         popup.grab_set()
+        # 위젯을 먼저 구성하고 마지막에 표시 → 깜빡임 방지
+        popup.withdraw()
 
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw = round(300 * r)
         ph = round(160 * r)
-        self._place_popup(popup, pw, ph)
 
         tk.Label(popup, text="🎬  동영상 재생 감지됨",
                  font=("Segoe UI", max(9, round(10 * r)), "bold"),
@@ -275,6 +276,8 @@ class LipSyncGUIRun:
         tk.Button(btn_f, text="무시",
                   bg=self.BG3, fg=self.TEXT, activebackground=self.BORDER,
                   command=on_no, **BTN).pack(side="left", padx=round(6*r))
+        # 위젯 구성 완료 후 배치/표시
+        self._place_popup(popup, pw, ph)
 
     def _start_processes(self):
         """P1·P2·P3 프로세스 시작."""

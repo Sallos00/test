@@ -55,7 +55,7 @@ class LipSyncGUILogic:
         self._refresh_history_list()
 
     # ── 이어보기 ──────────────────────────────────────────────────────────────
-    def _hist_resume(self, title: str):
+    def _hist_resume(self, title: str, btn=None):
         d = getattr(self, "_hist_video_dir", "")
         if not d or not os.path.isdir(d):
             return
@@ -70,44 +70,63 @@ class LipSyncGUILogic:
         if not m:
             nums = re.findall(r'(?<!\d)(\d+)(?!\d)', title)
             if nums:
-                m_val = nums[-1]
-                ep_num = m_val
+                ep_num = nums[-1]
         if m and ep_num is None:
             ep_num = m.group(1)
 
-        found = None
-        exact_match = None
-        series_match = None
+        # 탐색 중 버튼 비활성화 표시 (버튼 위젯 직접 참조)
+        if btn is not None:
+            try:
+                btn.config(text="⏳ 탐색 중...", state="disabled")
+            except Exception:
+                pass
 
-        for dirpath, _, fnames in os.walk(d):
-            for fname in fnames:
-                if os.path.splitext(fname)[1].lower() not in VIDEO_EXTS:
-                    continue
-                fname_noext = os.path.splitext(fname)[0]
-                # 1순위: 완전 일치
-                if fname_noext == title or fname == title:
-                    exact_match = os.path.join(dirpath, fname)
+        def _search_and_open():
+            exact_match = None
+            series_match = None
+
+            for dirpath, _, fnames in os.walk(d):
+                for fname in fnames:
+                    if os.path.splitext(fname)[1].lower() not in VIDEO_EXTS:
+                        continue
+                    fname_noext = os.path.splitext(fname)[0]
+                    # 1순위: 완전 일치
+                    if fname_noext == title or fname == title:
+                        exact_match = os.path.join(dirpath, fname)
+                        break
+                    # 2순위: 같은 시리즈 + 화수 일치
+                    if _strip_episode_number(fname) == base and ep_num is not None:
+                        fname_nums = re.findall(r'(?<!\d)(\d+)(?!\d)', fname_noext)
+                        if ep_num in fname_nums:
+                            series_match = os.path.join(dirpath, fname)
+                if exact_match:
                     break
-                # 2순위: 같은 시리즈 + 화수 일치
-                if _strip_episode_number(fname) == base and ep_num is not None:
-                    # fname 안에서 같은 위치의 숫자가 ep_num과 일치하는지 확인
-                    fname_nums = re.findall(r'(?<!\d)(\d+)(?!\d)', fname_noext)
-                    if ep_num in fname_nums:
-                        series_match = os.path.join(dirpath, fname)
-            if exact_match:
-                break
-            if found:
-                break
 
-        found = exact_match or series_match
-        if found:
-            try: os.startfile(found)
-            except Exception: pass
-        else:
-            import tkinter.messagebox as mb
-            mb.showwarning("이어보기",
-                           f"폴더에서 해당 동영상을 찾을 수 없습니다.\n\n"
-                           f"제목: {title}\n폴더: {d}")
+            found = exact_match or series_match
+
+            def _done():
+                # 버튼 원상 복구
+                if btn is not None:
+                    try:
+                        btn.config(text="▶ 이어보기", state="normal")
+                    except Exception:
+                        pass
+                if found:
+                    try: os.startfile(found)
+                    except Exception: pass
+                else:
+                    import tkinter.messagebox as mb
+                    mb.showwarning("이어보기",
+                                   f"폴더에서 해당 동영상을 찾을 수 없습니다.\n\n"
+                                   f"제목: {title}\n폴더: {d}")
+
+            try:
+                self.root.after(0, _done)
+            except Exception:
+                pass
+
+        import threading as _th
+        _th.Thread(target=_search_and_open, daemon=True).start()
 
     # ── 시청 기록 목록 갱신 ───────────────────────────────────────────────────
     def _refresh_history_list(self):
@@ -226,8 +245,8 @@ class LipSyncGUILogic:
             cached["ts_lbl"].config(text=ts if ts else "")
             cached["resume_btn"].config(
                 state="normal" if has_dir else "disabled",
-                command=lambda t=title: (
-                    self._hist_resume(t),
+                command=lambda t=title, b=cached["resume_btn"]: (
+                    self._hist_resume(t, btn=b),
                     self._switch_tab_fn("sync") if hasattr(self, "_switch_tab_fn") else None))
             cached["del_btn"].config(
                 command=lambda t=title: self._hist_delete_one(t))

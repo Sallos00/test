@@ -39,6 +39,21 @@ class LipSyncGUILogic:
             try: os.startfile(d)
             except Exception: pass
 
+    # ── 전체 시청 기록 삭제 ───────────────────────────────────────────────────
+    def _hist_clear_all(self):
+        import tkinter.messagebox as mb
+        if not mb.askyesno("시청 기록 삭제", "시청 기록을 전부 삭제하시겠습니까?"):
+            return
+        self._save_history([])
+        self._refresh_history_list()
+
+    # ── 개별 시청 기록 삭제 ───────────────────────────────────────────────────
+    def _hist_delete_one(self, title: str):
+        records = self._load_history()
+        records = [r for r in records if r.get("title", "") != title]
+        self._save_history(records)
+        self._refresh_history_list()
+
     # ── 이어보기 ──────────────────────────────────────────────────────────────
     def _hist_resume(self, title: str):
         d = getattr(self, "_hist_video_dir", "")
@@ -169,7 +184,17 @@ class LipSyncGUILogic:
                 padx=round(6*r), pady=round(2*r),
                 state="normal" if has_dir else "disabled",
                 command=lambda t=title: (self._hist_resume(t), self._switch_tab_fn("sync") if hasattr(self, "_switch_tab_fn") else None)
-            ).pack(side="right", anchor="center", padx=(0, round(8*r)))
+            ).pack(side="right", anchor="center", padx=(0, round(4*r)))
+
+            tk.Button(
+                row, text="🗑",
+                font=("Consolas", max(7, round(8*r))),
+                bg=btn_bg, fg=self.ACCENT2,
+                activebackground=self.BORDER,
+                relief="flat", cursor="hand2",
+                padx=round(4*r), pady=round(2*r),
+                command=lambda t=title: self._hist_delete_one(t)
+            ).pack(side="right", anchor="center", padx=(0, round(2*r)))
 
     # ── history.json 로드/저장 ────────────────────────────────────────────────
     def _load_history(self):
@@ -203,6 +228,9 @@ class LipSyncGUILogic:
         import time as _t, collections
         if not title or not title.strip():
             return
+
+        # 다섯 번째 개선: 괄호 안 내용 제거 (예: "(AniTv 1080p x264 AAC)" 삭제)
+        title = re.sub(r'\s*\([^)]*\)', '', title).strip()
 
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)

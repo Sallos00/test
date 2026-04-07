@@ -67,15 +67,18 @@ class LipSyncGUIBase:
             value=self._load_setting("oped_auto_skip", False))
         self._oped_skip_sec_var = tk.StringVar(
             value=str(self._load_setting("oped_skip_sec", 90)))
+        self._close_pot_var     = tk.BooleanVar(
+            value=self._load_setting("close_potplayer_on_exit", False))
         self._apply_scale()
         self._apply_theme()
         self._register_app_id()
         self._build_window()
         self._build_ui()
-        self._setup_tray()
         self._refresh()
         self.root.after(0, self._ensure_settings_file)
         self.root.after(0, self._check_auth_on_start)
+        # 트레이 초기화(PIL 이미지 빌드 포함)는 창이 뜬 뒤 백그라운드에서 처리
+        self.root.after(50, self._setup_tray)
 
     def _build_cfg(self):
         try:
@@ -223,6 +226,7 @@ class LipSyncGUIBase:
                 "scale":          self._scale_var.get(),
                 "oped_auto_skip": self._oped_auto_var.get(),
                 "oped_skip_sec":  skip_sec,
+                "close_potplayer_on_exit": self._close_pot_var.get(),
                 "pip_on":         getattr(self, "_pip_on", False),
                 "record_save_dir": getattr(self, "_record_save_dir", None) or existing.get("record_save_dir", ""),
                 "history_video_dir": getattr(self, "_hist_video_dir", None) or existing.get("history_video_dir", ""),
@@ -295,7 +299,6 @@ class LipSyncGUIBase:
                 except Exception: pass
             self._tray = None
             tray_uid = "AutoSync.%s" % (os.getpid(),)
-            img = pil_image_for_tray(64)
 
             def tray_toggle_sync(icon, item):
                 self.root.after(0, self._toggle)
@@ -325,9 +328,9 @@ class LipSyncGUIBase:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("종료", self._tray_quit),
             )
-            self._tray = pystray.Icon(tray_uid, img, "Auto Sync", menu)
-            self._tray_thread = None
 
+            # PIL 이미지 빌드 + tray.run()을 모두 백그라운드 스레드에서 실행
+            # → 메인스레드(창 표시)를 블로킹하지 않음
             def _run_tray():
                 try:
                     if sys.platform == "win32":
@@ -336,7 +339,10 @@ class LipSyncGUIBase:
                             pythoncom.CoInitialize()
                         except Exception:
                             pass
-                    self._tray.run()
+                    img = pil_image_for_tray(64)   # ICO 빌드 비용을 스레드 안으로 이동
+                    icon = pystray.Icon(tray_uid, img, "Auto Sync", menu)
+                    self._tray = icon
+                    icon.run()
                 except Exception:
                     self._tray_run_error = traceback.format_exc()[-900:]
                     self._tray = None
@@ -354,7 +360,6 @@ class LipSyncGUIBase:
 
         except ImportError as e:
             self._tray = None
-            msg = str(e)
             self._tray_run_error = (
                 "pystray/Pillow 로드 실패: %s" % e)
         except Exception:

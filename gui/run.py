@@ -262,12 +262,21 @@ class LipSyncGUIRun:
         btn_f = tk.Frame(popup, bg=self.BG, pady=round(16*r))
         btn_f.pack()
 
+        countdown      = [10]
+        auto_close_id  = [None]
+
         def on_yes():
+            if auto_close_id[0]:
+                try: self.root.after_cancel(auto_close_id[0])
+                except Exception: pass
             self._popup_open = False
             popup.destroy()
             self._toggle()
 
         def on_no():
+            if auto_close_id[0]:
+                try: self.root.after_cancel(auto_close_id[0])
+                except Exception: pass
             self._popup_open = False
             popup.destroy()
             threading.Thread(
@@ -280,9 +289,23 @@ class LipSyncGUIRun:
         tk.Button(btn_f, text="▶  시작",
                   bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER,
                   command=on_yes, **BTN).pack(side="left", padx=round(6*r))
-        tk.Button(btn_f, text="무시",
+        ignore_btn = tk.Button(btn_f, text=f"무시 (10)",
                   bg=self.BG3, fg=self.TEXT, activebackground=self.BORDER,
-                  command=on_no, **BTN).pack(side="left", padx=round(6*r))
+                  command=on_no, **BTN)
+        ignore_btn.pack(side="left", padx=round(6*r))
+
+        def _tick():
+            countdown[0] -= 1
+            if countdown[0] <= 0:
+                on_no()
+                return
+            try:
+                ignore_btn.config(text=f"무시 ({countdown[0]})")
+                auto_close_id[0] = self.root.after(1000, _tick)
+            except Exception:
+                pass
+
+        auto_close_id[0] = self.root.after(1000, _tick)
         # 위젯 구성 완료 후 배치/표시
         self._place_popup(popup, pw, ph)
 

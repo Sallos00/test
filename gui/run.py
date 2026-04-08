@@ -2,10 +2,11 @@
 gui/run.py -- 실행 제어, 프로세스 관리, 갱신, 인증 팝업 메서드
 """
 import os
+import gc
 import time
+import ctypes
 import threading
 import collections
-import ctypes
 import ctypes.wintypes
 import tkinter as tk
 import winreg
@@ -409,6 +410,47 @@ class LipSyncGUIRun:
             self._proc_lbl.config(text="초기화 실패", fg=self.ACCENT2)
 
     # ── 100ms 주기 UI 갱신 ────────────────────────────────────────────────────
+    # ── 메모리 / 캐시 정리 ───────────────────────────────────────────────────
+    def _flush_memory(self):
+        """gc + Windows WorkingSet 트림으로 메모리/캐시를 강제 해제."""
+        gc.collect()
+        try:
+            ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                ctypes.windll.kernel32.GetCurrentProcess(), -1, -1)
+        except Exception:
+            pass
+
+    def _maybe_flush_memory(self, status: str, pot_ok: bool):
+        """
+        상태에 따라 주기적으로 메모리 정리를 수행한다.
+
+        규칙:
+          1. 팟플레이어 미감지  → 1분마다 정리
+          2. 싱크/녹화 모두 OFF → 1분마다 정리
+          3. 싱크 ON + 녹화 OFF → 보정 완료("보정 완료" | "정상") 시 정리
+                                   단, 직전 정리로부터 60초 쿨다운
+        """
+        _now = time.time()
+        _last = getattr(self, "_mem_flush_last", 0.0)
+        _COOLDOWN = 60.0          # 최소 재실행 간격 (초)
+
+        is_syncing   = self._running
+        is_recording = getattr(self, "_recording", False)
+
+        # ── 케이스 1·2: 팟플레이어 없거나 아무 작업도 없을 때 ──────────────
+        if not pot_ok or (not is_syncing and not is_recording):
+            if _now - _last >= _COOLDOWN:
+                self._flush_memory()
+                self._mem_flush_last = _now
+            return
+
+        # ── 케이스 3: 싱크 중 + 녹화 안 함 → 보정 완료 시점에 정리 ────────
+        if is_syncing and not is_recording:
+            correction_done = status in ("보정 완료", "정상")
+            if correction_done and (_now - _last >= _COOLDOWN):
+                self._flush_memory()
+                self._mem_flush_last = _now
+
     def _refresh(self):
         if self._closing:
             return
@@ -593,6 +635,13 @@ class LipSyncGUIRun:
                 for line in logs[seen:]:
                     self._log_lines.append(line)
                 self._log_seen_count = len(logs)
+
+            # ── 조건부 메모리 / 캐시 정리 ────────────────────────────────
+            self._maybe_flush_memory(status, pot_ok)
+
+        else:
+            # state_queue에 아무 데이터도 없는 경우 (팟플레이어 미감지 상태 등)
+            self._maybe_flush_memory("대기 중", False)
 
         self.root.after(100, self._refresh)
 

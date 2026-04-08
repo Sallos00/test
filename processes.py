@@ -144,19 +144,12 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
         if sleep_t > 0:
             time.sleep(sleep_t)
 
-def _np_correlate(a, b):
-    """numpy FFT 기반 교차상관 (scipy.signal.correlate 대체, 결과 동일)."""
-    n = len(a) + len(b) - 1
-    fa = np.fft.rfft(a, n=n)
-    fb = np.fft.rfft(b, n=n)
-    return np.fft.irfft(fa * np.conj(fb))[:n]
-
-
 def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                   state_queue: Queue, cmd_queue: Queue,
                   stop_flag: Value, cfg: dict,
                   shared_pos=None, shared_dur=None):
     """교차상관으로 싱크 오프셋 추정 및 팟플레이어 자동 보정 프로세스."""
+    from scipy.signal import correlate
 
     BUF_SEC   = cfg["BUFFER_SEC"]
     THRESH    = cfg["SYNC_THRESHOLD_MS"]
@@ -290,7 +283,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         aud_sig = normalize(aud) if aud.std() >= 1e-9 else aud
 
         max_lag_samples = int(MTM / 1000.0 * fps)
-        corr   = _np_correlate(lip_sig, aud_sig)
+        corr   = correlate(lip_sig, aud_sig, mode="full")
         center = len(aud_sig) - 1
         lo     = max(0, center - max_lag_samples)
         hi     = min(len(corr), center + max_lag_samples + 1)

@@ -94,6 +94,8 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
         mx    = int(w * 0.10)
         my    = int(h * 0.10)
         gray  = cv2.cvtColor(raw[my:h-my, mx:w-mx], cv2.COLOR_BGRA2GRAY)
+        del raw  # GDI 비트맵 복사본 즉시 해제 (수 MB 규모)
+        raw = None
         frame_count += 1
         motion = 0.0
 
@@ -135,10 +137,12 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
             lip_roi = gray[y1:y2, x:min(x+fw, w_img)]
             if lip_roi.size > 0:
                 small  = cv2.resize(lip_roi, LIP_ROI_SIZE)
-                # var()는 픽셀값(0~255)의 분산 → 최대 255²/4 수준
-                # 255²으로 나눠 0~1 범위로 정규화
                 motion = float(small.var(axis=0).mean()) / (255.0 ** 2)
+                del small
+            del lip_roi
             queue_put(lip_queue, (t_hw, motion))
+
+        del gray  # 그레이스케일 프레임 즉시 해제
 
         sleep_t = interval - (time.perf_counter() - t0)
         if sleep_t > 0:

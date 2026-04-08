@@ -585,31 +585,44 @@ class LipSyncGUIRun:
                 if hasattr(self, "_switch_tab_fn"):
                     self._switch_tab_fn("history")
             self._pot_was_ok = pot_ok
+
+            # ── 변경된 값만 config() 호출 (불필요한 tkinter 렌더링 방지) ──
+            _prev = getattr(self, "_refresh_prev", {})
+
             c = self.ACCENT3 if pot_ok else self.ACCENT2
             t = "연결됨" if pot_ok else "미감지"
-            self._pot_dot.config(fg=c); self._pot_lbl.config(text=t, fg=c)
+            if _prev.get("pot_c") != c:  self._pot_dot.config(fg=c); _prev["pot_c"] = c
+            if _prev.get("pot_t") != t:  self._pot_lbl.config(text=t, fg=c); _prev["pot_t"] = t
 
             _aud_n_disp = aud_n if pot_ok else 0
             c = self.ACCENT3 if _aud_n_disp > 0 else self.TEXT_DIM
             _aud_mode = getattr(self, "_aud_capture_mode", "")
             _aud_suffix = f" ({_aud_mode})" if _aud_mode and _aud_n_disp > 0 else ""
             t = ("캡처 중" if _aud_n_disp > 0 else "대기 중") + _aud_suffix
-            self._aud_dot.config(fg=c); self._aud_lbl.config(text=t, fg=c)
+            if _prev.get("aud_c") != c:  self._aud_dot.config(fg=c); _prev["aud_c"] = c
+            if _prev.get("aud_t") != t:  self._aud_lbl.config(text=t, fg=c); _prev["aud_t"] = t
 
             if self._running and lip_n > 0:
                 sign = "+" if offset > 0 else ""
                 col  = (self.ACCENT2  if abs(offset) >= 80
                         else self.ACCENT3 if abs(offset) < 30
                         else self.ACCENT)
-                self._offset_lbl.config(text=f"{sign}{offset:.0f} ms", fg=col)
+                off_txt = f"{sign}{offset:.0f} ms"
             else:
-                self._offset_lbl.config(text="— ms", fg=self.ACCENT)
+                col     = self.ACCENT
+                off_txt = "— ms"
+            if _prev.get("off_txt") != off_txt or _prev.get("off_col") != col:
+                self._offset_lbl.config(text=off_txt, fg=col)
+                _prev["off_txt"] = off_txt; _prev["off_col"] = col
 
             bw    = self._bar_ref.winfo_width()
             ratio = min(abs(offset) / 500, 1.0)
+            bar_w = int(bw * ratio)
             col   = self.ACCENT2 if abs(offset) >= 80 else self.ACCENT3
-            self._bar.place(x=0, y=0, width=int(bw * ratio), height=4)
-            self._bar.config(bg=col)
+            if _prev.get("bar_w") != bar_w or _prev.get("bar_col") != col:
+                self._bar.place(x=0, y=0, width=bar_w, height=4)
+                self._bar.config(bg=col)
+                _prev["bar_w"] = bar_w; _prev["bar_col"] = col
 
             badge_map = {
                 "정상":              (self.ACCENT3, self.BG3),
@@ -619,14 +632,30 @@ class LipSyncGUIRun:
                 "대기 중":           (self.TEXT,    self.BG3),
             }
             fg, bg = badge_map.get(status, (self.TEXT, self.BG3))
-            self._badge.config(text=f"  {status}  ", fg=fg, bg=bg)
+            badge_txt = f"  {status}  "
+            if _prev.get("badge_txt") != badge_txt or _prev.get("badge_fg") != fg:
+                self._badge.config(text=badge_txt, fg=fg, bg=bg)
+                _prev["badge_txt"] = badge_txt; _prev["badge_fg"] = fg
 
             sign = "+" if corr >= 0 else ""
-            self._corr_lbl.config(text=f"{sign}{corr} ms")
-            self._lip_cnt.config(text=str(lip_n))
-            self._aud_cnt.config(text=str(aud_n))
+            corr_txt = f"{sign}{corr} ms"
+            if _prev.get("corr_txt") != corr_txt:
+                self._corr_lbl.config(text=corr_txt); _prev["corr_txt"] = corr_txt
+
+            lip_txt = str(lip_n)
+            if _prev.get("lip_txt") != lip_txt:
+                self._lip_cnt.config(text=lip_txt); _prev["lip_txt"] = lip_txt
+
+            aud_cnt_txt = str(aud_n)
+            if _prev.get("aud_cnt_txt") != aud_cnt_txt:
+                self._aud_cnt.config(text=aud_cnt_txt); _prev["aud_cnt_txt"] = aud_cnt_txt
+
             pc = self.ACCENT3 if self._running else self.TEXT_DIM
-            self._proc_dot.config(fg=pc)
+            if _prev.get("proc_dot_c") != pc:
+                self._proc_dot.config(fg=pc); _prev["proc_dot_c"] = pc
+
+            self._refresh_prev = _prev
+
             # 마지막으로 본 줄 이후 새 항목만 추가 (set 비교 제거)
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)

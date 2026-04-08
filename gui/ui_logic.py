@@ -455,8 +455,6 @@ class LipSyncGUILogic:
             self._close_gear_menu(); fn()
         tk.Button(frame, text="⚙ 설정",        command=lambda: pick(self._open_settings),       **ITEM).pack(fill="x")
         tk.Frame(frame, bg=self.BORDER, height=1).pack(fill="x")
-        tk.Button(frame, text="🎬 녹화 및 캡처", command=lambda: pick(lambda: self._switch_tab_fn("record") if hasattr(self, "_switch_tab_fn") else None), **ITEM).pack(fill="x")
-        tk.Frame(frame, bg=self.BORDER, height=1).pack(fill="x")
         tk.Button(frame, text="📋 로그 보기",    command=lambda: pick(self._open_log_popup),      **ITEM).pack(fill="x")
         frame.update_idletasks()               # 크기 확정
         frame.place(x=bx + self._gear_btn.winfo_width() - mw, y=by)   # 정확한 위치로 이동

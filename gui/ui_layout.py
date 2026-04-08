@@ -78,6 +78,7 @@ class LipSyncGUILayout:
         self._tab_frames = {}
         self._tab_btn_sync    = None
         self._tab_btn_history = None
+        self._tab_btn_record  = None
 
         tab_inner = tk.Frame(tab_bar, bg=self.BG2)
         tab_inner.pack(side="left", padx=P2, pady=(round(6*r), 0))
@@ -109,7 +110,7 @@ class LipSyncGUILayout:
 
         def _update_tab_styles():
             cur = self._tab_var.get()
-            for name, btn in [("sync", self._tab_btn_sync), ("history", self._tab_btn_history)]:
+            for name, btn in [("sync", self._tab_btn_sync), ("record", self._tab_btn_record), ("history", self._tab_btn_history)]:
                 if btn is None: continue
                 if name == cur:
                     btn.config(bg=self.BG, fg=self.ACCENT, font=("Consolas", TAB_F, "bold"))
@@ -126,6 +127,15 @@ class LipSyncGUILayout:
             relief="flat", cursor="hand2", padx=round(10*r), pady=round(4*r),
             bd=0, command=lambda: _switch_tab("sync"))
         self._tab_btn_sync.pack(side="left")
+
+        self._tab_btn_record = tk.Button(
+            tab_inner, text="녹화/캡처",
+            font=("Consolas", TAB_F),
+            bg=self.BG2, fg=self.TEXT_MID,
+            activebackground=self.BG3, activeforeground=self.TEXT,
+            relief="flat", cursor="hand2", padx=round(10*r), pady=round(4*r),
+            bd=0, command=lambda: _switch_tab("record"))
+        self._tab_btn_record.pack(side="left")
 
         self._tab_btn_history = tk.Button(
             tab_inner, text="시청 기록",
@@ -230,14 +240,21 @@ class LipSyncGUILayout:
         self._corr_lbl.pack(side="left", padx=(4, 0))
 
         # ════════════════════════════════════════════════════════
-        # 탭2: 시청 기록
+        # 탭2: 녹화/캡처
+        # ════════════════════════════════════════════════════════
+        record_frame = reg(tk.Frame(container, bg=self.BG), bg="BG")
+        self._tab_frames["record"] = record_frame
+        self._build_record_tab(record_frame, r, P, P2)
+
+        # ════════════════════════════════════════════════════════
+        # 탭3: 시청 기록
         # ════════════════════════════════════════════════════════
         hist_frame = reg(tk.Frame(container, bg=self.BG), bg="BG")
         self._tab_frames["history"] = hist_frame
         self._build_history_tab(hist_frame, r, P, P2, MONO, MONO_S)
 
-        # 시청 기록 탭 먼저 표시
-        _switch_tab("history")
+        # 싱크 보정 탭 먼저 표시
+        _switch_tab("sync")
         self.root.after(1000, self._poll_playback_info)
         self.root.after(500,  self._start_title_watcher)
 

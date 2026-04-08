@@ -59,37 +59,54 @@ class LipSyncGUILogic2:
         try:
             txt = self._log_popup_txt
             if txt is None: return
-            at_bottom = not getattr(self, "_log_user_scrolled", False)
-            anchor_line = total_before = 0
-            if not at_bottom:
-                try:
-                    total_before = int(txt.index("end-1c").split(".")[0])
-                    anchor_line  = int(txt.index("@0,0").split(".")[0])
-                except Exception: pass
-            txt.delete("1.0", "end")
             lines = list(self._log_lines) if hasattr(self, "_log_lines") else []
-            if not lines:
-                txt.insert("end", "— 로그 없음 —", "dim")
-            else:
-                for i, line in enumerate(lines):
-                    if i > 0: txt.insert("end", "\n")
-                    if   any(k in line for k in ("⏭","오프닝","엔딩","스킵")):         tag="skip"
-                    elif any(k in line for k in ("🎬","👁","🔊","감지","미감지","대기")): tag="detect"
-                    elif any(k in line for k in ("보정","OFFSET","싱크","상한")):        tag="sync"
-                    elif any(k in line for k in ("▶","↺","🔄","정상","OK")):            tag="ok"
-                    elif any(k in line for k in ("📊","정보","상태")):                  tag="info"
-                    elif any(k in line for k in ("⚠","주의","경고")):                  tag="warn"
-                    elif any(k in line for k in ("❌","오류","실패","취소")):           tag="err"
-                    else:                                                                tag="dim"
-                    txt.insert("end", line, tag)
-            if at_bottom: txt.see("end")
-            elif total_before > 0 and anchor_line > 0:
-                total_after = int(txt.index("end-1c").split(".")[0])
-                if total_after > 0: txt.yview_moveto((anchor_line-1) / total_after)
-        except Exception: pass
+
+            # 이전에 렌더링한 줄 수를 기억해 새 줄만 append
+            prev_count = getattr(self, "_log_popup_rendered", 0)
+
+            # 로그가 비었거나 줄 수가 줄어든 경우(clear) → 전체 재렌더링
+            if not lines or len(lines) < prev_count:
+                at_bottom = not getattr(self, "_log_user_scrolled", False)
+                txt.config(state="normal")
+                txt.delete("1.0", "end")
+                if not lines:
+                    txt.insert("end", "— 로그 없음 —", "dim")
+                else:
+                    for i, line in enumerate(lines):
+                        if i > 0: txt.insert("end", "\n")
+                        txt.insert("end", line, self._log_tag(line))
+                self._log_popup_rendered = len(lines)
+                if at_bottom: txt.see("end")
+                return
+
+            # 새로 추가된 줄만 이어 붙이기
+            new_lines = lines[prev_count:]
+            if not new_lines:
+                return
+            at_bottom = not getattr(self, "_log_user_scrolled", False)
+            txt.config(state="normal")
+            for line in new_lines:
+                txt.insert("end", "\n" + line, self._log_tag(line))
+            self._log_popup_rendered = len(lines)
+            if at_bottom:
+                txt.see("end")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _log_tag(line: str) -> str:
+        if   any(k in line for k in ("⏭","오프닝","엔딩","스킵")):         return "skip"
+        elif any(k in line for k in ("🎬","👁","🔊","감지","미감지","대기")): return "detect"
+        elif any(k in line for k in ("보정","OFFSET","싱크","상한")):        return "sync"
+        elif any(k in line for k in ("▶","↺","🔄","정상","OK")):            return "ok"
+        elif any(k in line for k in ("📊","정보","상태")):                  return "info"
+        elif any(k in line for k in ("⚠","주의","경고")):                  return "warn"
+        elif any(k in line for k in ("❌","오류","실패","취소")):           return "err"
+        return "dim"
 
     def _clear_log(self):
         if hasattr(self, "_log_lines"): self._log_lines.clear()
+        self._log_popup_rendered = 0
         self._update_log_popup()
 
     def _open_settings(self):

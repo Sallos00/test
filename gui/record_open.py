@@ -12,42 +12,6 @@ import tkinter as tk
 
 class LipSyncGUIRecordOpen:
 
-    def build_record_ui(self, container):
-        frame = tk.Frame(container, bg=self.BG)
-        frame.pack(fill="both", expand=True)
-
-        save_dir = getattr(self, "_record_save_dir", None) or self._load_setting("record_save_dir", "")
-
-        r   = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-        F_TITLE = max(9,  round(11 * r))
-        F_MONO  = max(8,  round(9  * r))
-        F_BTN   = max(8,  round(9  * r))
-        PAD     = round(14 * r)
-        PAD2    = round(18 * r)
-        PAD_V   = round(8  * r)
-
-        state = {
-            "save_dir":   save_dir,
-            "recording":  False,
-            "screen_rec": None,
-            "audio_rec":  None,
-            "overlay":    None,
-        }
-
-        tk.Label(frame, text="🎬 녹화 및 캡처",
-                 font=("Segoe UI", F_TITLE, "bold"),
-                 bg=self.BG, fg=self.TEXT).pack(pady=(PAD, 0))
-        tk.Frame(frame, bg=self.BORDER, height=1).pack(fill="x", pady=(round(8*r), 0))
-
-        dir_card = tk.Frame(frame, bg=self.BG2, padx=PAD2, pady=PAD_V)
-        dir_card.pack(fill="x", padx=PAD, pady=(PAD_V, 0))
-        tk.Label(dir_card, text="저장 위치",
-                 font=("Consolas", F_MONO, "bold"),
-                 bg=self.BG2, fg=self.TEXT_MID).pack(anchor="w")
-
-        return frame
-
-
     def _open_record_capture(self):
         save_dir = getattr(self, "_record_save_dir", None) or self._load_setting("record_save_dir", "")
 

@@ -177,8 +177,16 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     SYNC_COOLDOWN_SEC  = 10.0     # 보정 후 재보정 억제 시간
     CONFIDENCE_THRESH  = 0.25     # 교차상관 신뢰도 하한 (이 미만이면 해당 사이클 skip)
 
-    lpb = collections.deque()
-    aub = collections.deque()
+    # ── 메모리 정리 설정 ─────────────────────────────────────────────────────
+    MEM_CLEAN_INTERVAL = 60.0     # 주기적 메모리 정리 간격 (초)
+    MEM_CLEAN_COOLDOWN = 60.0     # 싱크보정 후 정리 쿨다운 (초)
+    _last_mem_clean_t  = 0.0      # 마지막 메모리 정리 시각
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # maxlen으로 버퍼 상한 고정 — 팟플 미감지·유휴 상태에서 무한 누적 방지
+    _MAX_BUF = int(MUSIC_WINDOW_SEC * 25 + 100)
+    lpb = collections.deque(maxlen=_MAX_BUF)
+    aub = collections.deque(maxlen=_MAX_BUF)
 
     total_correction_ms = 0       # 누적 보정량 (팟플레이어 딜레이 절대값 추적)
     smoothed_offset     = 0.0
@@ -230,11 +238,11 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     break
         if lpb:
             latest_lip = lpb[-1][0]
-            while lpb and latest_lip - lpb[0][0] > MUSIC_WINDOW_SEC:
+            while lpb and latest_lip - lpb[0][0] > BUF_SEC:
                 lpb.popleft()
         if aub:
             latest_aud = aub[-1][0]
-            while aub and latest_aud - aub[0][0] > MUSIC_WINDOW_SEC:
+            while aub and latest_aud - aub[0][0] > BUF_SEC:
                 aub.popleft()
 
     def resample_aligned(lip_buf, aud_buf, fps):
@@ -308,6 +316,25 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             lag = peak_idx - center
 
         return lag / fps * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean(), confidence
+
+    # ── 메모리·캐시 정리 헬퍼 ────────────────────────────────────────────────
+    def _do_mem_clean(reason: str):
+        """버퍼 트리밍 + Python GC 강제 실행."""
+        nonlocal _last_mem_clean_t
+        import gc
+        # 분석에 필요한 BUF_SEC 구간만 남기고 나머지 제거
+        if lpb:
+            latest = lpb[-1][0]
+            while lpb and latest - lpb[0][0] > BUF_SEC:
+                lpb.popleft()
+        if aub:
+            latest = aub[-1][0]
+            while aub and latest - aub[0][0] > BUF_SEC:
+                aub.popleft()
+        gc.collect()
+        _last_mem_clean_t = time.time()
+        add_log(f"🧹 메모리 정리 ({reason})")
+    # ─────────────────────────────────────────────────────────────────────────
 
     _last_log_snapshot = [None]
 
@@ -416,6 +443,19 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         pot_ok = bool(hwnd)
         lip_n  = len(lpb)
         aud_n  = len(aub)
+
+        # ── 주기적 메모리 정리 ────────────────────────────────────────────
+        # 조건 1: 팟플레이어 미감지 → 버퍼 전체 비우기 + 1분마다 GC
+        # 조건 2: 유휴 상태(싱크·녹화 모두 아님) → 1분마다 GC
+        # 조건 3: 싱크 중(녹화 아님) → 보정완료·싱크정상 시 처리 (아래에서)
+        _now_t = time.time()
+        if not pot_ok:
+            # 팟플 없으면 버퍼 전부 비우고 1분마다 GC
+            if lpb or aub or (_now_t - _last_mem_clean_t >= MEM_CLEAN_INTERVAL):
+                lpb.clear()
+                aub.clear()
+                _do_mem_clean("팟플레이어 미감지")
+        # ─────────────────────────────────────────────────────────────────
 
         if hwnd:
             try:
@@ -603,11 +643,22 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             offset_buf.clear()
             add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운")
             status = STATUS_CORRECTED
+            # 조건 3: 싱크 중 보정 완료 → 즉시 메모리 정리 (쿨다운 적용)
+            if time.time() - _last_mem_clean_t >= MEM_CLEAN_COOLDOWN:
+                _do_mem_clean("보정 완료")
         elif not hwnd:
             status = STATUS_NO_POT
         else:
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
+            # 조건 3: 싱크 중 정상 판정 → 쿨다운 소진 시 메모리 정리
+            if time.time() - _last_mem_clean_t >= MEM_CLEAN_COOLDOWN:
+                _do_mem_clean("싱크 정상")
+
+        # 조건 2: 유휴(팟플 있음, 싱크 데이터 없음) → 1분마다 GC
+        if pot_ok and lip_n == 0 and aud_n == 0:
+            if time.time() - _last_mem_clean_t >= MEM_CLEAN_INTERVAL:
+                _do_mem_clean("유휴 상태")
 
         push_state(status, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                    lip_n, aud_n, notify, oped_prompt)

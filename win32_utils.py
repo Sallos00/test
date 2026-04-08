@@ -69,10 +69,15 @@ def queue_put(q, item):
 _hwnd_cache = [0, 0.0]   # [hwnd, last_check_time]
 
 def find_potplayer_hwnd():
-    """32/64비트 팟플레이어 핸들 검색 (0.3초 캐시)."""
+    """32/64비트 팟플레이어 핸들 검색 (1초 캐시).
+    수정: 이전에 _hwnd_cache[0](hwnd=0)가 falsy라서
+    팟플레이어가 없을 때 캐시가 전혀 동작하지 않아
+    매 호출마다 FindWindowW를 두 번씩 호출했음.
+    시간 기준으로만 캐시 판단하도록 수정.
+    """
     import time as _t
     now = _t.time()
-    if _hwnd_cache[0] and now - _hwnd_cache[1] < 0.3:
+    if now - _hwnd_cache[1] < 1.0:
         return _hwnd_cache[0]
     hwnd = _user32.FindWindowW("PotPlayer64", None)
     if not hwnd:

@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller "pyarmor==8.5.12"
+          pip install opencv-python numpy sounddevice pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller "pyarmor==8.5.12"
 
       - name: ffmpeg 다운로드 (번들용)
         run: |
@@ -80,7 +80,7 @@ jobs:
         run: >
           pyinstaller
           --clean
-          --onefile
+          --onedir
           --noconsole
           --name "Auto Sinc"
           --icon "app.ico"
@@ -102,7 +102,6 @@ jobs:
           --hidden-import="gui.record_backend"
           --hidden-import="cv2"
           --hidden-import="sounddevice"
-          --hidden-import="scipy.signal"
           --hidden-import="win32api"
           --hidden-import="win32con"
           --hidden-import="win32gui"
@@ -148,5 +147,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AutoSync-EXE
-          path: dist\Auto Sinc.exe
+          path: dist\Auto Sinc\
           retention-days: 3

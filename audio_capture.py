@@ -41,7 +41,11 @@ _pid_cache = [None, 0.0]
 
 def _find_potplayer_pid():
     now = time.time()
-    if _pid_cache[0] is not None and now - _pid_cache[1] < 0.5:
+    # 수정: 이전에 _pid_cache[0] is not None 조건으로 인해
+    # 팟플레이어가 없을 때(None 저장) 캐시가 전혀 동작하지 않아
+    # 0.5초마다 전체 프로세스를 순회하며 메모리가 계속 증가했음.
+    # 시간 기준으로만 캐시 판단하도록 수정.
+    if now - _pid_cache[1] < 5.0:
         return _pid_cache[0]
     for p in psutil.process_iter(["pid", "name"]):
         if "potplayer" in p.info["name"].lower():
@@ -106,6 +110,7 @@ def _process_buffer(data, num_frames, flg, qp, ch, sr, freq, to_stream_t):
 
     rms = float(np.sqrt(np.mean(arr ** 2)))
     vad = _compute_vad(arr, sr)
+    del arr  # WASAPI 버퍼 참조 해제 — GC 대기 없이 즉시 반환
     return t_stream, rms, vad
 
 

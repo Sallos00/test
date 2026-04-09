@@ -247,6 +247,12 @@ class LipSyncGUIRecordOpen:
             if not state["recording"]:
                 return
             state["recording"] = False
+            self._recording = False
+            # P3에 녹화 종료 알림 → 메모리 정리 재허용
+            for _q in (getattr(self, "cmd_queue", None), getattr(self, "_om_cmd_queue", None)):
+                if _q is not None:
+                    try: _q.put_nowait("recording_stop")
+                    except Exception: pass
             rec_btn.config(text="⏺ 녹화 시작", fg=self.ACCENT2)
             self.root.after(0, _unlock_range_ui)
             close_recording_overlay()
@@ -333,14 +339,11 @@ class LipSyncGUIRecordOpen:
                                 break
                         _t.sleep(0.2)
 
-                import ctypes as _ct
-                from win32_utils import find_potplayer_hwnd as _fpot
+                import psutil
                 pid = None
-                _hwnd_pid = _fpot()
-                if _hwnd_pid:
-                    _pid_val = _ct.c_ulong(0)
-                    _ct.windll.user32.GetWindowThreadProcessId(_hwnd_pid, _ct.byref(_pid_val))
-                    pid = _pid_val.value if _pid_val.value else None
+                for p in psutil.process_iter(["pid", "name"]):
+                    if "potplayer" in p.info["name"].lower():
+                        pid = p.info["pid"]; break
 
                 state["audio_rec"]  = _AudioRecorder()
                 state["screen_rec"] = _ScreenRecorder()
@@ -361,6 +364,12 @@ class LipSyncGUIRecordOpen:
                     state["audio_rec"].start(pid)
 
                 state["recording"] = True
+                self._recording = True
+                # P3에 녹화 시작 알림 → 녹화 중 메모리 정리 억제
+                for _q in (getattr(self, "cmd_queue", None), getattr(self, "_om_cmd_queue", None)):
+                    if _q is not None:
+                        try: _q.put_nowait("recording_start")
+                        except Exception: pass
                 self.root.after(0, lambda: rec_btn.config(text="⏹ 녹화 정지", fg=self.ACCENT3))
                 self.root.after(0, lambda: rec_status.config(text="🔴 녹화 중...", fg=self.ACCENT2))
                 # [기능1] 녹화 시작 시 구간 UI 잠금

@@ -255,8 +255,11 @@ class LipSyncGUILayout:
 
         # 시청 기록 탭 먼저 표시
         _switch_tab("history")
-        self.root.after(1000, self._poll_playback_info)
-        self.root.after(500,  self._start_title_watcher)
+        # _build_ui()가 scale 변경으로 재호출될 때 루프 중복 방지
+        if not getattr(self, "_poll_started", False):
+            self._poll_started = True
+            self.root.after(1000, self._poll_playback_info)
+            self.root.after(500,  self._start_title_watcher)
 
     # ── 시청 기록 탭 구성 ─────────────────────────────────────────────────────
     def _build_history_tab(self, parent, r, P, P2, MONO, MONO_S):
@@ -351,6 +354,8 @@ class LipSyncGUILayout:
             (0, 0), window=self._hist_list_frame, anchor="nw")
 
         def _on_frame_cfg(e):
+            if getattr(self, "_hist_refreshing", False):
+                return   # _refresh_history_list() 실행 중 재진입 차단
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         def _on_canvas_cfg(e):

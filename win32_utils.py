@@ -106,14 +106,14 @@ def is_potplayer_playing(hwnd):
         return False
 
 def is_potplayer_running():
-    """프로세스 실행 여부를 확인한다."""
-    try:
-        for proc in psutil.process_iter(["name"]):
-            if "potplayer" in proc.info["name"].lower():
-                return True
-    except Exception:
-        pass
-    return False
+    """팟플레이어 실행 여부 확인.
+    psutil.process_iter()는 내부 캐시(_pmap)에 Process 객체를 계속 쌓아
+    메모리 누수를 일으키므로 Win32 FindWindowW로 대체한다.
+    """
+    hwnd = _user32.FindWindowW("PotPlayer64", None)
+    if not hwnd:
+        hwnd = _user32.FindWindowW("PotPlayer", None)
+    return bool(hwnd)
 
 def get_playback_info(hwnd):
     """현재 위치와 전체 길이를 읽어온다."""

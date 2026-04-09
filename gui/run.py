@@ -80,7 +80,7 @@ class LipSyncGUIRun:
             self._oped_monitor_running = False
             import time as _t
             if not hasattr(self, "_log_lines"):
-                self._log_lines = collections.deque(maxlen=100)
+                self._log_lines = collections.deque(maxlen=200)
             self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] ⚠ oped 모니터 시작 실패: {e}")
 
     def _stop_oped_monitor(self):
@@ -130,11 +130,10 @@ class LipSyncGUIRun:
                                    state="normal")
             self._proc_lbl.config(text="중지됨", fg=self.TEXT_DIM)
             self._start_oped_monitor()   # 싱크 정지 후 모니터 재시작
-            if not getattr(self, "_monitor_thread_running", False):
-                threading.Thread(
-                    target=self._monitor_for_popup,
-                    kwargs={"wait_for_exit": True},
-                    daemon=True).start()
+            threading.Thread(
+                target=self._monitor_for_popup,
+                kwargs={"wait_for_exit": True},
+                daemon=True).start()
 
     # ── Windows 토스트 알림 ───────────────────────────────────────────────────
     @staticmethod
@@ -182,38 +181,34 @@ class LipSyncGUIRun:
 
     def _monitor_for_popup(self, wait_for_exit=False):
         """싱크 OFF 상태에서 팟플레이어 재생 감지 시 시작 팝업 표시."""
-        self._monitor_thread_running = True
-        try:
-            while not getattr(self, '_auth_ok', False):
-                if self._closing: return
-                time.sleep(0.1)
+        while not getattr(self, '_auth_ok', False):
+            if self._closing: return
+            time.sleep(0.1)
 
-            if wait_for_exit:
-                while not self._closing and not self._running:
-                    if not is_potplayer_running():
-                        break
-                    for _ in range(10):
-                        if self._closing or self._running: return
-                        time.sleep(0.1)
-
+        if wait_for_exit:
             while not self._closing and not self._running:
-                hwnd = find_potplayer_hwnd()
-                if hwnd and is_potplayer_playing(hwnd) and is_potplayer_running():
-                    if self._closing or self._running:
-                        return
-                    self._popup_open = True
-                    def _safe_show():
-                        if not self._closing and not self._running:
-                            self._show_start_popup()
-                        else:
-                            self._popup_open = False
-                    self._popup_after_id = self.root.after_idle(_safe_show)
-                    return
+                if not is_potplayer_running():
+                    break
                 for _ in range(10):
                     if self._closing or self._running: return
                     time.sleep(0.1)
-        finally:
-            self._monitor_thread_running = False
+
+        while not self._closing and not self._running:
+            hwnd = find_potplayer_hwnd()
+            if hwnd and is_potplayer_playing(hwnd) and is_potplayer_running():
+                if self._closing or self._running:
+                    return
+                self._popup_open = True
+                def _safe_show():
+                    if not self._closing and not self._running:
+                        self._show_start_popup()
+                    else:
+                        self._popup_open = False
+                self._popup_after_id = self.root.after_idle(_safe_show)
+                return
+            for _ in range(10):
+                if self._closing or self._running: return
+                time.sleep(0.1)
 
     def _show_start_popup(self):
         """동영상 재생 감지 시 싱크 시작 여부 팝업."""
@@ -285,11 +280,10 @@ class LipSyncGUIRun:
                 except Exception: pass
             self._popup_open = False
             popup.destroy()
-            if not getattr(self, "_monitor_thread_running", False):
-                threading.Thread(
-                    target=self._monitor_for_popup,
-                    kwargs={"wait_for_exit": True},
-                    daemon=True).start()
+            threading.Thread(
+                target=self._monitor_for_popup,
+                kwargs={"wait_for_exit": True},
+                daemon=True).start()
 
         BTN = dict(font=("Consolas", max(8, round(8 * r)), "bold"), relief="flat",
                    cursor="hand2", padx=round(16*r), pady=round(6*r))
@@ -461,6 +455,28 @@ class LipSyncGUIRun:
         if self._closing:
             return
 
+        # ── tracemalloc 메모리 진단 (60초마다) ───────────────────────────────
+        import tracemalloc as _tm
+        if not _tm.is_tracing():
+            _tm.start()
+            self._tm_snap = None
+            self._tm_t    = 0.0
+        _tm_now = time.time()
+        if _tm_now - getattr(self, "_tm_t", 0) >= 60.0:
+            self._tm_t = _tm_now
+            snap2 = _tm.take_snapshot()
+            if getattr(self, "_tm_snap", None) is not None:
+                stats = snap2.compare_to(self._tm_snap, "lineno")
+                import collections as _col
+                if not hasattr(self, "_log_lines"):
+                    self._log_lines = _col.deque(maxlen=200)
+                self._log_lines.append("──── [메모리 증가 TOP5] ────")
+                for s in stats[:5]:
+                    self._log_lines.append(
+                        f"  +{s.size_diff/1024:+.1f}KB  {s.count_diff:+d}개  "
+                        f"{s.traceback[0].filename.split(chr(92))[-1]}:{s.traceback[0].lineno}")
+            self._tm_snap = snap2
+
         # 재생 위치/길이 갱신 — 500ms 간격으로 throttle (FindWindowW 비용 절감)
         _now = time.time()
         if _now - getattr(self, '_hwnd_refresh_t', 0) >= 0.5:
@@ -488,7 +504,7 @@ class LipSyncGUIRun:
             msg = (f"[{_dt.datetime.now().strftime('%H:%M:%S')}] 🔧 oped_monitor={running} "
                    f"procs={len(procs)} alive={alive}")
             if not hasattr(self, "_log_lines"):
-                self._log_lines = collections.deque(maxlen=100)
+                self._log_lines = collections.deque(maxlen=200)
             self._log_lines.append(msg)
 
         # ── P2 로그 큐 수집 (싱크 ON/OFF 무관하게 항상 처리) ────────────────
@@ -501,7 +517,7 @@ class LipSyncGUIRun:
                 try:
                     msg = _lq.get_nowait()
                     if not hasattr(self, "_log_lines"):
-                        self._log_lines = collections.deque(maxlen=100)
+                        self._log_lines = collections.deque(maxlen=200)
                     self._log_lines.append(f"🔊 {msg}")
                     # 캡처 방식 감지 — send_log 메시지에서 추출
                     if "[ProcessLoopback]" in msg:
@@ -530,7 +546,7 @@ class LipSyncGUIRun:
                 om_logs = om_latest.get("log_lines")
                 if om_logs is not None:
                     if not hasattr(self, "_log_lines"):
-                        self._log_lines = collections.deque(maxlen=100)
+                        self._log_lines = collections.deque(maxlen=200)
                     seen = getattr(self, "_om_log_seen_count", 0)
                     for line in om_logs[seen:]:
                         self._log_lines.append(line)
@@ -664,7 +680,7 @@ class LipSyncGUIRun:
 
             # 마지막으로 본 줄 이후 새 항목만 추가 (set 비교 제거)
             if not hasattr(self, "_log_lines"):
-                self._log_lines = collections.deque(maxlen=100)
+                self._log_lines = collections.deque(maxlen=200)
             if logs:
                 seen = getattr(self, "_log_seen_count", 0)
                 for line in logs[seen:]:

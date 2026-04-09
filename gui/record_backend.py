@@ -116,9 +116,11 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
                 pass
 
         _active_overlays.append(ov)
+        _closed = [False]
 
         def _track():
-            if not _try_exists(ov): return
+            if _closed[0] or not _try_exists(ov):
+                return
             r = _get_potplayer_rect()
             if r:
                 try: ov.geometry(f"+{r[0] + 12}+{r[1] + 12}")
@@ -128,11 +130,13 @@ def _show_overlay(root, message: str, duration_ms: int = 3000):
         root.after(150, _track)
 
         def _close():
+            _closed[0] = True
             try: ov.destroy()
             except: pass
             try: _active_overlays.remove(ov)
             except ValueError: pass
-        root.after(duration_ms, _close)
+        if duration_ms > 0:
+            root.after(duration_ms, _close)
         return ov
     except Exception:
         return None

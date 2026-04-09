@@ -193,6 +193,7 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     ema_initialized     = False
     offset_buf          = collections.deque(maxlen=OFFSET_BUF_SIZE)
     last_correction_t   = 0.0
+    is_recording        = False    # 녹화 중 메모리 정리 억제 플래그
     video_fps           = 30.0    # 현재 영상 fps (재생 감지·영상 변경 시 갱신)
 
     log_lines    = collections.deque(maxlen=100)
@@ -337,18 +338,13 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     # ─────────────────────────────────────────────────────────────────────────
 
     _last_log_snapshot = [None]
-    _last_log_len      = [0]
 
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
                    notify=None, oped_prompt=None):
-        # deque는 maxlen 초과 시 앞이 밀리므로 len 비교가 아닌
-        # 마지막 항목과 총 누적 길이로 변경 감지
-        cur_len = len(logs)
         snap = _last_log_snapshot[0]
-        if snap is None or cur_len != _last_log_len[0] or (logs and snap[-1] != logs[-1]):
+        if snap is None or len(snap) != len(logs) or (logs and snap[-1] != logs[-1]):
             snap = list(logs)
             _last_log_snapshot[0] = snap
-            _last_log_len[0] = cur_len
         if oped_prompt is not None:
             pending_prompt[0] = oped_prompt
         prompt_to_send    = pending_prompt[0]
@@ -438,6 +434,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             elif cmd == "oped_reset":
                 reset_oped()
                 add_log("↺ OP/ED 상태 초기화")
+            elif cmd == "recording_start":
+                is_recording = True
+                add_log("🔴 녹화 시작 — 메모리 정리 억제")
+            elif cmd == "recording_stop":
+                is_recording = False
+                add_log("⏹ 녹화 종료 — 메모리 정리 재개")
             elif cmd == "stop":
                 stop_flag.value = True
                 return
@@ -648,20 +650,20 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             offset_buf.clear()
             add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운")
             status = STATUS_CORRECTED
-            # 조건 3: 싱크 중 보정 완료 → 즉시 메모리 정리 (쿨다운 적용)
-            if time.time() - _last_mem_clean_t >= MEM_CLEAN_COOLDOWN:
+            # 조건 3: 싱크 중 보정 완료 → 녹화 중이 아닐 때만 메모리 정리
+            if not is_recording and time.time() - _last_mem_clean_t >= MEM_CLEAN_COOLDOWN:
                 _do_mem_clean("보정 완료")
         elif not hwnd:
             status = STATUS_NO_POT
         else:
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
-            # 조건 3: 싱크 중 정상 판정 → 쿨다운 소진 시 메모리 정리
-            if time.time() - _last_mem_clean_t >= MEM_CLEAN_COOLDOWN:
+            # 조건 3: 싱크 정상 → 녹화 중이 아닐 때만 메모리 정리
+            if not is_recording and time.time() - _last_mem_clean_t >= MEM_CLEAN_COOLDOWN:
                 _do_mem_clean("싱크 정상")
 
-        # 조건 2: 유휴(팟플 있음, 싱크 데이터 없음) → 1분마다 GC
-        if pot_ok and lip_n == 0 and aud_n == 0:
+        # 조건 2: 유휴(팟플 있음, 싱크 데이터 없음) → 녹화 중이 아닐 때만 GC
+        if pot_ok and lip_n == 0 and aud_n == 0 and not is_recording:
             if time.time() - _last_mem_clean_t >= MEM_CLEAN_INTERVAL:
                 _do_mem_clean("유휴 상태")
 

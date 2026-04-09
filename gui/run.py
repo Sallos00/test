@@ -412,21 +412,11 @@ class LipSyncGUIRun:
     # ── 100ms 주기 UI 갱신 ────────────────────────────────────────────────────
     # ── 메모리 / 캐시 정리 ───────────────────────────────────────────────────
     def _flush_memory(self):
-        """gc + HeapCompact + WorkingSet 트림으로 메모리를 OS에 반환."""
+        """gc + Windows WorkingSet 트림으로 메모리/캐시를 강제 해제."""
         gc.collect()
         try:
-            k32 = ctypes.windll.kernel32
-            # 1. 모든 Windows 힙을 압축해 OS에 메모리 반환 (Private Bytes 감소)
-            heap_count = k32.GetProcessHeaps(0, None)
-            if heap_count > 0:
-                HeapArray = ctypes.c_void_p * heap_count
-                heaps = HeapArray()
-                k32.GetProcessHeaps(heap_count, heaps)
-                for h in heaps:
-                    if h:
-                        k32.HeapCompact(h, 0)
-            # 2. Working Set도 추가로 trim
-            k32.SetProcessWorkingSetSize(k32.GetCurrentProcess(), -1, -1)
+            ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                ctypes.windll.kernel32.GetCurrentProcess(), -1, -1)
         except Exception:
             pass
 
@@ -442,7 +432,7 @@ class LipSyncGUIRun:
         """
         _now = time.time()
         _last = getattr(self, "_mem_flush_last", 0.0)
-        _COOLDOWN = 30.0          # 최소 재실행 간격 (초)
+        _COOLDOWN = 60.0          # 최소 재실행 간격 (초)
 
         is_syncing   = self._running
         is_recording = getattr(self, "_recording", False)
@@ -535,10 +525,15 @@ class LipSyncGUIRun:
                 if om_logs is not None:
                     if not hasattr(self, "_log_lines"):
                         self._log_lines = collections.deque(maxlen=100)
-                    seen = getattr(self, "_om_log_seen_count", 0)
-                    for line in om_logs[seen:]:
+                    om_last_seen = getattr(self, "_om_log_seen_last", None)
+                    if om_last_seen is None or om_last_seen not in om_logs:
+                        start = 0
+                    else:
+                        start = om_logs.index(om_last_seen) + 1
+                    for line in om_logs[start:]:
                         self._log_lines.append(line)
-                    self._om_log_seen_count = len(om_logs)
+                    if om_logs:
+                        self._om_log_seen_last = om_logs[-1]
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0) if pot_ok else 0
@@ -666,14 +661,22 @@ class LipSyncGUIRun:
 
             self._refresh_prev = _prev
 
-            # 마지막으로 본 줄 이후 새 항목만 추가 (set 비교 제거)
+            # 마지막으로 본 줄 이후 새 항목만 추가
+            # logs는 maxlen=100 deque의 스냅샷이므로
+            # _log_seen_last에 마지막으로 처리한 줄을 기억해 중복 추가 방지
             if not hasattr(self, "_log_lines"):
-                self._log_lines = collections.deque(maxlen=100)
+                self._log_lines = collections.deque(maxlen=200)
             if logs:
-                seen = getattr(self, "_log_seen_count", 0)
-                for line in logs[seen:]:
+                last_seen = getattr(self, "_log_seen_last", None)
+                if last_seen is None or last_seen not in logs:
+                    # 첫 수신이거나 이전 마지막 줄이 밀려난 경우 → 전체 추가
+                    start = 0
+                else:
+                    start = logs.index(last_seen) + 1
+                for line in logs[start:]:
                     self._log_lines.append(line)
-                self._log_seen_count = len(logs)
+                if logs:
+                    self._log_seen_last = logs[-1]
 
             # ── 조건부 메모리 / 캐시 정리 ────────────────────────────────
             self._maybe_flush_memory(status, pot_ok)

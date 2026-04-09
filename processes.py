@@ -319,9 +319,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     # ── 메모리·캐시 정리 헬퍼 ────────────────────────────────────────────────
     def _do_mem_clean(reason: str):
-        """버퍼 트리밍 + Python GC + Windows HeapCompact로 메모리를 OS에 반환."""
+        """버퍼 트리밍 + Python GC 강제 실행."""
         nonlocal _last_mem_clean_t
-        import gc, ctypes as _ct
+        import gc
         # 분석에 필요한 BUF_SEC 구간만 남기고 나머지 제거
         if lpb:
             latest = lpb[-1][0]
@@ -332,31 +332,23 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             while aub and latest - aub[0][0] > BUF_SEC:
                 aub.popleft()
         gc.collect()
-        # numpy/scipy가 해제한 메모리를 OS에 실제로 반환
-        try:
-            k32 = _ct.windll.kernel32
-            n = k32.GetProcessHeaps(0, None)
-            if n > 0:
-                arr = (_ct.c_void_p * n)()
-                k32.GetProcessHeaps(n, arr)
-                for h in arr:
-                    if h:
-                        k32.HeapCompact(h, 0)
-            k32.SetProcessWorkingSetSize(k32.GetCurrentProcess(), -1, -1)
-        except Exception:
-            pass
         _last_mem_clean_t = time.time()
         add_log(f"🧹 메모리 정리 ({reason})")
     # ─────────────────────────────────────────────────────────────────────────
 
     _last_log_snapshot = [None]
+    _last_log_len      = [0]
 
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
                    notify=None, oped_prompt=None):
+        # deque는 maxlen 초과 시 앞이 밀리므로 len 비교가 아닌
+        # 마지막 항목과 총 누적 길이로 변경 감지
+        cur_len = len(logs)
         snap = _last_log_snapshot[0]
-        if snap is None or len(snap) != len(logs) or (logs and snap[-1] != logs[-1]):
+        if snap is None or cur_len != _last_log_len[0] or (logs and snap[-1] != logs[-1]):
             snap = list(logs)
             _last_log_snapshot[0] = snap
+            _last_log_len[0] = cur_len
         if oped_prompt is not None:
             pending_prompt[0] = oped_prompt
         prompt_to_send    = pending_prompt[0]
@@ -463,8 +455,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         # 조건 3: 싱크 중(녹화 아님) → 보정완료·싱크정상 시 처리 (아래에서)
         _now_t = time.time()
         if not pot_ok:
-            # 팟플 없으면 버퍼 전부 비우고 30초마다 메모리 반환
-            if lpb or aub or (_now_t - _last_mem_clean_t >= 30.0):
+            # 팟플 없으면 버퍼 전부 비우고 1분마다 GC
+            if lpb or aub or (_now_t - _last_mem_clean_t >= MEM_CLEAN_INTERVAL):
                 lpb.clear()
                 aub.clear()
                 _do_mem_clean("팟플레이어 미감지")

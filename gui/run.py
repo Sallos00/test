@@ -130,10 +130,11 @@ class LipSyncGUIRun:
                                    state="normal")
             self._proc_lbl.config(text="중지됨", fg=self.TEXT_DIM)
             self._start_oped_monitor()   # 싱크 정지 후 모니터 재시작
-            threading.Thread(
-                target=self._monitor_for_popup,
-                kwargs={"wait_for_exit": True},
-                daemon=True).start()
+            if not getattr(self, "_monitor_thread_running", False):
+                threading.Thread(
+                    target=self._monitor_for_popup,
+                    kwargs={"wait_for_exit": True},
+                    daemon=True).start()
 
     # ── Windows 토스트 알림 ───────────────────────────────────────────────────
     @staticmethod
@@ -181,34 +182,38 @@ class LipSyncGUIRun:
 
     def _monitor_for_popup(self, wait_for_exit=False):
         """싱크 OFF 상태에서 팟플레이어 재생 감지 시 시작 팝업 표시."""
-        while not getattr(self, '_auth_ok', False):
-            if self._closing: return
-            time.sleep(0.1)
+        self._monitor_thread_running = True
+        try:
+            while not getattr(self, '_auth_ok', False):
+                if self._closing: return
+                time.sleep(0.1)
 
-        if wait_for_exit:
+            if wait_for_exit:
+                while not self._closing and not self._running:
+                    if not is_potplayer_running():
+                        break
+                    for _ in range(10):
+                        if self._closing or self._running: return
+                        time.sleep(0.1)
+
             while not self._closing and not self._running:
-                if not is_potplayer_running():
-                    break
+                hwnd = find_potplayer_hwnd()
+                if hwnd and is_potplayer_playing(hwnd) and is_potplayer_running():
+                    if self._closing or self._running:
+                        return
+                    self._popup_open = True
+                    def _safe_show():
+                        if not self._closing and not self._running:
+                            self._show_start_popup()
+                        else:
+                            self._popup_open = False
+                    self._popup_after_id = self.root.after_idle(_safe_show)
+                    return
                 for _ in range(10):
                     if self._closing or self._running: return
                     time.sleep(0.1)
-
-        while not self._closing and not self._running:
-            hwnd = find_potplayer_hwnd()
-            if hwnd and is_potplayer_playing(hwnd) and is_potplayer_running():
-                if self._closing or self._running:
-                    return
-                self._popup_open = True
-                def _safe_show():
-                    if not self._closing and not self._running:
-                        self._show_start_popup()
-                    else:
-                        self._popup_open = False
-                self._popup_after_id = self.root.after_idle(_safe_show)
-                return
-            for _ in range(10):
-                if self._closing or self._running: return
-                time.sleep(0.1)
+        finally:
+            self._monitor_thread_running = False
 
     def _show_start_popup(self):
         """동영상 재생 감지 시 싱크 시작 여부 팝업."""
@@ -280,10 +285,11 @@ class LipSyncGUIRun:
                 except Exception: pass
             self._popup_open = False
             popup.destroy()
-            threading.Thread(
-                target=self._monitor_for_popup,
-                kwargs={"wait_for_exit": True},
-                daemon=True).start()
+            if not getattr(self, "_monitor_thread_running", False):
+                threading.Thread(
+                    target=self._monitor_for_popup,
+                    kwargs={"wait_for_exit": True},
+                    daemon=True).start()
 
         BTN = dict(font=("Consolas", max(8, round(8 * r)), "bold"), relief="flat",
                    cursor="hand2", padx=round(16*r), pady=round(6*r))

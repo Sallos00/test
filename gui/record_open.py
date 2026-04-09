@@ -333,11 +333,14 @@ class LipSyncGUIRecordOpen:
                                 break
                         _t.sleep(0.2)
 
-                import psutil
+                import ctypes as _ct
+                from win32_utils import find_potplayer_hwnd as _fpot
                 pid = None
-                for p in psutil.process_iter(["pid", "name"]):
-                    if "potplayer" in p.info["name"].lower():
-                        pid = p.info["pid"]; break
+                _hwnd_pid = _fpot()
+                if _hwnd_pid:
+                    _pid_val = _ct.c_ulong(0)
+                    _ct.windll.user32.GetWindowThreadProcessId(_hwnd_pid, _ct.byref(_pid_val))
+                    pid = _pid_val.value if _pid_val.value else None
 
                 state["audio_rec"]  = _AudioRecorder()
                 state["screen_rec"] = _ScreenRecorder()

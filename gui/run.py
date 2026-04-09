@@ -412,11 +412,19 @@ class LipSyncGUIRun:
     # ── 100ms 주기 UI 갱신 ────────────────────────────────────────────────────
     # ── 메모리 / 캐시 정리 ───────────────────────────────────────────────────
     def _flush_memory(self):
-        """gc + Windows WorkingSet 트림으로 메모리/캐시를 강제 해제."""
+        """gc + HeapCompact + WorkingSet 트림으로 메모리를 OS에 반환."""
         gc.collect()
         try:
-            ctypes.windll.kernel32.SetProcessWorkingSetSize(
-                ctypes.windll.kernel32.GetCurrentProcess(), -1, -1)
+            k32 = ctypes.windll.kernel32
+            n = k32.GetProcessHeaps(0, None)
+            if n > 0:
+                HeapArray = ctypes.c_void_p * n
+                heaps = HeapArray()
+                k32.GetProcessHeaps(n, heaps)
+                for h in heaps:
+                    if h:
+                        k32.HeapCompact(h, 0)
+            k32.SetProcessWorkingSetSize(k32.GetCurrentProcess(), -1, -1)
         except Exception:
             pass
 

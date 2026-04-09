@@ -320,9 +320,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     # ── 메모리·캐시 정리 헬퍼 ────────────────────────────────────────────────
     def _do_mem_clean(reason: str):
-        """버퍼 트리밍 + Python GC 강제 실행."""
+        """버퍼 트리밍 + Python GC + Windows HeapCompact로 메모리를 OS에 반환."""
         nonlocal _last_mem_clean_t
-        import gc
+        import gc, ctypes as _ct
         # 분석에 필요한 BUF_SEC 구간만 남기고 나머지 제거
         if lpb:
             latest = lpb[-1][0]
@@ -333,6 +333,19 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             while aub and latest - aub[0][0] > BUF_SEC:
                 aub.popleft()
         gc.collect()
+        # numpy/scipy가 해제한 메모리를 OS에 실제로 반환
+        try:
+            k32 = _ct.windll.kernel32
+            n = k32.GetProcessHeaps(0, None)
+            if n > 0:
+                arr = (_ct.c_void_p * n)()
+                k32.GetProcessHeaps(n, arr)
+                for h in arr:
+                    if h:
+                        k32.HeapCompact(h, 0)
+            k32.SetProcessWorkingSetSize(k32.GetCurrentProcess(), -1, -1)
+        except Exception:
+            pass
         _last_mem_clean_t = time.time()
         add_log(f"🧹 메모리 정리 ({reason})")
     # ─────────────────────────────────────────────────────────────────────────
@@ -658,6 +671,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         else:
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
+            # 싱크 정상도 보정과 동일하게 10초 쿨다운 적용 → 불필요한 재분석 억제
+            last_correction_t = time.time()
             # 조건 3: 싱크 정상 → 녹화 중이 아닐 때만 메모리 정리
             if not is_recording and time.time() - _last_mem_clean_t >= MEM_CLEAN_COOLDOWN:
                 _do_mem_clean("싱크 정상")

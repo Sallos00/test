@@ -112,6 +112,8 @@ class LipSyncGUIBase:
         for w in self.root.winfo_children():
             w.destroy()
         self._theme_widgets = []
+        self._hist_row_cache = []   # destroy된 위젯 참조 초기화
+        self._poll_started   = False  # 폴링 루프 중복 방지 초기화
         self.root.geometry(f"{self.W}x{self.H}")
         self.root.configure(bg=self.BG)
         self._build_ui()

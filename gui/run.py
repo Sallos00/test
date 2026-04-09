@@ -80,7 +80,7 @@ class LipSyncGUIRun:
             self._oped_monitor_running = False
             import time as _t
             if not hasattr(self, "_log_lines"):
-                self._log_lines = collections.deque(maxlen=200)
+                self._log_lines = collections.deque(maxlen=100)
             self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] ⚠ oped 모니터 시작 실패: {e}")
 
     def _stop_oped_monitor(self):
@@ -412,11 +412,21 @@ class LipSyncGUIRun:
     # ── 100ms 주기 UI 갱신 ────────────────────────────────────────────────────
     # ── 메모리 / 캐시 정리 ───────────────────────────────────────────────────
     def _flush_memory(self):
-        """gc + Windows WorkingSet 트림으로 메모리/캐시를 강제 해제."""
+        """gc + HeapCompact + WorkingSet 트림으로 메모리를 OS에 반환."""
         gc.collect()
         try:
-            ctypes.windll.kernel32.SetProcessWorkingSetSize(
-                ctypes.windll.kernel32.GetCurrentProcess(), -1, -1)
+            k32 = ctypes.windll.kernel32
+            # 1. 모든 Windows 힙을 압축해 OS에 메모리 반환 (Private Bytes 감소)
+            heap_count = k32.GetProcessHeaps(0, None)
+            if heap_count > 0:
+                HeapArray = ctypes.c_void_p * heap_count
+                heaps = HeapArray()
+                k32.GetProcessHeaps(heap_count, heaps)
+                for h in heaps:
+                    if h:
+                        k32.HeapCompact(h, 0)
+            # 2. Working Set도 추가로 trim
+            k32.SetProcessWorkingSetSize(k32.GetCurrentProcess(), -1, -1)
         except Exception:
             pass
 
@@ -432,7 +442,7 @@ class LipSyncGUIRun:
         """
         _now = time.time()
         _last = getattr(self, "_mem_flush_last", 0.0)
-        _COOLDOWN = 60.0          # 최소 재실행 간격 (초)
+        _COOLDOWN = 30.0          # 최소 재실행 간격 (초)
 
         is_syncing   = self._running
         is_recording = getattr(self, "_recording", False)
@@ -454,28 +464,6 @@ class LipSyncGUIRun:
     def _refresh(self):
         if self._closing:
             return
-
-        # ── tracemalloc 메모리 진단 (60초마다) ───────────────────────────────
-        import tracemalloc as _tm
-        if not _tm.is_tracing():
-            _tm.start()
-            self._tm_snap = None
-            self._tm_t    = 0.0
-        _tm_now = time.time()
-        if _tm_now - getattr(self, "_tm_t", 0) >= 60.0:
-            self._tm_t = _tm_now
-            snap2 = _tm.take_snapshot()
-            if getattr(self, "_tm_snap", None) is not None:
-                stats = snap2.compare_to(self._tm_snap, "lineno")
-                import collections as _col
-                if not hasattr(self, "_log_lines"):
-                    self._log_lines = _col.deque(maxlen=200)
-                self._log_lines.append("──── [메모리 증가 TOP5] ────")
-                for s in stats[:5]:
-                    self._log_lines.append(
-                        f"  +{s.size_diff/1024:+.1f}KB  {s.count_diff:+d}개  "
-                        f"{s.traceback[0].filename.split(chr(92))[-1]}:{s.traceback[0].lineno}")
-            self._tm_snap = snap2
 
         # 재생 위치/길이 갱신 — 500ms 간격으로 throttle (FindWindowW 비용 절감)
         _now = time.time()
@@ -504,7 +492,7 @@ class LipSyncGUIRun:
             msg = (f"[{_dt.datetime.now().strftime('%H:%M:%S')}] 🔧 oped_monitor={running} "
                    f"procs={len(procs)} alive={alive}")
             if not hasattr(self, "_log_lines"):
-                self._log_lines = collections.deque(maxlen=200)
+                self._log_lines = collections.deque(maxlen=100)
             self._log_lines.append(msg)
 
         # ── P2 로그 큐 수집 (싱크 ON/OFF 무관하게 항상 처리) ────────────────
@@ -517,7 +505,7 @@ class LipSyncGUIRun:
                 try:
                     msg = _lq.get_nowait()
                     if not hasattr(self, "_log_lines"):
-                        self._log_lines = collections.deque(maxlen=200)
+                        self._log_lines = collections.deque(maxlen=100)
                     self._log_lines.append(f"🔊 {msg}")
                     # 캡처 방식 감지 — send_log 메시지에서 추출
                     if "[ProcessLoopback]" in msg:
@@ -546,7 +534,7 @@ class LipSyncGUIRun:
                 om_logs = om_latest.get("log_lines")
                 if om_logs is not None:
                     if not hasattr(self, "_log_lines"):
-                        self._log_lines = collections.deque(maxlen=200)
+                        self._log_lines = collections.deque(maxlen=100)
                     seen = getattr(self, "_om_log_seen_count", 0)
                     for line in om_logs[seen:]:
                         self._log_lines.append(line)
@@ -680,7 +668,7 @@ class LipSyncGUIRun:
 
             # 마지막으로 본 줄 이후 새 항목만 추가 (set 비교 제거)
             if not hasattr(self, "_log_lines"):
-                self._log_lines = collections.deque(maxlen=200)
+                self._log_lines = collections.deque(maxlen=100)
             if logs:
                 seen = getattr(self, "_log_seen_count", 0)
                 for line in logs[seen:]:

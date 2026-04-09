@@ -120,6 +120,14 @@ class LipSyncGUILogic:
         except Exception:
             return
 
+        self._hist_refreshing = True   # <Configure> 이벤트 재진입 차단
+        try:
+            self._refresh_history_list_inner(canvas)
+        finally:
+            self._hist_refreshing = False
+
+    def _refresh_history_list_inner(self, canvas):
+
         records = self._load_history()
         r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         has_dir = bool(getattr(self, "_hist_video_dir", ""))
@@ -233,9 +241,13 @@ class LipSyncGUILogic:
                 command=lambda t=title: self._hist_delete_one(t))
             cached["row"].pack(fill="x", pady=(0, 1))
 
-        # ── 남는 캐시 행은 숨기기 ────────────────────────────────────────────
+        # ── 남는 캐시 행은 완전히 제거 (pack_forget만 하면 메모리 누수) ──────
         for i in range(len(entries), len(cache)):
-            cache[i]["row"].pack_forget()
+            try:
+                cache[i]["row"].destroy()
+            except Exception:
+                pass
+        del cache[len(entries):]
 
         cw = canvas.winfo_width()
         if cw > 1:

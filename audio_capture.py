@@ -40,21 +40,21 @@ _SUPPORT_PROCESS_LOOPBACK = (_WIN_BUILD >= 19041)
 _pid_cache = [None, 0.0]
 
 def _find_potplayer_pid():
+    """팟플레이어 PID를 Win32 API로 조회 (psutil 대신 사용해 메모리 누수 방지)."""
     now = time.time()
-    # 수정: 이전에 _pid_cache[0] is not None 조건으로 인해
-    # 팟플레이어가 없을 때(None 저장) 캐시가 전혀 동작하지 않아
-    # 0.5초마다 전체 프로세스를 순회하며 메모리가 계속 증가했음.
-    # 시간 기준으로만 캐시 판단하도록 수정.
     if now - _pid_cache[1] < 5.0:
         return _pid_cache[0]
-    for p in psutil.process_iter(["pid", "name"]):
-        if "potplayer" in p.info["name"].lower():
-            _pid_cache[0] = p.info["pid"]
-            _pid_cache[1] = now
-            return _pid_cache[0]
-    _pid_cache[0] = None
+    import ctypes as _ct
+    _u32 = _ct.windll.user32
+    hwnd = _u32.FindWindowW("PotPlayer64", None) or _u32.FindWindowW("PotPlayer", None)
+    if hwnd:
+        pid_val = _ct.c_ulong(0)
+        _u32.GetWindowThreadProcessId(hwnd, _ct.byref(pid_val))
+        _pid_cache[0] = pid_val.value if pid_val.value else None
+    else:
+        _pid_cache[0] = None
     _pid_cache[1] = now
-    return None
+    return _pid_cache[0]
 
 
 # ── VAD (Voice Activity Detection) ────────────────────────────────────────────
@@ -361,6 +361,20 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict,
         pid = _find_potplayer_pid()
         if pid is None:
             send_log("⏳ 팟플레이어 실행 대기 중...")
+            # 팟플 없는 동안 numpy 등이 점유한 메모리를 OS에 반환
+            try:
+                import gc as _gc, ctypes as _ct2
+                _gc.collect()
+                _k32 = _ct2.windll.kernel32
+                _n = _k32.GetProcessHeaps(0, None)
+                if _n > 0:
+                    _ha = (_ct2.c_void_p * _n)()
+                    _k32.GetProcessHeaps(_n, _ha)
+                    for _h in _ha:
+                        if _h: _k32.HeapCompact(_h, 0)
+                _k32.SetProcessWorkingSetSize(_k32.GetCurrentProcess(), -1, -1)
+            except Exception:
+                pass
             for _ in range(50):
                 if stop_flag.value:
                     return

@@ -225,6 +225,10 @@ class LipSyncGUILayout:
         self._bar = tk.Frame(bar_bg, bg=self.ACCENT, height=4)
         self._bar.place(x=0, y=0, width=0, height=4)
         self._bar_ref = bar_bg
+        self._bar_ref_width = 0  # <Configure>로 캐시, winfo_width() 반복 호출 방지
+        def _on_bar_ref_configure(e):
+            self._bar_ref_width = e.width
+        bar_bg.bind("<Configure>", _on_bar_ref_configure)
         r1 = reg(tk.Frame(mf, bg=self.BG), bg="BG")
         r1.pack(fill="x", pady=(6, 0))
         reg(tk.Label(r1, text="이미지 샘플", font=MONO_S, bg=self.BG, fg=self.TEXT_MID), bg="BG", fg="TEXT_MID").pack(side="left")

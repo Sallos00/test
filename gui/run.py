@@ -412,19 +412,11 @@ class LipSyncGUIRun:
     # ── 100ms 주기 UI 갱신 ────────────────────────────────────────────────────
     # ── 메모리 / 캐시 정리 ───────────────────────────────────────────────────
     def _flush_memory(self):
-        """gc + HeapCompact + WorkingSet 트림으로 메모리를 OS에 반환."""
+        """gc + Windows WorkingSet 트림으로 메모리/캐시를 강제 해제."""
         gc.collect()
         try:
-            k32 = ctypes.windll.kernel32
-            n = k32.GetProcessHeaps(0, None)
-            if n > 0:
-                HeapArray = ctypes.c_void_p * n
-                heaps = HeapArray()
-                k32.GetProcessHeaps(n, heaps)
-                for h in heaps:
-                    if h:
-                        k32.HeapCompact(h, 0)
-            k32.SetProcessWorkingSetSize(k32.GetCurrentProcess(), -1, -1)
+            ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                ctypes.windll.kernel32.GetCurrentProcess(), -1, -1)
         except Exception:
             pass
 
@@ -628,7 +620,7 @@ class LipSyncGUIRun:
                 self._offset_lbl.config(text=off_txt, fg=col)
                 _prev["off_txt"] = off_txt; _prev["off_col"] = col
 
-            bw    = self._bar_ref.winfo_width()
+            bw    = self._bar_ref_width or self._bar_ref.winfo_width()
             ratio = min(abs(offset) / 500, 1.0)
             bar_w = int(bw * ratio)
             col   = self.ACCENT2 if abs(offset) >= 80 else self.ACCENT3
@@ -693,7 +685,9 @@ class LipSyncGUIRun:
             # state_queue에 아무 데이터도 없는 경우 (팟플레이어 미감지 상태 등)
             self._maybe_flush_memory("대기 중", False)
 
-        self.root.after(100, self._refresh)
+        # 데이터가 없는 유휴 상태엔 1초마다만 갱신 → Tcl 내부 할당 대폭 감소
+        _had_data = (latest is not None) or getattr(self, "_oped_monitor_running", False)
+        self.root.after(100 if _had_data else 1000, self._refresh)
 
     # ── 인증 ──────────────────────────────────────────────────────────────────
     def _destroy_app_root(self):

@@ -562,6 +562,9 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         has_prompt = oped_prompt is not None or pending_prompt[0] is not None
 
         if aud_n < 10 or (lip_n < 10 and not has_prompt):
+            # 데이터 수집 중이라도 녹화 중이 아니면 주기적으로 메모리 정리
+            if not is_recording and time.time() - _last_mem_clean_t >= MEM_CLEAN_INTERVAL:
+                _do_mem_clean("데이터 수집 중")
             push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

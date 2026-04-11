@@ -320,17 +320,14 @@ def proc_analyzer(lip_queue, audio_queue,
 
         return lag / fps * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean(), confidence
 
-    _last_log_snapshot = [None, 0]  # [snap, total_count]
-    _log_push_count    = [0]        # push_state 호출 횟수 (GUI 측 dedup용)
+    _last_log_snapshot = [None]
 
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
                    notify=None, oped_prompt=None):
-        # 매번 스냅샷을 새로 만들어 GUI가 항상 최신 로그를 받도록 한다.
-        # 이전엔 len/last_line 비교로 dedup했으나, deque maxlen=100 도달 후
-        # 항목이 밀려나도 len이 동일해 로그 갱신을 건너뛰는 버그가 있었음.
-        snap = list(logs)
-        _last_log_snapshot[0] = snap
-        _log_push_count[0]   += 1
+        snap = _last_log_snapshot[0]
+        if snap is None or len(snap) != len(logs) or (logs and snap[-1] != logs[-1]):
+            snap = list(logs)
+            _last_log_snapshot[0] = snap
         if oped_prompt is not None:
             pending_prompt[0] = oped_prompt
         prompt_to_send    = pending_prompt[0]
@@ -340,7 +337,6 @@ def proc_analyzer(lip_queue, audio_queue,
             log_lines=snap, potplayer_ok=pot_ok,
             lip_samples=lip_n, audio_samples=aud_n,
             notify=notify, oped_prompt=prompt_to_send,
-            push_count=_log_push_count[0],
         ))
 
     def execute_skip() -> bool:

@@ -326,6 +326,12 @@ class LipSyncGUIRun:
         # 싱크 ON 상태 전용 로그 큐 (T2 → GUI 직접 전달)
         self._main_log_queue = _queue.Queue(maxsize=200)
 
+        # P1(프로세스) ↔ T3(스레드) 간 lip 큐를 매번 새로 생성한다.
+        # mp.Queue 내부 파이프는 생성한 프로세스가 종료되면 파손(broken pipe)될 수 있으므로
+        # 이전 P1이 남긴 큐를 재사용하면 새 P1이 써도 T3가 읽지 못하는 문제가 발생한다.
+        qsize = runtime_cfg.get("QUEUE_MAXSIZE", 200)
+        self._lip_queue = _MpQueue(maxsize=50)
+
         from processes import proc_lip_capture, proc_audio_capture, proc_analyzer  # lazy import
 
         # P1: 별도 프로세스 → multiprocessing.Event 필요 (threading.Event는 pickle 불가)
@@ -381,6 +387,16 @@ class LipSyncGUIRun:
         self._processes.clear()
         if hasattr(self, "_shared_pos"): self._shared_pos[0] = -1
         if hasattr(self, "_shared_dur"): self._shared_dur[0] = -1
+        # 이전 lip_queue의 피더 스레드 강제 해제 → 다음 재시작 시 새 큐를 만든다
+        try:
+            lq = getattr(self, "_lip_queue", None)
+            if lq is not None:
+                lq.cancel_join_thread()
+                while True:
+                    try: lq.get_nowait()
+                    except Exception: break
+        except Exception:
+            pass
 
     def _reset(self):
         if self._running:

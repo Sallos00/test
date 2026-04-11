@@ -658,11 +658,16 @@ class LipSyncGUIRun:
                 new_push = latest.get("push_count", 0)
                 if new_push != getattr(self, "_log_push_count_last", -1):
                     seen = getattr(self, "_log_seen_count", 0)
-                    # deque가 꽉 차서 앞이 밀려났으면 seen이 현재 len보다 클 수 있음
+                    # deque maxlen=100 도달 후 앞이 밀려나면 seen > len(logs) 가능.
+                    # 또한 push_count가 변경됐는데 seen == len(logs)이면
+                    # 새 항목이 밀어낸 것이므로 전체를 다시 덮어써야 한다.
                     if seen >= len(logs):
-                        seen = 0
-                    for line in logs[seen:]:
-                        self._log_lines.append(line)
+                        # 로그가 순환(wrap)됐으므로 전체를 새로 추가
+                        for line in logs:
+                            self._log_lines.append(line)
+                    else:
+                        for line in logs[seen:]:
+                            self._log_lines.append(line)
                     self._log_seen_count      = len(logs)
                     self._log_push_count_last = new_push
 

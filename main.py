@@ -13,7 +13,8 @@ if _base not in sys.path:
     sys.path.insert(0, _base)
 
 import multiprocessing as mp
-from multiprocessing import Queue, Value
+import queue
+import threading
 import tkinter as tk
 
 from win32_utils import CFG
@@ -32,15 +33,18 @@ class LipSyncGUI(LipSyncGUIBase, LipSyncGUILayout, LipSyncGUILogic, LipSyncGUILo
 
 
 if __name__ == "__main__":
+    # P1(lip_capture)은 여전히 별도 프로세스 → spawn 유지
     mp.freeze_support()
     mp.set_start_method("spawn", force=True)
 
     QSIZE       = CFG["QUEUE_MAXSIZE"]
-    lip_queue   = Queue(maxsize=QSIZE)
-    audio_queue = Queue(maxsize=QSIZE)
-    state_queue = Queue(maxsize=20)
-    cmd_queue   = Queue(maxsize=10)
-    stop_flag   = Value("b", False)
+    # P1(프로세스)↔메인 간 큐는 multiprocessing.Queue 유지
+    # P2·P3는 스레드로 전환 → queue.Queue 사용 (직렬화 오버헤드 없음)
+    lip_queue   = mp.Queue(maxsize=QSIZE)        # P1(프로세스) → P3(스레드)
+    audio_queue = queue.Queue(maxsize=QSIZE)     # P2(스레드)   → P3(스레드)
+    state_queue = queue.Queue(maxsize=20)        # P3(스레드)   → GUI
+    cmd_queue   = queue.Queue(maxsize=10)        # GUI          → P3(스레드)
+    stop_flag   = threading.Event()             # P2·P3 스레드 종료 신호
 
     root = tk.Tk()
     app  = LipSyncGUI(root, state_queue, cmd_queue, stop_flag,

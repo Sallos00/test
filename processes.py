@@ -320,16 +320,17 @@ def proc_analyzer(lip_queue, audio_queue,
 
         return lag / fps * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean(), confidence
 
-    _last_log_snapshot = [None]
+    _last_log_snapshot = [None, 0]  # [snap, total_count]
+    _log_push_count    = [0]        # push_state 호출 횟수 (GUI 측 dedup용)
 
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
                    notify=None, oped_prompt=None):
-        snap = _last_log_snapshot[0]
-        # deque가 비어있을 때 [-1] 접근하면 IndexError → 방어 처리
-        last_line = logs[-1] if logs else None
-        if snap is None or len(snap) != len(logs) or (last_line and (not snap or snap[-1] != last_line)):
-            snap = list(logs)
-            _last_log_snapshot[0] = snap
+        # 매번 스냅샷을 새로 만들어 GUI가 항상 최신 로그를 받도록 한다.
+        # 이전엔 len/last_line 비교로 dedup했으나, deque maxlen=100 도달 후
+        # 항목이 밀려나도 len이 동일해 로그 갱신을 건너뛰는 버그가 있었음.
+        snap = list(logs)
+        _last_log_snapshot[0] = snap
+        _log_push_count[0]   += 1
         if oped_prompt is not None:
             pending_prompt[0] = oped_prompt
         prompt_to_send    = pending_prompt[0]
@@ -339,6 +340,7 @@ def proc_analyzer(lip_queue, audio_queue,
             log_lines=snap, potplayer_ok=pot_ok,
             lip_samples=lip_n, audio_samples=aud_n,
             notify=notify, oped_prompt=prompt_to_send,
+            push_count=_log_push_count[0],
         ))
 
     def execute_skip() -> bool:
@@ -368,6 +370,8 @@ def proc_analyzer(lip_queue, audio_queue,
         ema_initialized     = False
         last_correction_t   = 0.0
         offset_buf.clear()
+        lpb.clear()
+        aub.clear()
 
     def reset_oped():
         nonlocal oped_confirm, oped_last_t, oped_prompted
@@ -622,23 +626,29 @@ def proc_analyzer(lip_queue, audio_queue,
             offset_buf.clear()
             add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운")
             status = STATUS_CORRECTED
-            # 보정 완료 시 샘플 버퍼 + lip_queue 전부 비우기
-            # → 분석에 쓴 numpy 배열 참조 해제 + mp.Queue 파이프 버퍼 반환
+            # 보정/정상 판정 후 샘플 버퍼를 비워 numpy 배열 참조를 즉시 해제한다.
+            # lip_queue(mp.Queue 파이프)와 audio_queue 잔류분도 드레인해
+            # drain_queues()가 다음 루프에서 버퍼를 즉시 다시 채우지 않도록 한다.
             lpb.clear()
             aub.clear()
             while True:
                 try: lip_queue.get_nowait()
+                except: break
+            while True:
+                try: audio_queue.get_nowait()
                 except: break
         elif not hwnd:
             status = STATUS_NO_POT
         else:
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
-            # 싱크 정상 시 샘플 버퍼 + lip_queue 전부 비우기
             lpb.clear()
             aub.clear()
             while True:
                 try: lip_queue.get_nowait()
+                except: break
+            while True:
+                try: audio_queue.get_nowait()
                 except: break
 
         push_state(status, smoothed_offset, total_correction_ms, log_lines, pot_ok,

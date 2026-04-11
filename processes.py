@@ -315,7 +315,9 @@ def proc_analyzer(lip_queue, audio_queue,
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
                    notify=None, oped_prompt=None):
         snap = _last_log_snapshot[0]
-        if snap is None or len(snap) != len(logs) or (logs and snap[-1] != logs[-1]):
+        # deque가 비어있을 때 [-1] 접근하면 IndexError → 방어 처리
+        last_line = logs[-1] if logs else None
+        if snap is None or len(snap) != len(logs) or (last_line and (not snap or snap[-1] != last_line)):
             snap = list(logs)
             _last_log_snapshot[0] = snap
         if oped_prompt is not None:

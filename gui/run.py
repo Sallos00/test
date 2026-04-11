@@ -315,6 +315,11 @@ class LipSyncGUIRun:
         self.stop_flag.clear()
         runtime_cfg = self._build_cfg()
 
+        # ── 버그1 수정: 로그 카운터 리셋 ────────────────────────────────────
+        # T3는 재시작마다 새 log_lines deque(인덱스 0부터)를 사용하는데
+        # _log_seen_count가 이전 값으로 남아있으면 모든 새 로그를 건너뜀.
+        self._log_seen_count = 0
+
         # GUI 메인스레드 → T3 공유 재생 위치/길이 (ms), -1 = 미확인
         # 스레드 간 공유 → 일반 list + lock
         self._pos_lock   = threading.Lock()
@@ -329,11 +334,23 @@ class LipSyncGUIRun:
         # 싱크 ON 상태 전용 로그 큐 (T2 → GUI 직접 전달)
         self._main_log_queue = _queue.Queue(maxsize=200)
 
-        # P1(프로세스) ↔ T3(스레드) 간 lip 큐를 매번 새로 생성한다.
-        # mp.Queue 내부 파이프는 생성한 프로세스가 종료되면 파손(broken pipe)될 수 있으므로
-        # 이전 P1이 남긴 큐를 재사용하면 새 P1이 써도 T3가 읽지 못하는 문제가 발생한다.
-        qsize = runtime_cfg.get("QUEUE_MAXSIZE", 200)
-        self._lip_queue = _MpQueue(maxsize=50)
+        # ── 버그2 수정: 큐를 매번 새로 생성해 이전 numpy 버퍼 해제 ─────────
+        # _lip_queue: mp.Queue 파이프 버퍼(32MB)가 이전 P1 종료 후에도 남음.
+        # _audio_queue: T2 종료 후 큐 안에 numpy 배열이 잔류해 GC 안 됨.
+        # 두 큐 모두 매번 새로 만들고, 이전 큐는 명시적으로 드레인해 참조를 끊는다.
+        for _attr in ('_lip_queue', '_audio_queue'):
+            _old = getattr(self, _attr, None)
+            if _old is not None:
+                try:
+                    if hasattr(_old, 'cancel_join_thread'):
+                        _old.cancel_join_thread()
+                    while True:
+                        try: _old.get_nowait()
+                        except Exception: break
+                except Exception:
+                    pass
+        self._lip_queue   = _MpQueue(maxsize=50)
+        self._audio_queue = _queue.Queue(maxsize=runtime_cfg.get("QUEUE_MAXSIZE", 200))
 
         from processes import proc_lip_capture, proc_audio_capture, proc_analyzer  # lazy import
 
@@ -390,14 +407,10 @@ class LipSyncGUIRun:
         self._processes.clear()
         if hasattr(self, "_shared_pos"): self._shared_pos[0] = -1
         if hasattr(self, "_shared_dur"): self._shared_dur[0] = -1
-        # 이전 lip_queue의 피더 스레드 강제 해제 → 다음 재시작 시 새 큐를 만든다
+        # state_queue 잔류 데이터 드레인 — 재시작 후 _refresh()가 구버전 로그를
+        # 읽어 _log_seen_count를 오염시키는 것을 방지한다.
         try:
-            lq = getattr(self, "_lip_queue", None)
-            if lq is not None:
-                lq.cancel_join_thread()
-                while True:
-                    try: lq.get_nowait()
-                    except Exception: break
+            while True: self.state_queue.get_nowait()
         except Exception:
             pass
 

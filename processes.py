@@ -178,8 +178,10 @@ def proc_analyzer(lip_queue, audio_queue,
     SYNC_COOLDOWN_SEC  = 10.0     # 보정 후 재보정 억제 시간
     CONFIDENCE_THRESH  = 0.25     # 교차상관 신뢰도 하한 (이 미만이면 해당 사이클 skip)
 
-    lpb = collections.deque()
-    aub = collections.deque()
+    # 버퍼 상한 고정 — 무한 누적 방지 (문제 2 수정)
+    _MAX_BUF = int(max(BUF_SEC, MUSIC_WINDOW_SEC) * 25 + 100)
+    lpb = collections.deque(maxlen=_MAX_BUF)
+    aub = collections.deque(maxlen=_MAX_BUF)
 
     total_correction_ms = 0       # 누적 보정량 (팟플레이어 딜레이 절대값 추적)
     smoothed_offset     = 0.0
@@ -219,23 +221,31 @@ def proc_analyzer(lip_queue, audio_queue,
         return cv < MUSIC_MAX_CV and fill > MUSIC_MIN_FILL
 
     def drain_queues():
+        import queue as _q
         for q, buf, tag in [(lip_queue, lpb, "👁"), (audio_queue, aub, "🔊")]:
             while True:
                 try:
-                    item = q.get_nowait()
+                    # mp.Queue와 queue.Queue 모두 get_nowait() 지원
+                    # mp.Queue는 block=False가 더 안전 (타임아웃 없이 즉시 반환)
+                    try:
+                        item = q.get_nowait()
+                    except Exception:
+                        break
                     if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
                         add_log(f"{tag} {item[1]}")
                     else:
                         buf.append(item)
                 except Exception:
                     break
+        # BUF_SEC 기준으로 트리밍 (문제 2 수정)
+        _trim_win = max(BUF_SEC, MUSIC_WINDOW_SEC)
         if lpb:
             latest_lip = lpb[-1][0]
-            while lpb and latest_lip - lpb[0][0] > MUSIC_WINDOW_SEC:
+            while lpb and latest_lip - lpb[0][0] > _trim_win:
                 lpb.popleft()
         if aub:
             latest_aud = aub[-1][0]
-            while aub and latest_aud - aub[0][0] > MUSIC_WINDOW_SEC:
+            while aub and latest_aud - aub[0][0] > _trim_win:
                 aub.popleft()
 
     def resample_aligned(lip_buf, aud_buf, fps):
@@ -419,6 +429,12 @@ def proc_analyzer(lip_queue, audio_queue,
         pot_ok = bool(hwnd)
         lip_n  = len(lpb)
         aud_n  = len(aub)
+
+        # 팟플 없으면 버퍼 즉시 비우기 + 주기적 GC (문제 2 수정)
+        if not pot_ok and (lpb or aub):
+            lpb.clear()
+            aub.clear()
+            import gc; gc.collect()
 
         if hwnd:
             try:
@@ -606,11 +622,19 @@ def proc_analyzer(lip_queue, audio_queue,
             offset_buf.clear()
             add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운")
             status = STATUS_CORRECTED
+            # 보정 완료 시 lip_queue 비우기 → mp.Queue 파이프 버퍼 해제
+            while True:
+                try: lip_queue.get_nowait()
+                except: break
         elif not hwnd:
             status = STATUS_NO_POT
         else:
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
+            # 싱크 정상 시 lip_queue 비우기 → mp.Queue 파이프 버퍼 해제
+            while True:
+                try: lip_queue.get_nowait()
+                except: break
 
         push_state(status, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                    lip_n, aud_n, notify, oped_prompt)

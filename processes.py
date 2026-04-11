@@ -590,7 +590,7 @@ def proc_analyzer(lip_queue, audio_queue,
             smoothed_offset = EMA_ALPHA * buf_avg + (1.0 - EMA_ALPHA) * smoothed_offset
         add_log(f"📈 buf_avg={buf_avg:.1f}ms smoothed={smoothed_offset:.1f}ms")
 
-        # 보정 쿨다운 체크
+        # ── 보정 쿨다운 체크 (버퍼 평균·EMA 계산 이후에 위치) ─────────────────
         cooldown_remain = SYNC_COOLDOWN_SEC - (time.time() - last_correction_t)
         if cooldown_remain > 0:
             add_log(f"⏳ 쿨다운 {cooldown_remain:.1f}초")
@@ -599,7 +599,21 @@ def proc_analyzer(lip_queue, audio_queue,
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 
-        # 보정 실행
+        # ── 보정 실행 / 정상 판정 ────────────────────────────────────────────
+        def _flush_and_gc(label: str):
+            """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC (문제 2·3 수정)."""
+            import gc
+            offset_buf.clear()
+            lpb.clear()
+            aub.clear()
+            # lip_queue / audio_queue 잔류분 드레인
+            for q in (lip_queue, audio_queue):
+                while True:
+                    try: q.get_nowait()
+                    except: break
+            gc.collect()
+            add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
+
         if abs(smoothed_offset) >= THRESH and hwnd:
             steps = min(int(abs(smoothed_offset) / STEP), MAX_STEPS)
             sign  = 1 if smoothed_offset > 0 else -1
@@ -615,41 +629,26 @@ def proc_analyzer(lip_queue, audio_queue,
                 continue
 
             vk        = VK_OEM_PERIOD if smoothed_offset > 0 else VK_OEM_COMMA
-            direction = "빠르게(오디오 늦춤)" if smoothed_offset > 0 else "느리게(오디오 당김)"
-            add_log(f"보정: {direction} ×{steps} ({steps*STEP}ms) [평균={smoothed_offset:.1f}ms]")
+            direction = "싱크 빠르게(오디오 늦춤)" if smoothed_offset > 0 else "싱크 느리게(오디오 당김)"
+            add_log(f"🔧 보정: {direction} ×{steps} ({steps*STEP}ms) [평균={smoothed_offset:.1f}ms]")
             for _ in range(steps):
                 post_key_to_potplayer(hwnd, vk, shift=True)
                 time.sleep(0.01)
 
             total_correction_ms += steps * STEP * sign
             last_correction_t    = time.time()
-            offset_buf.clear()
-            add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운")
             status = STATUS_CORRECTED
-            # 보정/정상 판정 후 샘플 버퍼를 비워 numpy 배열 참조를 즉시 해제한다.
-            # lip_queue(mp.Queue 파이프)와 audio_queue 잔류분도 드레인해
-            # drain_queues()가 다음 루프에서 버퍼를 즉시 다시 채우지 않도록 한다.
-            lpb.clear()
-            aub.clear()
-            while True:
-                try: lip_queue.get_nowait()
-                except: break
-            while True:
-                try: audio_queue.get_nowait()
-                except: break
+            # ── 문제 2·3: 보정 후 즉시 버퍼·큐 정리 + 로그 출력 ──────────────
+            _flush_and_gc("싱크 빠르게/느리게 보정")
+
         elif not hwnd:
             status = STATUS_NO_POT
         else:
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
-            lpb.clear()
-            aub.clear()
-            while True:
-                try: lip_queue.get_nowait()
-                except: break
-            while True:
-                try: audio_queue.get_nowait()
-                except: break
+            last_correction_t = time.time()   # 정상 판정도 쿨다운 기산점 갱신
+            # ── 문제 2·3: 정상 판정 후 즉시 버퍼·큐 정리 + 로그 출력 ──────────
+            _flush_and_gc("싱크 정상")
 
         push_state(status, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                    lip_n, aud_n, notify, oped_prompt)

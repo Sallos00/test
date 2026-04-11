@@ -4,8 +4,7 @@ import time
 import ctypes
 import ctypes.wintypes
 import collections
-import numpy as np
-from multiprocessing import Queue, Value
+# multiprocessing.Queue 불필요 (스레드 전환)
 from win32_utils import (
     CFG, find_potplayer_hwnd, post_key_to_potplayer,
     queue_put, VK_OEM_PERIOD, VK_OEM_COMMA, VK_OEM_2,
@@ -18,8 +17,9 @@ from log_utils import (make_add_log, STATUS_OK, STATUS_CORRECTED, STATUS_COLLECT
                        STATUS_NO_SIGNAL, STATUS_LOW_CONF, STATUS_COOLDOWN,
                        STATUS_UNDETECTED, STATUS_CEILING, STATUS_NO_POT, STATUS_BUFFERING)
 
-def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_anchor=None):
+def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
     """팟플레이어 화면 캡처 → 입술 개구 신호 추출 프로세스."""
+    import numpy as np
     import cv2
     import sys
 
@@ -53,7 +53,7 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
         darkest   = int(np.argmin(row_means))
         return float(np.clip((search_start + darkest) / h - 0.05, 0.50, 0.85))
 
-    while not stop_flag.value:
+    while not stop_flag.is_set():
         t0   = time.perf_counter()
 
         # hwnd는 1초마다만 재조회 (find_potplayer_hwnd 비용 절감)
@@ -148,11 +148,12 @@ def proc_lip_capture(lip_queue: Queue, stop_flag: Value, cfg: dict, stream_ancho
         if sleep_t > 0:
             time.sleep(sleep_t)
 
-def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
-                  state_queue: Queue, cmd_queue: Queue,
-                  stop_flag: Value, cfg: dict,
+def proc_analyzer(lip_queue, audio_queue,
+                  state_queue, cmd_queue,
+                  stop_flag, cfg: dict,
                   shared_pos=None, shared_dur=None):
     """교차상관으로 싱크 오프셋 추정 및 팟플레이어 자동 보정 프로세스."""
+    import numpy as np
     from scipy.signal import correlate
 
     BUF_SEC   = cfg["BUFFER_SEC"]
@@ -177,23 +178,14 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
     SYNC_COOLDOWN_SEC  = 10.0     # 보정 후 재보정 억제 시간
     CONFIDENCE_THRESH  = 0.25     # 교차상관 신뢰도 하한 (이 미만이면 해당 사이클 skip)
 
-    # ── 메모리 정리 설정 ─────────────────────────────────────────────────────
-    MEM_CLEAN_INTERVAL = 60.0     # 주기적 메모리 정리 간격 (초)
-    MEM_CLEAN_COOLDOWN = 60.0     # 싱크보정 후 정리 쿨다운 (초)
-    _last_mem_clean_t  = 0.0      # 마지막 메모리 정리 시각
-    # ─────────────────────────────────────────────────────────────────────────
-
-    # maxlen으로 버퍼 상한 고정 — 팟플 미감지·유휴 상태에서 무한 누적 방지
-    _MAX_BUF = int(MUSIC_WINDOW_SEC * 25 + 100)
-    lpb = collections.deque(maxlen=_MAX_BUF)
-    aub = collections.deque(maxlen=_MAX_BUF)
+    lpb = collections.deque()
+    aub = collections.deque()
 
     total_correction_ms = 0       # 누적 보정량 (팟플레이어 딜레이 절대값 추적)
     smoothed_offset     = 0.0
     ema_initialized     = False
     offset_buf          = collections.deque(maxlen=OFFSET_BUF_SIZE)
     last_correction_t   = 0.0
-    is_recording        = False    # 녹화 중 메모리 정리 억제 플래그
     video_fps           = 30.0    # 현재 영상 fps (재생 감지·영상 변경 시 갱신)
 
     log_lines    = collections.deque(maxlen=100)
@@ -239,11 +231,11 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
                     break
         if lpb:
             latest_lip = lpb[-1][0]
-            while lpb and latest_lip - lpb[0][0] > BUF_SEC:
+            while lpb and latest_lip - lpb[0][0] > MUSIC_WINDOW_SEC:
                 lpb.popleft()
         if aub:
             latest_aud = aub[-1][0]
-            while aub and latest_aud - aub[0][0] > BUF_SEC:
+            while aub and latest_aud - aub[0][0] > MUSIC_WINDOW_SEC:
                 aub.popleft()
 
     def resample_aligned(lip_buf, aud_buf, fps):
@@ -318,38 +310,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
         return lag / fps * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean(), confidence
 
-    # ── 메모리·캐시 정리 헬퍼 ────────────────────────────────────────────────
-    def _do_mem_clean(reason: str):
-        """버퍼 트리밍 + Python GC + Windows HeapCompact로 메모리를 OS에 반환."""
-        nonlocal _last_mem_clean_t
-        import gc, ctypes as _ct
-        # 분석에 필요한 BUF_SEC 구간만 남기고 나머지 제거
-        if lpb:
-            latest = lpb[-1][0]
-            while lpb and latest - lpb[0][0] > BUF_SEC:
-                lpb.popleft()
-        if aub:
-            latest = aub[-1][0]
-            while aub and latest - aub[0][0] > BUF_SEC:
-                aub.popleft()
-        gc.collect()
-        # numpy/scipy가 해제한 메모리를 OS에 실제로 반환
-        try:
-            k32 = _ct.windll.kernel32
-            n = k32.GetProcessHeaps(0, None)
-            if n > 0:
-                arr = (_ct.c_void_p * n)()
-                k32.GetProcessHeaps(n, arr)
-                for h in arr:
-                    if h:
-                        k32.HeapCompact(h, 0)
-            k32.SetProcessWorkingSetSize(k32.GetCurrentProcess(), -1, -1)
-        except Exception:
-            pass
-        _last_mem_clean_t = time.time()
-        add_log(f"🧹 메모리 정리 ({reason})")
-    # ─────────────────────────────────────────────────────────────────────────
-
     _last_log_snapshot = [None]
 
     def push_state(status, offset, correction, logs, pot_ok, lip_n, aud_n,
@@ -375,8 +335,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             add_log("⚠ 스킵 실패: 팟플레이어 미감지")
             return False
         try:
-            pos = shared_pos.value if shared_pos else 0
-            dur = shared_dur.value if shared_dur else 0
+            pos = shared_pos[0] if shared_pos else 0
+            dur = shared_dur[0] if shared_dur else 0
             if dur <= 0:
                 add_log("⚠ 스킵 실패: 전체 길이 미확인")
                 return False
@@ -406,12 +366,12 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
 
     # BUF_SEC 동안 대기하되 stop_flag가 세워지면 즉시 탈출
     _buf_end = time.perf_counter() + BUF_SEC
-    while not stop_flag.value and time.perf_counter() < _buf_end:
+    while not stop_flag.is_set() and time.perf_counter() < _buf_end:
         time.sleep(0.05)
-    if stop_flag.value:
+    if stop_flag.is_set():
         return
 
-    while not stop_flag.value:
+    while not stop_flag.is_set():
         t0 = time.perf_counter()
 
         while True:
@@ -447,14 +407,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             elif cmd == "oped_reset":
                 reset_oped()
                 add_log("↺ OP/ED 상태 초기화")
-            elif cmd == "recording_start":
-                is_recording = True
-                add_log("🔴 녹화 시작 — 메모리 정리 억제")
-            elif cmd == "recording_stop":
-                is_recording = False
-                add_log("⏹ 녹화 종료 — 메모리 정리 재개")
             elif cmd == "stop":
-                stop_flag.value = True
+                stop_flag.set()
                 return
 
         drain_queues()
@@ -463,19 +417,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         pot_ok = bool(hwnd)
         lip_n  = len(lpb)
         aud_n  = len(aub)
-
-        # ── 주기적 메모리 정리 ────────────────────────────────────────────
-        # 조건 1: 팟플레이어 미감지 → 버퍼 전체 비우기 + 1분마다 GC
-        # 조건 2: 유휴 상태(싱크·녹화 모두 아님) → 1분마다 GC
-        # 조건 3: 싱크 중(녹화 아님) → 보정완료·싱크정상 시 처리 (아래에서)
-        _now_t = time.time()
-        if not pot_ok:
-            # 팟플 없으면 버퍼 전부 비우고 1분마다 GC
-            if lpb or aub or (_now_t - _last_mem_clean_t >= MEM_CLEAN_INTERVAL):
-                lpb.clear()
-                aub.clear()
-                _do_mem_clean("팟플레이어 미감지")
-        # ─────────────────────────────────────────────────────────────────
 
         if hwnd:
             try:
@@ -509,8 +450,8 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             notify = ("🎬 동영상 재생 감지", "팟플레이어에서 동영상 재생이 감지되었습니다.\n싱크 분석을 시작합니다.")
             add_log(f"🎬 동영상 재생 감지 (fps={video_fps})")
 
-        pos = shared_pos.value if shared_pos else -1
-        dur = shared_dur.value if shared_dur else -1
+        pos = shared_pos[0] if shared_pos else -1
+        dur = shared_dur[0] if shared_dur else -1
 
         if pos >= 0 and dur > 0:
             in_op   = pos < OPED_ZONE_MS and pos <= dur // 2
@@ -562,9 +503,6 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
         has_prompt = oped_prompt is not None or pending_prompt[0] is not None
 
         if aud_n < 10 or (lip_n < 10 and not has_prompt):
-            # 데이터 수집 중이라도 녹화 중이 아니면 주기적으로 메모리 정리
-            if not is_recording and time.time() - _last_mem_clean_t >= MEM_CLEAN_INTERVAL:
-                _do_mem_clean("데이터 수집 중")
             push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
@@ -666,24 +604,11 @@ def proc_analyzer(lip_queue: Queue, audio_queue: Queue,
             offset_buf.clear()
             add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운")
             status = STATUS_CORRECTED
-            # 조건 3: 싱크 중 보정 완료 → 녹화 중이 아닐 때만 메모리 정리
-            if not is_recording and time.time() - _last_mem_clean_t >= MEM_CLEAN_COOLDOWN:
-                _do_mem_clean("보정 완료")
         elif not hwnd:
             status = STATUS_NO_POT
         else:
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
-            # 싱크 정상도 보정과 동일하게 10초 쿨다운 적용 → 불필요한 재분석 억제
-            last_correction_t = time.time()
-            # 조건 3: 싱크 정상 → 녹화 중이 아닐 때만 메모리 정리
-            if not is_recording and time.time() - _last_mem_clean_t >= MEM_CLEAN_COOLDOWN:
-                _do_mem_clean("싱크 정상")
-
-        # 조건 2: 유휴(팟플 있음, 싱크 데이터 없음) → 녹화 중이 아닐 때만 GC
-        if pot_ok and lip_n == 0 and aud_n == 0 and not is_recording:
-            if time.time() - _last_mem_clean_t >= MEM_CLEAN_INTERVAL:
-                _do_mem_clean("유휴 상태")
 
         push_state(status, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                    lip_n, aud_n, notify, oped_prompt)

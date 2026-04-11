@@ -11,7 +11,7 @@ import queue as _queue
 import tkinter as tk
 import winreg
 import multiprocessing as _mp
-from multiprocessing import Process
+from multiprocessing import Process, Array as _MpArray
 from multiprocessing import Queue as _MpQueue
 
 import auth as _auth_module
@@ -51,7 +51,8 @@ class LipSyncGUIRun:
             self._om_pos_lock    = threading.Lock()
             self._om_shared_pos  = [-1]
             self._om_shared_dur  = [-1]
-            self._om_stream_anchor = [0.0, 48000.0, 1.0]
+            import ctypes as _ct
+            self._om_stream_anchor = _MpArray(_ct.c_double, [0.0, 48000.0, 1.0])
 
             from processes import proc_audio_capture, proc_analyzer  # lazy import
             self._om_threads = []
@@ -321,7 +322,9 @@ class LipSyncGUIRun:
         self._shared_dur = [-1]
 
         # 오디오 스트림 기준점 — T2가 첫 패킷에서 기록, P1이 읽어서 타임스탬프 통일
-        self._stream_anchor = [0.0, 48000.0, 1.0]
+        # 프로세스(P1)↔스레드(T2) 간 공유이므로 multiprocessing.Array 사용
+        import ctypes as _ct
+        self._stream_anchor = _MpArray(_ct.c_double, [0.0, 48000.0, 1.0])
 
         # 싱크 ON 상태 전용 로그 큐 (T2 → GUI 직접 전달)
         self._main_log_queue = _queue.Queue(maxsize=200)

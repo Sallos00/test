@@ -318,7 +318,8 @@ class LipSyncGUIRun:
         # ── 버그1 수정: 로그 카운터 리셋 ────────────────────────────────────
         # T3는 재시작마다 새 log_lines deque(인덱스 0부터)를 사용하는데
         # _log_seen_count가 이전 값으로 남아있으면 모든 새 로그를 건너뜀.
-        self._log_seen_count = 0
+        self._log_seen_count      = 0
+        self._log_push_count_last = -1
 
         # GUI 메인스레드 → T3 공유 재생 위치/길이 (ms), -1 = 미확인
         # 스레드 간 공유 → 일반 list + lock
@@ -413,6 +414,21 @@ class LipSyncGUIRun:
             while True: self.state_queue.get_nowait()
         except Exception:
             pass
+        # 중지 즉시 큐 파이프 버퍼 해제 — 재시작까지 기다리지 않고 바로 메모리 반환.
+        # _lip_queue: mp.Queue 파이프 버퍼(32MB)를 드레인 + 피더 스레드 해제.
+        # _audio_queue: T2 종료 후 잔류 numpy 배열 참조를 끊어 GC 가능 상태로 만든다.
+        for _attr in ('_lip_queue', '_audio_queue', '_main_log_queue'):
+            _q = getattr(self, _attr, None)
+            if _q is None:
+                continue
+            try:
+                if hasattr(_q, 'cancel_join_thread'):
+                    _q.cancel_join_thread()
+                while True:
+                    try: _q.get_nowait()
+                    except Exception: break
+            except Exception:
+                pass
 
     def _reset(self):
         if self._running:
@@ -422,14 +438,16 @@ class LipSyncGUIRun:
                 self.cmd_queue.put_nowait("oped_reset")
             except Exception:
                 pass
-            # 즉시 드레인. oped_reset이 P3에서 처리되기 전에
-            # _refresh()가 구버전 oped_prompt를 꺼내 팝업을 재호출하는
-            # 타이밍 버그를 방지한다.
+            # 즉시 드레인 + 로그 카운터 리셋
+            # → reset 후 P3가 새 log_lines를 보내도 seen 값이 남아
+            #   "↺ 싱크 초기화" 로그가 표시 안 되는 버그 수정
             try:
                 while True:
                     self.state_queue.get_nowait()
             except Exception:
                 pass
+            self._log_seen_count      = 0
+            self._log_push_count_last = -1
             return
         # 싱크 OFF: oped 모니터에 oped_reset 전송 + 팟플레이어 직접 초기화
         if getattr(self, "_oped_monitor_running", False):
@@ -632,18 +650,23 @@ class LipSyncGUIRun:
             self._aud_cnt.config(text=str(aud_n))
             pc = self.ACCENT3 if self._running else self.TEXT_DIM
             self._proc_dot.config(fg=pc)
-            # 마지막으로 본 줄 이후 새 항목만 추가 (set 비교 제거)
+            # push_count 기반으로 새 로그 감지 → deque maxlen=100 도달 후
+            # 앞이 밀려나도 len이 동일해 건너뛰던 버그 수정.
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)
             if logs:
-                seen = getattr(self, "_log_seen_count", 0)
-                for line in logs[seen:]:
-                    self._log_lines.append(line)
-                self._log_seen_count = len(logs)
+                new_push = latest.get("push_count", 0)
+                if new_push != getattr(self, "_log_push_count_last", -1):
+                    seen = getattr(self, "_log_seen_count", 0)
+                    # deque가 꽉 차서 앞이 밀려났으면 seen이 현재 len보다 클 수 있음
+                    if seen >= len(logs):
+                        seen = 0
+                    for line in logs[seen:]:
+                        self._log_lines.append(line)
+                    self._log_seen_count      = len(logs)
+                    self._log_push_count_last = new_push
 
         self.root.after(100, self._refresh)
-
-    # ── 인증 ──────────────────────────────────────────────────────────────────
     def _destroy_app_root(self):
         try:
             if self.root.winfo_exists():

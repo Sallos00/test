@@ -10,6 +10,7 @@ import ctypes.wintypes
 import queue as _queue
 import tkinter as tk
 import winreg
+import multiprocessing as _mp
 from multiprocessing import Process
 from multiprocessing import Queue as _MpQueue
 
@@ -327,14 +328,15 @@ class LipSyncGUIRun:
 
         from processes import proc_lip_capture, proc_audio_capture, proc_analyzer  # lazy import
 
-        # P1: cv2 집약 작업 → 프로세스 유지
+        # P1: 별도 프로세스 → multiprocessing.Event 필요 (threading.Event는 pickle 불가)
+        self._p1_stop_flag = _mp.Event()
         p1 = Process(target=proc_lip_capture,
-                     args=(self._lip_queue, self.stop_flag, runtime_cfg, self._stream_anchor),
+                     args=(self._lip_queue, self._p1_stop_flag, runtime_cfg, self._stream_anchor),
                      daemon=True)
         p1.start()
         self._processes.append(p1)
 
-        # T2·T3: 스레드로 전환 (numpy/scipy를 메인 프로세스와 공유)
+        # T2·T3: 스레드 → threading.Event (stop_flag) 그대로 사용
         for target, args in [
             (proc_audio_capture, (self._audio_queue, self.stop_flag, runtime_cfg,
                                   self._main_log_queue, self._stream_anchor)),
@@ -357,6 +359,9 @@ class LipSyncGUIRun:
     def _stop_processes(self):
         self._running = False
         self.stop_flag.set()
+        # P1 전용 stop flag도 함께 세움
+        if hasattr(self, "_p1_stop_flag"):
+            self._p1_stop_flag.set()
         try:
             self.cmd_queue.put_nowait("stop")
         except Exception:
@@ -444,11 +449,11 @@ class LipSyncGUIRun:
         if time.time() - getattr(self, "_diag_t", 0) > 30:
             self._diag_t = time.time()
             running = getattr(self, "_oped_monitor_running", False)
-            procs   = getattr(self, "_om_processes", [])
-            alive   = [p.is_alive() for p in procs]
+            threads = getattr(self, "_om_threads", [])
+            alive   = [t.is_alive() for t in threads]
             import datetime as _dt
             msg = (f"[{_dt.datetime.now().strftime('%H:%M:%S')}] 🔧 oped_monitor={running} "
-                   f"procs={len(procs)} alive={alive}")
+                   f"threads={len(threads)} alive={alive}")
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)
             self._log_lines.append(msg)

@@ -12,9 +12,7 @@ audio_queue에 (t_stream, rms, vad) 튜플을 전송한다.
 import ctypes
 import time
 import platform
-import numpy as np
-import psutil
-from multiprocessing import Queue, Value
+# multiprocessing Queue/Value 불필요 (스레드 전환)
 from win32_utils import CFG, queue_put
 from audio_com import (
     activate_process_loopback, audio_client_initialize,
@@ -40,21 +38,22 @@ _SUPPORT_PROCESS_LOOPBACK = (_WIN_BUILD >= 19041)
 _pid_cache = [None, 0.0]
 
 def _find_potplayer_pid():
-    """팟플레이어 PID를 Win32 API로 조회 (psutil 대신 사용해 메모리 누수 방지)."""
+    import psutil
     now = time.time()
+    # 수정: 이전에 _pid_cache[0] is not None 조건으로 인해
+    # 팟플레이어가 없을 때(None 저장) 캐시가 전혀 동작하지 않아
+    # 0.5초마다 전체 프로세스를 순회하며 메모리가 계속 증가했음.
+    # 시간 기준으로만 캐시 판단하도록 수정.
     if now - _pid_cache[1] < 5.0:
         return _pid_cache[0]
-    import ctypes as _ct
-    _u32 = _ct.windll.user32
-    hwnd = _u32.FindWindowW("PotPlayer64", None) or _u32.FindWindowW("PotPlayer", None)
-    if hwnd:
-        pid_val = _ct.c_ulong(0)
-        _u32.GetWindowThreadProcessId(hwnd, _ct.byref(pid_val))
-        _pid_cache[0] = pid_val.value if pid_val.value else None
-    else:
-        _pid_cache[0] = None
+    for p in psutil.process_iter(["pid", "name"]):
+        if "potplayer" in p.info["name"].lower():
+            _pid_cache[0] = p.info["pid"]
+            _pid_cache[1] = now
+            return _pid_cache[0]
+    _pid_cache[0] = None
     _pid_cache[1] = now
-    return _pid_cache[0]
+    return None
 
 
 # ── VAD (Voice Activity Detection) ────────────────────────────────────────────
@@ -67,8 +66,9 @@ _VAD_ZCR_LOW  = 1000    # 음성 ZCR 하한 (crosses/sec)
 _VAD_ZCR_HIGH = 3500    # 음성 ZCR 상한 (crosses/sec)
 _VAD_MIN_RMS  = 5e-3    # 이 이하는 무음으로 판정
 
-def _compute_vad(arr: np.ndarray, sr: int) -> float:
+def _compute_vad(arr, sr: int) -> float:
     """모노 float32 PCM 배열에서 음성 여부를 판별. 반환: 1.0 (음성) / 0.0 (BGM·무음)"""
+    import numpy as np
     if len(arr) < 16:
         return 0.0
     rms = float(np.sqrt(np.mean(arr ** 2)))
@@ -98,6 +98,7 @@ def _make_stream_converter(dp_origin: int, qp_origin: int, sr: int, freq: int):
 
 def _process_buffer(data, num_frames, flg, qp, ch, sr, freq, to_stream_t):
     """버퍼에서 (t_stream, rms, vad) 튜플을 계산해 반환."""
+    import numpy as np
     t_stream = to_stream_t(qp) if qp > 0 else to_stream_t(qpc_now())
 
     if flg & AUDCLNT_BUFFERFLAGS_SILENT or not data.value:
@@ -162,7 +163,7 @@ def _run_capture_impl(pid, audio_queue, stop_flag, send_log, stream_anchor):
         total_packets = 0
         to_stream_t   = None   # 첫 패킷에서 확립
 
-        while not stop_flag.value:
+        while not stop_flag.is_set():
             now = time.time()
 
             if now - last_check >= RECHECK:
@@ -184,7 +185,7 @@ def _run_capture_impl(pid, audio_queue, stop_flag, send_log, stream_anchor):
 
             _kernel32.WaitForSingleObject(h_event, WAIT_MS)
 
-            while not stop_flag.value:
+            while not stop_flag.is_set():
                 try:
                     pkt = get_next_packet_size(cap)
                 except OSError as e:
@@ -258,9 +259,9 @@ def _run_global_loopback_session(audio_queue, stop_flag, send_log, stream_anchor
             first_packet = True
             to_stream_t  = None
 
-            while not stop_flag.value:
+            while not stop_flag.is_set():
                 _kernel32.WaitForSingleObject(h_event, 10)
-                while not stop_flag.value:
+                while not stop_flag.is_set():
                     try:
                         pkt = get_next_packet_size(cap)
                     except OSError as e:
@@ -315,7 +316,7 @@ def _run_global_loopback_session(audio_queue, stop_flag, send_log, stream_anchor
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 
-def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict,
+def proc_audio_capture(audio_queue, stop_flag, cfg: dict,
                        log_queue=None, stream_anchor=None):
     """
     stream_anchor: [qp_origin, sr, freq] 공유 리스트 (multiprocessing.Manager().list())
@@ -338,7 +339,7 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict,
     if not _SUPPORT_PROCESS_LOOPBACK:
         send_log(f"⚠ ProcessLoopback 미지원 (빌드 {_WIN_BUILD} < 19041) — 전체 루프백으로 전환")
         _retry = 0
-        while not stop_flag.value:
+        while not stop_flag.is_set():
             try:
                 ok, reason = _run_global_loopback_session(
                     audio_queue, stop_flag, send_log, stream_anchor)
@@ -351,32 +352,18 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict,
             _retry += 1
             send_log(f"🔄 {_retry}회 재시도 대기 중 (5초)...")
             for _ in range(50):
-                if stop_flag.value:
+                if stop_flag.is_set():
                     break
                 time.sleep(0.1)
         return
 
     _retry = 0
-    while not stop_flag.value:
+    while not stop_flag.is_set():
         pid = _find_potplayer_pid()
         if pid is None:
             send_log("⏳ 팟플레이어 실행 대기 중...")
-            # 팟플 없는 동안 numpy 등이 점유한 메모리를 OS에 반환
-            try:
-                import gc as _gc, ctypes as _ct2
-                _gc.collect()
-                _k32 = _ct2.windll.kernel32
-                _n = _k32.GetProcessHeaps(0, None)
-                if _n > 0:
-                    _ha = (_ct2.c_void_p * _n)()
-                    _k32.GetProcessHeaps(_n, _ha)
-                    for _h in _ha:
-                        if _h: _k32.HeapCompact(_h, 0)
-                _k32.SetProcessWorkingSetSize(_k32.GetCurrentProcess(), -1, -1)
-            except Exception:
-                pass
             for _ in range(50):
-                if stop_flag.value:
+                if stop_flag.is_set():
                     return
                 time.sleep(0.1)
             continue
@@ -395,6 +382,6 @@ def proc_audio_capture(audio_queue: Queue, stop_flag: Value, cfg: dict,
         _retry += 1
         send_log(f"🔄 {_retry}회 재시도 대기 중 (5초)...")
         for _ in range(50):
-            if stop_flag.value:
+            if stop_flag.is_set():
                 break
             time.sleep(0.1)

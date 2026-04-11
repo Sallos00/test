@@ -2,15 +2,16 @@
 gui/run.py -- 실행 제어, 프로세스 관리, 갱신, 인증 팝업 메서드
 """
 import os
-import gc
 import time
-import ctypes
 import threading
 import collections
+import ctypes
 import ctypes.wintypes
+import queue as _queue
 import tkinter as tk
 import winreg
-from multiprocessing import Process, Queue, Value, Array, Array
+from multiprocessing import Process
+from multiprocessing import Queue as _MpQueue
 
 import auth as _auth_module
 
@@ -30,28 +31,29 @@ class LipSyncGUIRun:
     # P2(오디오캡처) + P3(싱크분석, lip 없이 오디오만) 를 별도로 구동한다.
 
     def _start_oped_monitor(self):
-        """싱크 미실행 상태 전용 OP/ED 감지 프로세스(P2+P3) 시작."""
+        """싱크 미실행 상태 전용 OP/ED 감지 스레드(T2+T3) 시작."""
         if getattr(self, "_oped_monitor_running", False):
             return
         try:
             runtime_cfg = self._build_cfg()
             qsize = runtime_cfg.get("QUEUE_MAXSIZE", 200)
 
-            self._om_lip_queue   = Queue(maxsize=qsize)
-            self._om_audio_queue = Queue(maxsize=qsize)
-            self._om_log_queue   = Queue(maxsize=200)
-            self._om_state_queue = Queue(maxsize=20)
-            self._om_cmd_queue   = Queue(maxsize=10)
-            self._om_stop_flag   = Value("b", False)
+            self._om_lip_queue   = _MpQueue(maxsize=qsize)   # 미사용이지만 시그니처 호환용
+            self._om_audio_queue = _queue.Queue(maxsize=qsize)
+            self._om_log_queue   = _queue.Queue(maxsize=200)
+            self._om_state_queue = _queue.Queue(maxsize=20)
+            self._om_cmd_queue   = _queue.Queue(maxsize=10)
+            self._om_stop_flag   = threading.Event()
 
-            # shared_pos/dur: GUI 메인스레드가 갱신, P3가 읽음
-            self._om_shared_pos  = Value(ctypes.c_longlong, -1)
-            self._om_shared_dur  = Value(ctypes.c_longlong, -1)
-
-            self._om_stream_anchor = Array(ctypes.c_double, [0, 48000, 1])
+            # shared_pos/dur: GUI 메인스레드가 갱신, T3가 읽음
+            # 스레드 간 공유 → 일반 list + lock (Value 불필요)
+            self._om_pos_lock    = threading.Lock()
+            self._om_shared_pos  = [-1]
+            self._om_shared_dur  = [-1]
+            self._om_stream_anchor = [0.0, 48000.0, 1.0]
 
             from processes import proc_audio_capture, proc_analyzer  # lazy import
-            self._om_processes = []
+            self._om_threads = []
             for target, args in [
                 (proc_audio_capture, (
                     self._om_audio_queue,
@@ -71,9 +73,9 @@ class LipSyncGUIRun:
                     self._om_shared_dur,
                 )),
             ]:
-                p = Process(target=target, args=args, daemon=True)
-                p.start()
-                self._om_processes.append(p)
+                t = threading.Thread(target=target, args=args, daemon=True)
+                t.start()
+                self._om_threads.append(t)
 
             self._oped_monitor_running = True
         except Exception as e:
@@ -84,26 +86,20 @@ class LipSyncGUIRun:
             self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] ⚠ oped 모니터 시작 실패: {e}")
 
     def _stop_oped_monitor(self):
-        """OP/ED 감지 전용 프로세스 중지."""
+        """OP/ED 감지 전용 스레드 중지."""
         if not getattr(self, "_oped_monitor_running", False):
             return
         try:
-            self._om_stop_flag.value = True
-            # analyzer에 stop 커맨드 전송으로 즉시 탈출 유도
+            self._om_stop_flag.set()
             try:
                 self._om_cmd_queue.put_nowait("stop")
             except Exception:
                 pass
-            import threading as _th
-            def _join(p):
-                p.join(timeout=1)
-                if p.is_alive(): p.terminate()
-            ts = [_th.Thread(target=_join, args=(p,), daemon=True) for p in self._om_processes]
-            for t in ts: t.start()
-            for t in ts: t.join()
+            for t in getattr(self, "_om_threads", []):
+                t.join(timeout=2)
         except Exception:
             pass
-        self._om_processes            = []
+        self._om_threads              = []
         self._oped_monitor_running    = False
         self._om_log_seen_count       = 0
 
@@ -311,27 +307,35 @@ class LipSyncGUIRun:
         self._place_popup(popup, pw, ph)
 
     def _start_processes(self):
-        """P1·P2·P3 프로세스 시작."""
+        """P1(프로세스) + T2·T3(스레드) 시작."""
         self._stop_oped_monitor()   # 싱크 시작 시 별도 모니터 중지
         self._running = True
-        self.stop_flag.value = False
+        self.stop_flag.clear()
         runtime_cfg = self._build_cfg()
 
-        # GUI 메인스레드 → P3 공유 재생 위치/길이 (ms), -1 = 미확인
-        self._shared_pos = Value(ctypes.c_longlong, -1)
-        self._shared_dur = Value(ctypes.c_longlong, -1)
+        # GUI 메인스레드 → T3 공유 재생 위치/길이 (ms), -1 = 미확인
+        # 스레드 간 공유 → 일반 list + lock
+        self._pos_lock   = threading.Lock()
+        self._shared_pos = [-1]
+        self._shared_dur = [-1]
 
-        # 오디오 스트림 기준점 — P2가 첫 패킷에서 기록, P1이 읽어서 타임스탬프 통일
-        # [qp_origin, sr, freq] : 0이면 미확립
-        self._stream_anchor = Array(ctypes.c_double, [0, 48000, 1])
+        # 오디오 스트림 기준점 — T2가 첫 패킷에서 기록, P1이 읽어서 타임스탬프 통일
+        self._stream_anchor = [0.0, 48000.0, 1.0]
 
-        # 싱크 ON 상태 전용 로그 큐 (P2 → GUI 직접 전달)
-        self._main_log_queue = Queue(maxsize=200)
+        # 싱크 ON 상태 전용 로그 큐 (T2 → GUI 직접 전달)
+        self._main_log_queue = _queue.Queue(maxsize=200)
 
         from processes import proc_lip_capture, proc_audio_capture, proc_analyzer  # lazy import
+
+        # P1: cv2 집약 작업 → 프로세스 유지
+        p1 = Process(target=proc_lip_capture,
+                     args=(self._lip_queue, self.stop_flag, runtime_cfg, self._stream_anchor),
+                     daemon=True)
+        p1.start()
+        self._processes.append(p1)
+
+        # T2·T3: 스레드로 전환 (numpy/scipy를 메인 프로세스와 공유)
         for target, args in [
-            (proc_lip_capture,   (self._lip_queue,   self.stop_flag, runtime_cfg,
-                                  self._stream_anchor)),
             (proc_audio_capture, (self._audio_queue, self.stop_flag, runtime_cfg,
                                   self._main_log_queue, self._stream_anchor)),
             (proc_analyzer,      (self._lip_queue, self._audio_queue,
@@ -339,34 +343,39 @@ class LipSyncGUIRun:
                                   self.stop_flag, runtime_cfg,
                                   self._shared_pos, self._shared_dur)),
         ]:
-            p = Process(target=target, args=args, daemon=True)
-            p.start()
-            self._processes.append(p)
+            t = threading.Thread(target=target, args=args, daemon=True)
+            t.start()
+            self._processes.append(t)
 
         self._start_btn.config(text="⏹ 정지",
                                bg=self.BG3, fg=self.ACCENT2,
                                activebackground=self.BORDER,
                                state="normal")
-        self._proc_lbl.config(text="P1·P2·P3 실행 중", fg=self.ACCENT3)
+        self._proc_lbl.config(text="P1·T2·T3 실행 중", fg=self.ACCENT3)
         self._toast("🎬 Auto Sync", "싱크 보정이 시작되었습니다.")
 
     def _stop_processes(self):
         self._running = False
-        self.stop_flag.value = True
-        # P3(analyzer)에 stop 커맨드를 직접 전송해 ANALYSIS_INTERVAL 대기 없이 즉시 종료
+        self.stop_flag.set()
         try:
             self.cmd_queue.put_nowait("stop")
         except Exception:
             pass
-        # 병렬 join으로 대기 시간 단축 (timeout 1초로 단축)
+        # P1(프로세스)는 terminate, T2·T3(스레드)는 join
         procs = list(self._processes)
-        ts = [threading.Thread(target=lambda p=p: (p.join(timeout=1), p.terminate() if p.is_alive() else None), daemon=True)
-              for p in procs]
+        def _stop(w):
+            if isinstance(w, Process):
+                w.join(timeout=2)
+                if w.is_alive():
+                    w.terminate()
+            else:
+                w.join(timeout=2)
+        ts = [threading.Thread(target=_stop, args=(w,), daemon=True) for w in procs]
         for t in ts: t.start()
         for t in ts: t.join()
         self._processes.clear()
-        if hasattr(self, "_shared_pos"): self._shared_pos.value = -1
-        if hasattr(self, "_shared_dur"): self._shared_dur.value = -1
+        if hasattr(self, "_shared_pos"): self._shared_pos[0] = -1
+        if hasattr(self, "_shared_dur"): self._shared_dur[0] = -1
 
     def _reset(self):
         if self._running:
@@ -410,47 +419,6 @@ class LipSyncGUIRun:
             self._proc_lbl.config(text="초기화 실패", fg=self.ACCENT2)
 
     # ── 100ms 주기 UI 갱신 ────────────────────────────────────────────────────
-    # ── 메모리 / 캐시 정리 ───────────────────────────────────────────────────
-    def _flush_memory(self):
-        """gc + Windows WorkingSet 트림으로 메모리/캐시를 강제 해제."""
-        gc.collect()
-        try:
-            ctypes.windll.kernel32.SetProcessWorkingSetSize(
-                ctypes.windll.kernel32.GetCurrentProcess(), -1, -1)
-        except Exception:
-            pass
-
-    def _maybe_flush_memory(self, status: str, pot_ok: bool):
-        """
-        상태에 따라 주기적으로 메모리 정리를 수행한다.
-
-        규칙:
-          1. 팟플레이어 미감지  → 1분마다 정리
-          2. 싱크/녹화 모두 OFF → 1분마다 정리
-          3. 싱크 ON + 녹화 OFF → 보정 완료("보정 완료" | "정상") 시 정리
-                                   단, 직전 정리로부터 60초 쿨다운
-        """
-        _now = time.time()
-        _last = getattr(self, "_mem_flush_last", 0.0)
-        _COOLDOWN = 60.0          # 최소 재실행 간격 (초)
-
-        is_syncing   = self._running
-        is_recording = getattr(self, "_recording", False)
-
-        # ── 케이스 1·2: 팟플레이어 없거나 아무 작업도 없을 때 ──────────────
-        if not pot_ok or (not is_syncing and not is_recording):
-            if _now - _last >= _COOLDOWN:
-                self._flush_memory()
-                self._mem_flush_last = _now
-            return
-
-        # ── 케이스 3: 싱크 중 + 녹화 안 함 → 보정 완료 시점에 정리 ────────
-        if is_syncing and not is_recording:
-            correction_done = status in ("보정 완료", "정상")
-            if correction_done and (_now - _last >= _COOLDOWN):
-                self._flush_memory()
-                self._mem_flush_last = _now
-
     def _refresh(self):
         if self._closing:
             return
@@ -466,11 +434,11 @@ class LipSyncGUIRun:
                 pv = pos if pos is not None else -1
                 dv = dur if dur is not None else -1
                 if self._running and hasattr(self, "_shared_pos"):
-                    self._shared_pos.value = pv
-                    self._shared_dur.value = dv
+                    self._shared_pos[0] = pv
+                    self._shared_dur[0] = dv
                 if getattr(self, "_oped_monitor_running", False) and hasattr(self, "_om_shared_pos"):
-                    self._om_shared_pos.value = pv
-                    self._om_shared_dur.value = dv
+                    self._om_shared_pos[0] = pv
+                    self._om_shared_dur[0] = dv
 
         # oped 모니터 상태 진단 (매 30초마다)
         if time.time() - getattr(self, "_diag_t", 0) > 30:
@@ -525,15 +493,10 @@ class LipSyncGUIRun:
                 if om_logs is not None:
                     if not hasattr(self, "_log_lines"):
                         self._log_lines = collections.deque(maxlen=100)
-                    om_last_seen = getattr(self, "_om_log_seen_last", None)
-                    if om_last_seen is None or om_last_seen not in om_logs:
-                        start = 0
-                    else:
-                        start = om_logs.index(om_last_seen) + 1
-                    for line in om_logs[start:]:
+                    seen = getattr(self, "_om_log_seen_count", 0)
+                    for line in om_logs[seen:]:
                         self._log_lines.append(line)
-                    if om_logs:
-                        self._om_log_seen_last = om_logs[-1]
+                    self._om_log_seen_count = len(om_logs)
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0) if pot_ok else 0
@@ -590,44 +553,31 @@ class LipSyncGUIRun:
                 if hasattr(self, "_switch_tab_fn"):
                     self._switch_tab_fn("history")
             self._pot_was_ok = pot_ok
-
-            # ── 변경된 값만 config() 호출 (불필요한 tkinter 렌더링 방지) ──
-            _prev = getattr(self, "_refresh_prev", {})
-
             c = self.ACCENT3 if pot_ok else self.ACCENT2
             t = "연결됨" if pot_ok else "미감지"
-            if _prev.get("pot_c") != c:  self._pot_dot.config(fg=c); _prev["pot_c"] = c
-            if _prev.get("pot_t") != t:  self._pot_lbl.config(text=t, fg=c); _prev["pot_t"] = t
+            self._pot_dot.config(fg=c); self._pot_lbl.config(text=t, fg=c)
 
             _aud_n_disp = aud_n if pot_ok else 0
             c = self.ACCENT3 if _aud_n_disp > 0 else self.TEXT_DIM
             _aud_mode = getattr(self, "_aud_capture_mode", "")
             _aud_suffix = f" ({_aud_mode})" if _aud_mode and _aud_n_disp > 0 else ""
             t = ("캡처 중" if _aud_n_disp > 0 else "대기 중") + _aud_suffix
-            if _prev.get("aud_c") != c:  self._aud_dot.config(fg=c); _prev["aud_c"] = c
-            if _prev.get("aud_t") != t:  self._aud_lbl.config(text=t, fg=c); _prev["aud_t"] = t
+            self._aud_dot.config(fg=c); self._aud_lbl.config(text=t, fg=c)
 
             if self._running and lip_n > 0:
                 sign = "+" if offset > 0 else ""
                 col  = (self.ACCENT2  if abs(offset) >= 80
                         else self.ACCENT3 if abs(offset) < 30
                         else self.ACCENT)
-                off_txt = f"{sign}{offset:.0f} ms"
+                self._offset_lbl.config(text=f"{sign}{offset:.0f} ms", fg=col)
             else:
-                col     = self.ACCENT
-                off_txt = "— ms"
-            if _prev.get("off_txt") != off_txt or _prev.get("off_col") != col:
-                self._offset_lbl.config(text=off_txt, fg=col)
-                _prev["off_txt"] = off_txt; _prev["off_col"] = col
+                self._offset_lbl.config(text="— ms", fg=self.ACCENT)
 
-            bw    = self._bar_ref_width or self._bar_ref.winfo_width()
+            bw    = self._bar_ref.winfo_width()
             ratio = min(abs(offset) / 500, 1.0)
-            bar_w = int(bw * ratio)
             col   = self.ACCENT2 if abs(offset) >= 80 else self.ACCENT3
-            if _prev.get("bar_w") != bar_w or _prev.get("bar_col") != col:
-                self._bar.place(x=0, y=0, width=bar_w, height=4)
-                self._bar.config(bg=col)
-                _prev["bar_w"] = bar_w; _prev["bar_col"] = col
+            self._bar.place(x=0, y=0, width=int(bw * ratio), height=4)
+            self._bar.config(bg=col)
 
             badge_map = {
                 "정상":              (self.ACCENT3, self.BG3),
@@ -637,57 +587,24 @@ class LipSyncGUIRun:
                 "대기 중":           (self.TEXT,    self.BG3),
             }
             fg, bg = badge_map.get(status, (self.TEXT, self.BG3))
-            badge_txt = f"  {status}  "
-            if _prev.get("badge_txt") != badge_txt or _prev.get("badge_fg") != fg:
-                self._badge.config(text=badge_txt, fg=fg, bg=bg)
-                _prev["badge_txt"] = badge_txt; _prev["badge_fg"] = fg
+            self._badge.config(text=f"  {status}  ", fg=fg, bg=bg)
 
             sign = "+" if corr >= 0 else ""
-            corr_txt = f"{sign}{corr} ms"
-            if _prev.get("corr_txt") != corr_txt:
-                self._corr_lbl.config(text=corr_txt); _prev["corr_txt"] = corr_txt
-
-            lip_txt = str(lip_n)
-            if _prev.get("lip_txt") != lip_txt:
-                self._lip_cnt.config(text=lip_txt); _prev["lip_txt"] = lip_txt
-
-            aud_cnt_txt = str(aud_n)
-            if _prev.get("aud_cnt_txt") != aud_cnt_txt:
-                self._aud_cnt.config(text=aud_cnt_txt); _prev["aud_cnt_txt"] = aud_cnt_txt
-
+            self._corr_lbl.config(text=f"{sign}{corr} ms")
+            self._lip_cnt.config(text=str(lip_n))
+            self._aud_cnt.config(text=str(aud_n))
             pc = self.ACCENT3 if self._running else self.TEXT_DIM
-            if _prev.get("proc_dot_c") != pc:
-                self._proc_dot.config(fg=pc); _prev["proc_dot_c"] = pc
-
-            self._refresh_prev = _prev
-
-            # 마지막으로 본 줄 이후 새 항목만 추가
-            # logs는 maxlen=100 deque의 스냅샷이므로
-            # _log_seen_last에 마지막으로 처리한 줄을 기억해 중복 추가 방지
+            self._proc_dot.config(fg=pc)
+            # 마지막으로 본 줄 이후 새 항목만 추가 (set 비교 제거)
             if not hasattr(self, "_log_lines"):
-                self._log_lines = collections.deque(maxlen=200)
+                self._log_lines = collections.deque(maxlen=100)
             if logs:
-                last_seen = getattr(self, "_log_seen_last", None)
-                if last_seen is None or last_seen not in logs:
-                    # 첫 수신이거나 이전 마지막 줄이 밀려난 경우 → 전체 추가
-                    start = 0
-                else:
-                    start = logs.index(last_seen) + 1
-                for line in logs[start:]:
+                seen = getattr(self, "_log_seen_count", 0)
+                for line in logs[seen:]:
                     self._log_lines.append(line)
-                if logs:
-                    self._log_seen_last = logs[-1]
+                self._log_seen_count = len(logs)
 
-            # ── 조건부 메모리 / 캐시 정리 ────────────────────────────────
-            self._maybe_flush_memory(status, pot_ok)
-
-        else:
-            # state_queue에 아무 데이터도 없는 경우 (팟플레이어 미감지 상태 등)
-            self._maybe_flush_memory("대기 중", False)
-
-        # 데이터가 없는 유휴 상태엔 1초마다만 갱신 → Tcl 내부 할당 대폭 감소
-        _had_data = (latest is not None) or getattr(self, "_oped_monitor_running", False)
-        self.root.after(100 if _had_data else 1000, self._refresh)
+        self.root.after(100, self._refresh)
 
     # ── 인증 ──────────────────────────────────────────────────────────────────
     def _destroy_app_root(self):
@@ -897,10 +814,8 @@ class LipSyncGUIRun:
         self._destroy_app_root()
 
         def _shutdown_bg():
-            # _stop_processes와 _stop_oped_monitor를 병렬 실행해 대기 시간 절반으로 단축
-            import threading as _th
-            t1 = _th.Thread(target=self._stop_processes,   daemon=True)
-            t2 = _th.Thread(target=self._stop_oped_monitor, daemon=True)
+            t1 = threading.Thread(target=self._stop_processes,    daemon=True)
+            t2 = threading.Thread(target=self._stop_oped_monitor, daemon=True)
             t1.start(); t2.start()
             t1.join();  t2.join()
             if tray_ref:

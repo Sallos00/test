@@ -315,11 +315,9 @@ class LipSyncGUIRun:
         self.stop_flag.clear()
         runtime_cfg = self._build_cfg()
 
-        # ── 버그1 수정: 로그 카운터 리셋 ────────────────────────────────────
-        # T3는 재시작마다 새 log_lines deque(인덱스 0부터)를 사용하는데
-        # _log_seen_count가 이전 값으로 남아있으면 모든 새 로그를 건너뜀.
-        self._log_seen_count      = 0
-        self._log_push_count_last = -1
+        # 재시작마다 로그 seen 카운터 리셋
+        # (T3는 새 log_lines deque를 인덱스 0부터 시작하므로 seen도 0으로 맞춤)
+        self._log_seen_count = 0
 
         # GUI 메인스레드 → T3 공유 재생 위치/길이 (ms), -1 = 미확인
         # 스레드 간 공유 → 일반 list + lock
@@ -446,8 +444,7 @@ class LipSyncGUIRun:
                     self.state_queue.get_nowait()
             except Exception:
                 pass
-            self._log_seen_count      = 0
-            self._log_push_count_last = -1
+            self._log_seen_count = 0
             return
         # 싱크 OFF: oped 모니터에 oped_reset 전송 + 팟플레이어 직접 초기화
         if getattr(self, "_oped_monitor_running", False):
@@ -650,26 +647,14 @@ class LipSyncGUIRun:
             self._aud_cnt.config(text=str(aud_n))
             pc = self.ACCENT3 if self._running else self.TEXT_DIM
             self._proc_dot.config(fg=pc)
-            # push_count 기반으로 새 로그 감지 → deque maxlen=100 도달 후
-            # 앞이 밀려나도 len이 동일해 건너뛰던 버그 수정.
+            # 마지막으로 본 줄 이후 새 항목만 추가
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)
             if logs:
-                new_push = latest.get("push_count", 0)
-                if new_push != getattr(self, "_log_push_count_last", -1):
-                    seen = getattr(self, "_log_seen_count", 0)
-                    # deque maxlen=100 도달 후 앞이 밀려나면 seen > len(logs) 가능.
-                    # 또한 push_count가 변경됐는데 seen == len(logs)이면
-                    # 새 항목이 밀어낸 것이므로 전체를 다시 덮어써야 한다.
-                    if seen >= len(logs):
-                        # 로그가 순환(wrap)됐으므로 전체를 새로 추가
-                        for line in logs:
-                            self._log_lines.append(line)
-                    else:
-                        for line in logs[seen:]:
-                            self._log_lines.append(line)
-                    self._log_seen_count      = len(logs)
-                    self._log_push_count_last = new_push
+                seen = getattr(self, "_log_seen_count", 0)
+                for line in logs[seen:]:
+                    self._log_lines.append(line)
+                self._log_seen_count = len(logs)
 
         self.root.after(100, self._refresh)
     def _destroy_app_root(self):

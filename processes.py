@@ -622,7 +622,10 @@ def proc_analyzer(lip_queue, audio_queue,
             offset_buf.clear()
             add_log(f"⏳ 보정 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운")
             status = STATUS_CORRECTED
-            # 보정 완료 시 lip_queue 비우기 → mp.Queue 파이프 버퍼 해제
+            # 보정 완료 시 샘플 버퍼 + lip_queue 전부 비우기
+            # → 분석에 쓴 numpy 배열 참조 해제 + mp.Queue 파이프 버퍼 반환
+            lpb.clear()
+            aub.clear()
             while True:
                 try: lip_queue.get_nowait()
                 except: break
@@ -631,7 +634,9 @@ def proc_analyzer(lip_queue, audio_queue,
         else:
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
-            # 싱크 정상 시 lip_queue 비우기 → mp.Queue 파이프 버퍼 해제
+            # 싱크 정상 시 샘플 버퍼 + lip_queue 전부 비우기
+            lpb.clear()
+            aub.clear()
             while True:
                 try: lip_queue.get_nowait()
                 except: break

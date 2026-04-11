@@ -60,34 +60,50 @@ class LipSyncGUILogic2:
             txt = self._log_popup_txt
             if txt is None: return
             lines = list(self._log_lines) if hasattr(self, "_log_lines") else []
+            at_bottom = not getattr(self, "_log_user_scrolled", False)
 
-            # 이전에 렌더링한 줄 수를 기억해 새 줄만 append
+            # 마지막으로 렌더링한 줄을 기억해 동기화 여부 판단.
+            # _log_lines는 maxlen=100 deque라 101번째 줄이 오면 앞이 밀려남.
+            # 줄 수(prev_count)만 비교하면 wrap 후 len이 동일해 새 줄을 놓침.
+            # 마지막 줄 내용까지 함께 비교해 wrap 여부를 확실히 감지한다.
+            prev_last = getattr(self, "_log_popup_last_line", None)
             prev_count = getattr(self, "_log_popup_rendered", 0)
 
-            # 로그가 비었거나 줄 수가 줄어든 경우(clear) → 전체 재렌더링
-            if not lines or len(lines) < prev_count:
-                at_bottom = not getattr(self, "_log_user_scrolled", False)
+            cur_last = lines[-1] if lines else None
+            wrap_occurred = (prev_count >= len(lines) and cur_last != prev_last)
+
+            if not lines:
+                # 로그 없음 → 전체 초기화
                 txt.config(state="normal")
                 txt.delete("1.0", "end")
-                if not lines:
-                    txt.insert("end", "— 로그 없음 —", "dim")
-                else:
-                    for i, line in enumerate(lines):
-                        if i > 0: txt.insert("end", "\n")
-                        txt.insert("end", line, self._log_tag(line))
+                txt.insert("end", "— 로그 없음 —", "dim")
+                self._log_popup_rendered = 0
+                self._log_popup_last_line = None
+                return
+
+            if wrap_occurred or prev_count == 0:
+                # deque가 wrap됐거나 첫 렌더링 → Text 위젯 전체 재동기화.
+                # Text 위젯 줄 수를 _log_lines(최대 100줄)와 동일하게 유지해
+                # 무제한 누적으로 인한 메모리 증가를 방지한다.
+                txt.config(state="normal")
+                txt.delete("1.0", "end")
+                for i, line in enumerate(lines):
+                    if i > 0: txt.insert("end", "\n")
+                    txt.insert("end", line, self._log_tag(line))
                 self._log_popup_rendered = len(lines)
+                self._log_popup_last_line = cur_last
                 if at_bottom: txt.see("end")
                 return
 
-            # 새로 추가된 줄만 이어 붙이기
+            # 새로 추가된 줄만 이어 붙이기 (증분 append)
             new_lines = lines[prev_count:]
             if not new_lines:
                 return
-            at_bottom = not getattr(self, "_log_user_scrolled", False)
             txt.config(state="normal")
             for line in new_lines:
                 txt.insert("end", "\n" + line, self._log_tag(line))
             self._log_popup_rendered = len(lines)
+            self._log_popup_last_line = cur_last
             if at_bottom:
                 txt.see("end")
         except Exception:
@@ -107,6 +123,7 @@ class LipSyncGUILogic2:
     def _clear_log(self):
         if hasattr(self, "_log_lines"): self._log_lines.clear()
         self._log_popup_rendered = 0
+        self._log_popup_last_line = None
         self._update_log_popup()
 
     def _open_settings(self):

@@ -42,6 +42,10 @@ class LipSyncGUILogic2:
         for tag, fg in [("ok", self.ACCENT3), ("info", self.ACCENT), ("warn", "#e0a03c"), ("err", self.ACCENT2), ("skip", "#b58cff"), ("detect", "#4ec9f0"), ("sync", "#ffd166"), ("dim", self.TEXT_DIM)]:
             txt.tag_config(tag, foreground=fg)
         self._log_popup_txt = txt
+        # ── [버그3 수정] 팝업 열 때 렌더 카운터·last_line 초기화 ──────────────
+        # 이전 팝업이 닫힌 후 카운터가 남아있으면 재오픈 시 신규 줄을 표시 안 함
+        self._log_popup_rendered  = 0
+        self._log_popup_last_line = None
         def _close():
             self._log_user_scrolled = False; self._log_popup_txt = None; _cf[0] = None
             try: popup.destroy()

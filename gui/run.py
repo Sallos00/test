@@ -97,8 +97,11 @@ class LipSyncGUIRun:
                 self._om_cmd_queue.put_nowait("stop")
             except Exception:
                 pass
+            # ── [버그2&3 수정] join timeout을 BUF_SEC(3.0)+여유(2)=5초로 늘림 ──
+            # 기존 timeout=2는 proc_analyzer 초기 BUF_SEC=3.0초 대기보다 짧아
+            # 좀비 스레드가 남아 stop_flag.clear() 후 재진입하는 문제 수정
             for t in getattr(self, "_om_threads", []):
-                t.join(timeout=2)
+                t.join(timeout=5)
         except Exception:
             pass
         # ── [버그2 수정] 큐/flag를 명시적으로 None 처리해 재사용 방지 ─────────
@@ -320,6 +323,12 @@ class LipSyncGUIRun:
         self.stop_flag.clear()
         runtime_cfg = self._build_cfg()
 
+        # ── [버그2&3 수정] 세대 ID 증가 ──────────────────────────────────────
+        # 좀비 스레드가 stop_flag.clear() 후 재진입해도 세대가 달라
+        # state_queue에 올린 아이템을 _refresh()에서 무시하게 함
+        self._run_generation = getattr(self, "_run_generation", 0) + 1
+        runtime_cfg["_generation"] = self._run_generation
+
         # 재시작마다 로그 seen 카운터 리셋
         # (T3는 새 log_lines deque를 인덱스 0부터 시작하므로 seen도 0으로 맞춤)
         self._log_seen_count = 0
@@ -400,11 +409,14 @@ class LipSyncGUIRun:
         procs = list(self._processes)
         def _stop(w):
             if isinstance(w, Process):
-                w.join(timeout=2)
+                # ── [버그2&3 수정] timeout을 BUF_SEC(3.0)+여유=5초로 늘림 ──
+                # 기존 timeout=2는 proc_analyzer 초기 BUF_SEC 대기보다 짧아
+                # 좀비 스레드가 남는 문제의 근본 원인
+                w.join(timeout=5)
                 if w.is_alive():
                     w.terminate()
             else:
-                w.join(timeout=2)
+                w.join(timeout=5)
         ts = [threading.Thread(target=_stop, args=(w,), daemon=True) for w in procs]
         for t in ts: t.start()
         for t in ts: t.join()
@@ -525,6 +537,24 @@ class LipSyncGUIRun:
                     self._om_shared_pos[0] = pv
                     self._om_shared_dur[0] = dv
 
+            # ── [버그1 수정] _refresh에서 팟플레이어 꺼짐 즉시 감지 ──────────
+            # proc_analyzer의 INTERVAL 주기를 기다리지 않고 hwnd 캐시로 바로 감지.
+            # state_queue latest가 없어도 탭 전환과 UI 표시가 즉시 반영됨.
+            _pot_now = bool(hwnd)
+            if self._pot_was_ok is not None and not _pot_now and self._pot_was_ok:
+                # 팟플레이어 방금 꺼짐 → 시청 기록 탭 전환
+                if hasattr(self, "_switch_tab_fn"):
+                    self._switch_tab_fn("history")
+                # 싱크 실행 중이면 연결 상태 UI도 즉시 갱신
+                if self._running:
+                    self._pot_dot.config(fg=self.ACCENT2)
+                    self._pot_lbl.config(text="미감지", fg=self.ACCENT2)
+            # 첫 poll 또는 상태 변화 시 기준점 갱신
+            if self._pot_was_ok is None:
+                self._pot_was_ok = _pot_now
+            elif _pot_now != self._pot_was_ok:
+                self._pot_was_ok = _pot_now
+
         # oped 모니터 상태 진단 (매 30초마다)
         if time.time() - getattr(self, "_diag_t", 0) > 30:
             self._diag_t = time.time()
@@ -586,7 +616,8 @@ class LipSyncGUIRun:
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0) if pot_ok else 0
                 # 팟플레이어 종료 감지 → 시청 기록 탭으로 전환
-                if not pot_ok and getattr(self, "_pot_was_ok", False):
+                # _pot_was_ok=None: 첫 poll이므로 탭 전환 건너뜀 (오탐 방지)
+                if self._pot_was_ok is not None and not pot_ok and self._pot_was_ok:
                     if hasattr(self, "_switch_tab_fn"):
                         self._switch_tab_fn("history")
                 self._pot_was_ok = pot_ok
@@ -604,9 +635,17 @@ class LipSyncGUIRun:
         latest       = None
         main_toasts  = []
         main_prompts = []
+        _cur_gen     = getattr(self, "_run_generation", 0)
         while True:
             try:
                 item = self.state_queue.get_nowait()
+                # ── [버그2&3 수정] 세대 ID 불일치 아이템 무시 ──────────────
+                # 좀비 스레드가 stop_flag.clear() 후 재진입해 보낸 이전 세대
+                # 아이템이 log_seen_count 오염 및 oped_prompt drop 유발
+                if isinstance(item, dict):
+                    item_gen = item.get("_generation", _cur_gen)
+                    if item_gen != _cur_gen:
+                        continue
                 latest = item
                 n = item.get("notify")
                 if n:
@@ -634,7 +673,8 @@ class LipSyncGUIRun:
             logs   = latest.get("log_lines", [])
 
             # 팟플레이어 종료 감지 → 시청 기록 탭으로 전환
-            if not pot_ok and getattr(self, "_pot_was_ok", False):
+            # _pot_was_ok=None: 첫 poll이므로 탭 전환 건너뜀 (오탐 방지)
+            if self._pot_was_ok is not None and not pot_ok and self._pot_was_ok:
                 if hasattr(self, "_switch_tab_fn"):
                     self._switch_tab_fn("history")
             self._pot_was_ok = pot_ok
@@ -685,6 +725,12 @@ class LipSyncGUIRun:
                 self._log_lines = collections.deque(maxlen=100)
             if logs:
                 seen = getattr(self, "_log_seen_count", 0)
+                # ── [버그3 수정] seen이 logs 길이보다 크면 새 스레드 시작으로 판단 ──
+                # 좀비 스레드가 큰 seen 값을 심어둔 후 새 T3가 짧은 log_lines를
+                # 보내면 logs[seen:]이 빈 배열이 되어 로그가 표시 안 되는 문제 수정
+                if seen > len(logs):
+                    seen = 0
+                    self._log_seen_count = 0
                 for line in logs[seen:]:
                     self._log_lines.append(line)
                 self._log_seen_count = len(logs)

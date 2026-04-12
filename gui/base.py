@@ -59,6 +59,11 @@ class LipSyncGUIBase:
         self._processes    = []
         self._tray         = None
         self._tray_thread  = None
+        # ── [버그1 수정] _pot_was_ok 명시 초기화 ────────────────────────────
+        # getattr(self, "_pot_was_ok", False) 에 의존하면 첫 _refresh에서 항상
+        # False→False가 되어 팟플레이어 종료 감지(탭 전환)가 동작하지 않음.
+        # None으로 초기화해 첫 poll 시에는 탭 전환을 건너뛰고 기준점만 설정.
+        self._pot_was_ok   = None
         self._startup_var   = tk.BooleanVar(value=self._is_startup_registered())
         self._autostart_var = tk.BooleanVar(value=self._load_setting("autostart",  False))
         self._darkmode_var  = tk.BooleanVar(value=self._load_setting("darkmode",   True))

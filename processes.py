@@ -394,6 +394,25 @@ def proc_analyzer(lip_queue, audio_queue,
         gc.collect()
         add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
 
+    def _idle_gc_if_due(label: str):
+        """팟플레이어 감지됐으나 싱크·녹화 작업이 없는 대기 상태에서
+        60초마다 버퍼·큐·GC를 정리한다. _last_idle_gc_t를 갱신해 중복 실행을 방지."""
+        nonlocal _last_idle_gc_t
+        _now = time.perf_counter()
+        if _now - _last_idle_gc_t < _IDLE_GC_INTERVAL:
+            return
+        import gc
+        offset_buf.clear()
+        lpb.clear()
+        aub.clear()
+        for q in (lip_queue, audio_queue):
+            while True:
+                try: q.get_nowait()
+                except: break
+        gc.collect()
+        _last_idle_gc_t = _now
+        add_log(f"🧹 [대기 중 - {label}] 주기적 메모리 정리 완료")
+
     # BUF_SEC 동안 대기하되 stop_flag가 세워지면 즉시 탈출
     _buf_end = time.perf_counter() + BUF_SEC
     while not stop_flag.is_set() and time.perf_counter() < _buf_end:
@@ -403,6 +422,12 @@ def proc_analyzer(lip_queue, audio_queue,
 
     # ── [버그4 수정] 쿨다운 중 상태를 추적해 루프를 올바르게 제어 ─────────
     in_cooldown = False   # 보정/정상 판정 후 쿨다운 진행 중 플래그
+
+    # ── 대기 중 주기적 메모리 정리 타이머 ────────────────────────────────────
+    # 팟플레이어 미감지 / 감지했으나 싱크·녹화 작업 없는 상태에서
+    # 60초마다 버퍼·큐·GC를 정리해 메모리가 maxlen 한도만큼 잔류하지 않도록 함.
+    _IDLE_GC_INTERVAL = 60.0
+    _last_idle_gc_t   = time.perf_counter()
 
     while not stop_flag.is_set():
         t0 = time.perf_counter()
@@ -460,6 +485,19 @@ def proc_analyzer(lip_queue, audio_queue,
                 lpb.clear()
                 aub.clear()
                 import gc; gc.collect()
+                _last_idle_gc_t = time.perf_counter()
+            else:
+                # 버퍼가 이미 비어 있어도 60초마다 큐 드레인 + GC 실행
+                _now = time.perf_counter()
+                if _now - _last_idle_gc_t >= _IDLE_GC_INTERVAL:
+                    import gc
+                    for q in (lip_queue, audio_queue):
+                        while True:
+                            try: q.get_nowait()
+                            except: break
+                    gc.collect()
+                    _last_idle_gc_t = _now
+                    add_log("🧹 [대기 중 - 팟플레이어 미감지] 주기적 메모리 정리 완료")
             if in_cooldown:
                 in_cooldown = False
             push_state(STATUS_NO_POT, 0, total_correction_ms, log_lines, pot_ok,
@@ -555,6 +593,7 @@ def proc_analyzer(lip_queue, audio_queue,
         # ── [버그4 수정] 쿨다운 중에는 drain만 하고 분석 건너뜀 ──────────────
         cooldown_remain = SYNC_COOLDOWN_SEC - (time.time() - last_correction_t)
         if in_cooldown and cooldown_remain > 0:
+            _idle_gc_if_due("쿨다운 중")
             push_state(STATUS_COOLDOWN, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, None, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
@@ -565,6 +604,7 @@ def proc_analyzer(lip_queue, audio_queue,
             add_log("🔄 쿨다운 종료 → 버퍼 수집 재개")
 
         if aud_n < 10 or (lip_n < 10 and not has_prompt):
+            _idle_gc_if_due("데이터 수집 대기")
             push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
@@ -583,6 +623,7 @@ def proc_analyzer(lip_queue, audio_queue,
         pre_aud_std = float(aud_sig.std())
         if pre_lip_std < 0.001 or pre_aud_std < 1e-4:
             add_log(f"⚠ 신호 불충분 (lip_std={pre_lip_std:.4f} aud_std={pre_aud_std:.6f}) → 생략")
+            _idle_gc_if_due("신호 불충분")
             push_state(STATUS_NO_SIGNAL, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
@@ -601,6 +642,7 @@ def proc_analyzer(lip_queue, audio_queue,
 
         if lip_std < 0.05 or aud_std < 1e-4:
             add_log(f"⚠ 신호 불충분 (lip_std={lip_std:.3f} aud_std={aud_std:.6f}) → 건너뜀")
+            _idle_gc_if_due("신호 불충분")
             push_state(STATUS_NO_SIGNAL, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
@@ -608,6 +650,7 @@ def proc_analyzer(lip_queue, audio_queue,
 
         if confidence < CONFIDENCE_THRESH:
             add_log(f"⚠ 상관 신뢰도 낮음 (conf={confidence:.3f}) → 건너뜀")
+            _idle_gc_if_due("신뢰도 부족")
             push_state(STATUS_LOW_CONF, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

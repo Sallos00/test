@@ -376,12 +376,29 @@ def proc_analyzer(lip_queue, audio_queue,
         oped_prompted = {"오프닝": False,  "엔딩": False}
         pending_prompt[0] = None
 
+    def _flush_and_gc(label: str):
+        """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC (문제 2·3 수정)."""
+        import gc
+        offset_buf.clear()
+        lpb.clear()
+        aub.clear()
+        # lip_queue / audio_queue 잔류분 드레인
+        for q in (lip_queue, audio_queue):
+            while True:
+                try: q.get_nowait()
+                except: break
+        gc.collect()
+        add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
+
     # BUF_SEC 동안 대기하되 stop_flag가 세워지면 즉시 탈출
     _buf_end = time.perf_counter() + BUF_SEC
     while not stop_flag.is_set() and time.perf_counter() < _buf_end:
         time.sleep(0.05)
     if stop_flag.is_set():
         return
+
+    # ── [버그4 수정] 쿨다운 중 상태를 추적해 루프를 올바르게 제어 ─────────
+    in_cooldown = False   # 보정/정상 판정 후 쿨다운 진행 중 플래그
 
     while not stop_flag.is_set():
         t0 = time.perf_counter()
@@ -397,7 +414,10 @@ def proc_analyzer(lip_queue, audio_queue,
                     post_key_to_potplayer(hwnd, VK_OEM_2, shift=True)
                     time.sleep(0.05)
                     post_key_to_potplayer(hwnd, 0x6F, shift=True)
+                    # [버그5 수정] reset 시 flush_and_gc로 메모리/버퍼 완전 정리
+                    _flush_and_gc("수동 초기화")
                     reset_sync()
+                    in_cooldown = False
                     add_log("↺ 싱크 초기화")
                 else:
                     add_log("⚠ 팟플레이어 미감지")
@@ -430,11 +450,18 @@ def proc_analyzer(lip_queue, audio_queue,
         lip_n  = len(lpb)
         aud_n  = len(aub)
 
-        # 팟플 없으면 버퍼 즉시 비우기 + 주기적 GC (문제 2 수정)
-        if not pot_ok and (lpb or aub):
-            lpb.clear()
-            aub.clear()
-            import gc; gc.collect()
+        # ── [버그1 수정] 팟플레이어가 없으면 버퍼 정리 후 대기 상태로 early-continue ──
+        if not pot_ok:
+            if lpb or aub:
+                lpb.clear()
+                aub.clear()
+                import gc; gc.collect()
+            if in_cooldown:
+                in_cooldown = False
+            push_state(STATUS_NO_POT, 0, total_correction_ms, log_lines, pot_ok,
+                       0, 0)
+            time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
+            continue
 
         if hwnd:
             try:
@@ -449,6 +476,7 @@ def proc_analyzer(lip_queue, audio_queue,
                     aub.clear()
                     reset_sync()
                     reset_oped()
+                    in_cooldown = False
                     video_fps = get_video_fps(hwnd)
                     add_log(f"🔄 영상 변경 → 전체 초기화 (fps={video_fps})")
                 prev_title = cur_title
@@ -520,6 +548,18 @@ def proc_analyzer(lip_queue, audio_queue,
 
         has_prompt = oped_prompt is not None or pending_prompt[0] is not None
 
+        # ── [버그4 수정] 쿨다운 중에는 drain만 하고 분석 건너뜀 ──────────────
+        cooldown_remain = SYNC_COOLDOWN_SEC - (time.time() - last_correction_t)
+        if in_cooldown and cooldown_remain > 0:
+            push_state(STATUS_COOLDOWN, smoothed_offset, total_correction_ms, log_lines, pot_ok,
+                       lip_n, aud_n, None, oped_prompt)
+            time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
+            continue
+        elif in_cooldown and cooldown_remain <= 0:
+            # 쿨다운 종료 → 다음 사이클부터 정상 수집 재개
+            in_cooldown = False
+            add_log("🔄 쿨다운 종료 → 버퍼 수집 재개")
+
         if aud_n < 10 or (lip_n < 10 and not has_prompt):
             push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
@@ -586,30 +626,7 @@ def proc_analyzer(lip_queue, audio_queue,
             smoothed_offset = EMA_ALPHA * buf_avg + (1.0 - EMA_ALPHA) * smoothed_offset
         add_log(f"📈 buf_avg={buf_avg:.1f}ms smoothed={smoothed_offset:.1f}ms")
 
-        # ── 보정 쿨다운 체크 (버퍼 평균·EMA 계산 이후에 위치) ─────────────────
-        cooldown_remain = SYNC_COOLDOWN_SEC - (time.time() - last_correction_t)
-        if cooldown_remain > 0:
-            add_log(f"⏳ 쿨다운 {cooldown_remain:.1f}초")
-            push_state(STATUS_COOLDOWN, smoothed_offset, total_correction_ms, log_lines, pot_ok,
-                       lip_n, aud_n, notify, oped_prompt)
-            time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
-            continue
-
         # ── 보정 실행 / 정상 판정 ────────────────────────────────────────────
-        def _flush_and_gc(label: str):
-            """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC (문제 2·3 수정)."""
-            import gc
-            offset_buf.clear()
-            lpb.clear()
-            aub.clear()
-            # lip_queue / audio_queue 잔류분 드레인
-            for q in (lip_queue, audio_queue):
-                while True:
-                    try: q.get_nowait()
-                    except: break
-            gc.collect()
-            add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
-
         if abs(smoothed_offset) >= THRESH and hwnd:
             steps = min(int(abs(smoothed_offset) / STEP), MAX_STEPS)
             sign  = 1 if smoothed_offset > 0 else -1
@@ -634,8 +651,9 @@ def proc_analyzer(lip_queue, audio_queue,
             total_correction_ms += steps * STEP * sign
             last_correction_t    = time.time()
             status = STATUS_CORRECTED
-            # ── 문제 2·3: 보정 후 즉시 버퍼·큐 정리 + 로그 출력 ──────────────
-            _flush_and_gc("싱크 빠르게/느리게 보정")
+            # ── 버그4 수정: 보정 후 즉시 버퍼·큐 정리 + 쿨다운 플래그 세팅 ───
+            _flush_and_gc("싱크 보정 완료")
+            in_cooldown = True
 
         elif not hwnd:
             status = STATUS_NO_POT
@@ -643,8 +661,9 @@ def proc_analyzer(lip_queue, audio_queue,
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
             last_correction_t = time.time()   # 정상 판정도 쿨다운 기산점 갱신
-            # ── 문제 2·3: 정상 판정 후 즉시 버퍼·큐 정리 + 로그 출력 ──────────
-            _flush_and_gc("싱크 정상")
+            # ── 버그4 수정: 정상 판정 후 즉시 버퍼·큐 정리 + 쿨다운 플래그 세팅 ─
+            _flush_and_gc("싱크 정상 확인")
+            in_cooldown = True
 
         push_state(status, smoothed_offset, total_correction_ms, log_lines, pot_ok,
                    lip_n, aud_n, notify, oped_prompt)

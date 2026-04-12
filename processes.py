@@ -212,7 +212,14 @@ def proc_analyzer(lip_queue, audio_queue,
     oped_prompted = {"오프닝": False,  "엔딩": False}
     last_cd_log   = 0.0   # 쿨다운 로그 스로틀
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
-    pending_prompt = [None]
+    pending_prompt  = [None]
+    # ── 버그2 수정: zone 정보 별도 보존 ─────────────────────────────────────
+    # push_state()가 pending_prompt[0]을 즉시 None으로 초기화하기 때문에
+    # "oped_skip" / "oped_no_skip" cmd 처리 시점에 pending_prompt[0]는 항상 None.
+    # → zone 기본값 "오프닝"으로 고정되어, 실제 zone이 "엔딩"이면 쿨다운이
+    #   잘못된 zone에 걸리고 oped_prompted["엔딩"]이 True인 채로 남아 재감지 불가.
+    # _last_oped_zone에 zone을 별도 저장하고, cmd 핸들러가 직접 초기화한다.
+    _last_oped_zone = [None]
 
     add_log = make_add_log(log_lines)
 
@@ -348,6 +355,7 @@ def proc_analyzer(lip_queue, audio_queue,
             _last_log_snapshot[0] = snap
         if oped_prompt is not None:
             pending_prompt[0] = oped_prompt
+            _last_oped_zone[0] = oped_prompt.get("zone")  # 버그2 수정: zone 별도 보존
         prompt_to_send    = pending_prompt[0]
         pending_prompt[0] = None
         queue_put(state_queue, dict(
@@ -392,7 +400,8 @@ def proc_analyzer(lip_queue, audio_queue,
         oped_confirm  = {"오프닝": 0,     "엔딩": 0}
         oped_last_t   = {"오프닝": 0.0,   "엔딩": 0.0}
         oped_prompted = {"오프닝": False,  "엔딩": False}
-        pending_prompt[0] = None
+        pending_prompt[0]  = None
+        _last_oped_zone[0] = None  # 버그2 수정: zone 버퍼도 함께 초기화
 
     # BUF_SEC 동안 대기하되 stop_flag가 세워지면 즉시 탈출
     _buf_end = time.perf_counter() + BUF_SEC
@@ -421,14 +430,19 @@ def proc_analyzer(lip_queue, audio_queue,
                     add_log("⚠ 팟플레이어 미감지")
             elif cmd == "oped_skip":
                 execute_skip()
-                zone = pending_prompt[0].get("zone", "오프닝") if pending_prompt[0] else "오프닝"
+                # 버그2 수정: pending_prompt[0]은 push_state()에서 이미 None으로 초기화됨.
+                # _last_oped_zone에 저장해 둔 zone을 사용한다.
+                zone = _last_oped_zone[0] or "오프닝"
+                _last_oped_zone[0] = None
                 oped_confirm[zone]  = 0
                 oped_last_t[zone]   = time.time()
                 oped_prompted[zone] = False
                 pending_prompt[0]   = None
                 add_log(f"⏭ {zone} 스킵 완료 → 쿨다운 {OPED_COOLDOWN_SEC}초")
             elif cmd == "oped_no_skip":
-                zone = pending_prompt[0].get("zone", "오프닝") if pending_prompt[0] else "오프닝"
+                # 버그2 수정: 동일한 이유로 _last_oped_zone 사용
+                zone = _last_oped_zone[0] or "오프닝"
+                _last_oped_zone[0] = None
                 oped_confirm[zone]  = 0
                 oped_last_t[zone]   = time.time()
                 oped_prompted[zone] = False
@@ -615,7 +629,16 @@ def proc_analyzer(lip_queue, audio_queue,
 
         # ── 보정 실행 / 정상 판정 ────────────────────────────────────────────
         def _flush_and_gc(label: str):
-            """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC (문제 2·3 수정)."""
+            """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC.
+            버그3 수정: 계단식 PrivateWS 상승 억제.
+              - mmp 분석 결과 PrivateBytes는 고정이나 PrivateWS가 145→491→626MB로 계단 상승.
+              - 원인: numpy C heap arena(32MB 단위)가 첫 접근 시 페이지 폴트로 Working Set에
+                편입되고, SetProcessWorkingSetSize로 내쫓아도 다음 접근 시 다시 편입 반복.
+              - 해결: ① gc.collect()로 Python 객체 회수
+                      ② CRT _heapmin()으로 C heap 유휴 블록을 OS에 반환(PrivateBytes 감소)
+                      ③ EmptyWorkingSet()으로 Working Set 전체 플러시(PrivateWS 즉시 0)
+                         → 다음 실제 접근까지 물리 메모리 비점유 유지
+            """
             import gc
             offset_buf.clear()
             lpb.clear()
@@ -626,14 +649,20 @@ def proc_analyzer(lip_queue, audio_queue,
                     try: q.get_nowait()
                     except: break
             gc.collect()
-            # ── 버그1·3 수정: WorkingSet 트리밍 ──────────────────────────────
-            # gc.collect()는 Python 객체만 회수하고 C heap(numpy arena)은 건드리지 않음.
-            # SetProcessWorkingSetSize(-1, -1)을 호출하면 OS가 유휴 물리 페이지를
-            # 즉시 회수해 PrivateWS를 실제 사용량 수준으로 낮춤.
-            # 보정/정상판정 직후에만 호출하므로 성능 영향 없음.
+            # ── 버그3 수정: C heap 반환 + Working Set 전체 플러시 ──────────────
             try:
                 import ctypes as _ct
-                _ct.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
+                # ① CRT _heapmin: numpy/scipy가 사용한 C heap 유휴 블록을 OS에 반환
+                #    → PrivateBytes(커밋) 자체를 줄여 계단 상승의 근본을 차단
+                try:
+                    _ct.cdll.msvcrt._heapmin()
+                except Exception:
+                    pass
+                # ② EmptyWorkingSet: 프로세스의 Working Set 전체 플러시
+                #    SetProcessWorkingSetSize보다 강력 — 모든 소프트 페이지를 즉시 추방
+                #    다음 접근 시 page fault로 다시 매핑되지만, 그 사이 물리 메모리 반환
+                _kernel32 = _ct.windll.kernel32
+                _kernel32.EmptyWorkingSet(_ct.c_void_p(-1))  # -1 = GetCurrentProcess()
             except Exception:
                 pass
             add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")

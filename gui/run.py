@@ -101,6 +101,11 @@ class LipSyncGUIRun:
                 t.join(timeout=2)
         except Exception:
             pass
+        # ── [버그2 수정] 큐/flag를 명시적으로 None 처리해 재사용 방지 ─────────
+        # _start_oped_monitor()에서 항상 새 인스턴스를 생성하므로 여기서 무효화
+        self._om_stop_flag            = None
+        self._om_cmd_queue            = None
+        self._om_state_queue          = None
         self._om_threads              = []
         self._oped_monitor_running    = False
         self._om_log_seen_count       = 0
@@ -445,6 +450,20 @@ class LipSyncGUIRun:
             except Exception:
                 pass
             self._log_seen_count = 0
+            # ── [버그5 수정] GUI 측 큐/버퍼도 즉시 드레인 ────────────────────
+            for _attr in ('_lip_queue', '_audio_queue', '_main_log_queue'):
+                _q = getattr(self, _attr, None)
+                if _q is None:
+                    continue
+                try:
+                    if hasattr(_q, 'cancel_join_thread'):
+                        _q.cancel_join_thread()
+                    while True:
+                        try: _q.get_nowait()
+                        except Exception: break
+                except Exception:
+                    pass
+            import gc; gc.collect()
             return
         # 싱크 OFF: oped 모니터에 oped_reset 전송 + 팟플레이어 직접 초기화
         if getattr(self, "_oped_monitor_running", False):
@@ -457,6 +476,20 @@ class LipSyncGUIRun:
                     self._om_state_queue.get_nowait()
             except Exception:
                 pass
+            # ── [버그5 수정] oped 모니터 큐/버퍼도 드레인 + GC ───────────────
+            for _attr in ('_om_lip_queue', '_om_audio_queue', '_om_log_queue'):
+                _q = getattr(self, _attr, None)
+                if _q is None:
+                    continue
+                try:
+                    if hasattr(_q, 'cancel_join_thread'):
+                        _q.cancel_join_thread()
+                    while True:
+                        try: _q.get_nowait()
+                        except Exception: break
+                except Exception:
+                    pass
+            import gc; gc.collect()
         hwnd = find_potplayer_hwnd()
         if not hwnd:
             self._proc_lbl.config(text="초기화 실패: 팟플레이어 미감지", fg=self.ACCENT2)

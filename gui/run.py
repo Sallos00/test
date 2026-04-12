@@ -39,12 +39,16 @@ class LipSyncGUIRun:
             runtime_cfg = self._build_cfg()
             qsize = runtime_cfg.get("QUEUE_MAXSIZE", 200)
 
-            self._om_lip_queue   = _MpQueue(maxsize=qsize)   # 미사용이지만 시그니처 호환용
+            # ── 버그2 수정: 매 재시작마다 모든 om 객체를 새로 생성 ───────────
+            # 이전 세션의 stop_flag가 set된 채로 재사용되거나,
+            # 이전 MpQueue 파이프 버퍼가 남아 새 세션의 오디오 수신을 방해하는
+            # 문제를 방지한다.
+            self._om_lip_queue   = _MpQueue(maxsize=qsize)
             self._om_audio_queue = _queue.Queue(maxsize=qsize)
             self._om_log_queue   = _queue.Queue(maxsize=200)
             self._om_state_queue = _queue.Queue(maxsize=20)
             self._om_cmd_queue   = _queue.Queue(maxsize=10)
-            self._om_stop_flag   = threading.Event()
+            self._om_stop_flag   = threading.Event()   # 반드시 새 Event (이전 set 상태 초기화)
 
             # shared_pos/dur: GUI 메인스레드가 갱신, T3가 읽음
             # 스레드 간 공유 → 일반 list + lock (Value 불필요)
@@ -98,9 +102,30 @@ class LipSyncGUIRun:
             except Exception:
                 pass
             for t in getattr(self, "_om_threads", []):
-                t.join(timeout=2)
+                t.join(timeout=5)   # 버그2 수정: 2→5초 (WASAPI 세션 종료 대기)
         except Exception:
             pass
+
+        # ── 버그2 수정: 이전 om 큐 완전 정리 ────────────────────────────────
+        # _om_lip_queue(MpQueue)를 drain/cancel 없이 버리면 파이프 버퍼가 잔류해
+        # 새 MpQueue 생성 시 이전 세션 데이터가 섞임.
+        # _om_audio_queue 안에 남은 numpy 튜플도 참조를 끊어 GC 가능하게 만듦.
+        for _attr in ("_om_lip_queue", "_om_audio_queue",
+                      "_om_log_queue", "_om_state_queue"):
+            _q = getattr(self, _attr, None)
+            if _q is None:
+                continue
+            try:
+                if hasattr(_q, "cancel_join_thread"):
+                    _q.cancel_join_thread()
+                while True:
+                    try: _q.get_nowait()
+                    except Exception: break
+                if hasattr(_q, "close"):
+                    _q.close()
+            except Exception:
+                pass
+
         self._om_threads              = []
         self._oped_monitor_running    = False
         self._om_log_seen_count       = 0

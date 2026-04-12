@@ -11,7 +11,8 @@ import queue as _queue
 import tkinter as tk
 import winreg
 import multiprocessing as _mp
-from multiprocessing import Array as _MpArray
+from multiprocessing import Process, Array as _MpArray
+from multiprocessing import Queue as _MpQueue
 
 import auth as _auth_module
 
@@ -38,16 +39,12 @@ class LipSyncGUIRun:
             runtime_cfg = self._build_cfg()
             qsize = runtime_cfg.get("QUEUE_MAXSIZE", 200)
 
-            # ── 버그1 수정: 매 재시작마다 모든 om 객체를 새로 생성 ───────────
-            # 버그1 추가: _om_lip_queue도 queue.Queue로 교체 (MpQueue 파이프 버퍼 제거)
-            # oped 모니터에서는 proc_lip_capture를 실행하지 않으므로
-            # _om_lip_queue에는 데이터가 들어오지 않는다 — queue.Queue로도 충분하다.
-            self._om_lip_queue   = _queue.Queue(maxsize=qsize)  # 버그1 수정: queue.Queue
+            self._om_lip_queue   = _MpQueue(maxsize=qsize)   # 미사용이지만 시그니처 호환용
             self._om_audio_queue = _queue.Queue(maxsize=qsize)
             self._om_log_queue   = _queue.Queue(maxsize=200)
             self._om_state_queue = _queue.Queue(maxsize=20)
             self._om_cmd_queue   = _queue.Queue(maxsize=10)
-            self._om_stop_flag   = threading.Event()   # 반드시 새 Event (이전 set 상태 초기화)
+            self._om_stop_flag   = threading.Event()
 
             # shared_pos/dur: GUI 메인스레드가 갱신, T3가 읽음
             # 스레드 간 공유 → 일반 list + lock (Value 불필요)
@@ -101,25 +98,9 @@ class LipSyncGUIRun:
             except Exception:
                 pass
             for t in getattr(self, "_om_threads", []):
-                t.join(timeout=5)   # 버그2 수정: 2→5초 (WASAPI 세션 종료 대기)
+                t.join(timeout=2)
         except Exception:
             pass
-
-        # ── 버그1 수정: 이전 om 큐 완전 정리 ────────────────────────────────
-        # _om_lip_queue가 queue.Queue로 전환되어 cancel_join_thread 불필요.
-        # _om_audio_queue 안에 남은 numpy 튜플도 참조를 끊어 GC 가능하게 만듦.
-        for _attr in ("_om_lip_queue", "_om_audio_queue",
-                      "_om_log_queue", "_om_state_queue"):
-            _q = getattr(self, _attr, None)
-            if _q is None:
-                continue
-            try:
-                while True:
-                    try: _q.get_nowait()
-                    except Exception: break
-            except Exception:
-                pass
-
         self._om_threads              = []
         self._oped_monitor_running    = False
         self._om_log_seen_count       = 0
@@ -328,12 +309,7 @@ class LipSyncGUIRun:
         self._place_popup(popup, pw, ph)
 
     def _start_processes(self):
-        """T1(립캡처 스레드) + T2·T3(스레드) 시작.
-        버그1 수정: proc_lip_capture를 Process → Thread로 전환.
-          - mp.Queue(파이프)가 부모 프로세스 주소공간에 64MB+ 파이프 버퍼를 커밋해
-            메인 프로세스 메모리가 싱크 시작 직후 500MB+ 급증하던 문제 해결.
-          - _lip_queue를 queue.Queue로 교체 → OS 파이프 없음 → 커밋 없음.
-        """
+        """P1(프로세스) + T2·T3(스레드) 시작."""
         self._stop_oped_monitor()   # 싱크 시작 시 별도 모니터 중지
         self._running = True
         self.stop_flag.clear()
@@ -349,41 +325,44 @@ class LipSyncGUIRun:
         self._shared_pos = [-1]
         self._shared_dur = [-1]
 
-        # 오디오 스트림 기준점 — T2가 첫 패킷에서 기록, T1이 읽어서 타임스탬프 통일
-        # 버그1 수정: T1이 스레드이므로 multiprocessing.Array 대신 일반 list 사용 가능.
-        # 단, 호환성을 위해 _MpArray 형태를 유지하되 같은 프로세스 내에서 공유한다.
+        # 오디오 스트림 기준점 — T2가 첫 패킷에서 기록, P1이 읽어서 타임스탬프 통일
+        # 프로세스(P1)↔스레드(T2) 간 공유이므로 multiprocessing.Array 사용
         import ctypes as _ct
         self._stream_anchor = _MpArray(_ct.c_double, [0.0, 48000.0, 1.0])
 
         # 싱크 ON 상태 전용 로그 큐 (T2 → GUI 직접 전달)
         self._main_log_queue = _queue.Queue(maxsize=200)
 
-        # ── 버그1 수정: _lip_queue를 queue.Queue로 교체 ────────────────────────
-        # mp.Queue는 내부에서 OS 파이프(Pipe)를 생성하며, 파이프 핸들이
-        # 부모 프로세스에 먼저 확보되어 64MB 이상의 Private 메모리를 커밋한다.
-        # T1이 스레드가 되면 동일 프로세스 내 공유이므로 queue.Queue로 충분하다.
-        # _audio_queue도 매번 새로 만들어 이전 numpy 배열 잔류를 방지한다.
+        # ── 버그2 수정: 큐를 매번 새로 생성해 이전 numpy 버퍼 해제 ─────────
+        # _lip_queue: mp.Queue 파이프 버퍼(32MB)가 이전 P1 종료 후에도 남음.
+        # _audio_queue: T2 종료 후 큐 안에 numpy 배열이 잔류해 GC 안 됨.
+        # 두 큐 모두 매번 새로 만들고, 이전 큐는 명시적으로 드레인해 참조를 끊는다.
         for _attr in ('_lip_queue', '_audio_queue'):
             _old = getattr(self, _attr, None)
             if _old is not None:
                 try:
+                    if hasattr(_old, 'cancel_join_thread'):
+                        _old.cancel_join_thread()
                     while True:
                         try: _old.get_nowait()
                         except Exception: break
                 except Exception:
                     pass
-        lip_qsize = runtime_cfg.get("QUEUE_MAXSIZE", 200)
-        self._lip_queue   = _queue.Queue(maxsize=lip_qsize)   # 버그1 수정: queue.Queue (파이프 없음)
+        self._lip_queue   = _MpQueue(maxsize=50)
         self._audio_queue = _queue.Queue(maxsize=runtime_cfg.get("QUEUE_MAXSIZE", 200))
 
         from processes import proc_lip_capture, proc_audio_capture, proc_analyzer  # lazy import
 
-        # T1·T2·T3: 모두 스레드 → threading.Event (stop_flag) 공유
-        # 버그1 수정: proc_lip_capture도 Thread로 실행 (이전 Process에서 변경)
-        # _p1_stop_flag는 더 이상 필요 없지만 하위 호환을 위해 stop_flag를 참조한다.
-        self._p1_stop_flag = self.stop_flag   # 버그1 수정: 별도 mp.Event 불필요
+        # P1: 별도 프로세스 → multiprocessing.Event 필요 (threading.Event는 pickle 불가)
+        self._p1_stop_flag = _mp.Event()
+        p1 = Process(target=proc_lip_capture,
+                     args=(self._lip_queue, self._p1_stop_flag, runtime_cfg, self._stream_anchor),
+                     daemon=True)
+        p1.start()
+        self._processes.append(p1)
+
+        # T2·T3: 스레드 → threading.Event (stop_flag) 그대로 사용
         for target, args in [
-            (proc_lip_capture,   (self._lip_queue, self.stop_flag, runtime_cfg, self._stream_anchor)),
             (proc_audio_capture, (self._audio_queue, self.stop_flag, runtime_cfg,
                                   self._main_log_queue, self._stream_anchor)),
             (proc_analyzer,      (self._lip_queue, self._audio_queue,
@@ -399,24 +378,28 @@ class LipSyncGUIRun:
                                bg=self.BG3, fg=self.ACCENT2,
                                activebackground=self.BORDER,
                                state="normal")
-        self._proc_lbl.config(text="T1·T2·T3 실행 중", fg=self.ACCENT3)
+        self._proc_lbl.config(text="P1·T2·T3 실행 중", fg=self.ACCENT3)
         self._toast("🎬 Auto Sync", "싱크 보정이 시작되었습니다.")
 
     def _stop_processes(self):
         self._running = False
         self.stop_flag.set()
-        # 버그1 수정: _p1_stop_flag는 이제 stop_flag와 동일 객체이므로 별도 set 불필요.
-        # 하위 호환을 위해 남겨두되 중복 set은 무해하다.
-        if hasattr(self, "_p1_stop_flag") and self._p1_stop_flag is not self.stop_flag:
+        # P1 전용 stop flag도 함께 세움
+        if hasattr(self, "_p1_stop_flag"):
             self._p1_stop_flag.set()
         try:
             self.cmd_queue.put_nowait("stop")
         except Exception:
             pass
-        # 버그1 수정: 모든 워커가 Thread이므로 join만 수행 (terminate 불필요)
+        # P1(프로세스)는 terminate, T2·T3(스레드)는 join
         procs = list(self._processes)
         def _stop(w):
-            w.join(timeout=3)
+            if isinstance(w, Process):
+                w.join(timeout=2)
+                if w.is_alive():
+                    w.terminate()
+            else:
+                w.join(timeout=2)
         ts = [threading.Thread(target=_stop, args=(w,), daemon=True) for w in procs]
         for t in ts: t.start()
         for t in ts: t.join()
@@ -429,13 +412,16 @@ class LipSyncGUIRun:
             while True: self.state_queue.get_nowait()
         except Exception:
             pass
-        # 중지 즉시 큐 버퍼 해제 — T2 종료 후 잔류 numpy 배열 참조를 끊어 GC 가능 상태로 만든다.
-        # 버그1 수정: _lip_queue가 queue.Queue이므로 cancel_join_thread 불필요.
+        # 중지 즉시 큐 파이프 버퍼 해제 — 재시작까지 기다리지 않고 바로 메모리 반환.
+        # _lip_queue: mp.Queue 파이프 버퍼(32MB)를 드레인 + 피더 스레드 해제.
+        # _audio_queue: T2 종료 후 잔류 numpy 배열 참조를 끊어 GC 가능 상태로 만든다.
         for _attr in ('_lip_queue', '_audio_queue', '_main_log_queue'):
             _q = getattr(self, _attr, None)
             if _q is None:
                 continue
             try:
+                if hasattr(_q, 'cancel_join_thread'):
+                    _q.cancel_join_thread()
                 while True:
                     try: _q.get_nowait()
                     except Exception: break

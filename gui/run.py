@@ -417,15 +417,6 @@ class LipSyncGUIRun:
             while True: self.state_queue.get_nowait()
         except Exception:
             pass
-        # ── [버그2&3 핵심 수정] cmd_queue 잔류 명령 드레인 ──────────────────
-        # _stop_processes()가 cmd_queue에 "stop"을 넣고 종료하는데
-        # cmd_queue를 drain하지 않으면 재시작된 T3''가 루프 첫 번째 반복에서
-        # 이 "stop" 명령을 꺼내 stop_flag.set() 후 즉시 return함.
-        # 결과: T3''가 OP/ED 감지를 전혀 못 하고(버그2), 로그도 남기지 않음(버그3).
-        try:
-            while True: self.cmd_queue.get_nowait()
-        except Exception:
-            pass
         # 중지 즉시 큐 파이프 버퍼 해제 — 재시작까지 기다리지 않고 바로 메모리 반환.
         # _lip_queue: mp.Queue 파이프 버퍼(32MB)를 드레인 + 피더 스레드 해제.
         # _audio_queue: T2 종료 후 잔류 numpy 배열 참조를 끊어 GC 가능 상태로 만든다.
@@ -587,10 +578,17 @@ class LipSyncGUIRun:
                 if om_logs is not None:
                     if not hasattr(self, "_log_lines"):
                         self._log_lines = collections.deque(maxlen=100)
-                    seen = getattr(self, "_om_log_seen_count", 0)
+                    seen     = getattr(self, "_om_log_seen_count", 0)
+                    last_log = getattr(self, "_om_log_seen_last", None)
+                    # oped monitor도 동일한 wrap 감지 적용
+                    wrap = (seen >= len(om_logs) and last_log is not None
+                            and om_logs[-1] != last_log)
+                    if wrap or seen > len(om_logs):
+                        seen = 0
                     for line in om_logs[seen:]:
                         self._log_lines.append(line)
                     self._om_log_seen_count = len(om_logs)
+                    self._om_log_seen_last  = om_logs[-1] if om_logs else None
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0) if pot_ok else 0
@@ -693,10 +691,23 @@ class LipSyncGUIRun:
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)
             if logs:
-                seen = getattr(self, "_log_seen_count", 0)
+                seen     = getattr(self, "_log_seen_count", 0)
+                last_log = getattr(self, "_log_seen_last", None)
+
+                # ── [버그 수정] deque wrap 감지 ──────────────────────────────
+                # log_lines는 maxlen=100 deque. 100개가 꽉 찬 뒤 새 항목이 들어오면
+                # len(logs)는 항상 100으로 고정되어 seen == len(logs) 가 유지됨.
+                # 이 상태에서 logs[-1](마지막 줄)이 이전과 달라지면 wrap이 발생한 것.
+                # wrap 발생 시 seen을 0으로 리셋해 전체를 다시 _log_lines에 동기화.
+                wrap = (seen >= len(logs) and last_log is not None
+                        and logs[-1] != last_log)
+                if wrap or seen > len(logs):
+                    seen = 0
+
                 for line in logs[seen:]:
                     self._log_lines.append(line)
                 self._log_seen_count = len(logs)
+                self._log_seen_last  = logs[-1] if logs else None
 
         self.root.after(100, self._refresh)
     def _destroy_app_root(self):

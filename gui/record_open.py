@@ -311,6 +311,22 @@ class LipSyncGUIRecordOpen:
                     except: pass
                     self.root.after(0, lambda: rec_status.config(
                         text="⚠ 저장 실패: " + str(e)[:80], fg="#e0a03c"))
+                finally:
+                    # ── [정리] 저장 완료(성공/실패 무관) 후 대용량 버퍼 즉시 해제 ──
+                    # audio_arr: 녹화 시간 × 채널 × 48000 크기 float32 배열 (수십~수백 MB)
+                    # screen_rec / audio_rec: ffmpeg 핸들, chunk 리스트 등 참조 보유
+                    import gc as _gc
+                    try: del audio_arr
+                    except Exception: pass
+                    try: del audio_result
+                    except Exception: pass
+                    try: del video_result
+                    except Exception: pass
+                    try:
+                        state["screen_rec"] = None
+                        state["audio_rec"]  = None
+                    except Exception: pass
+                    _gc.collect()
 
             threading.Thread(target=_save, daemon=True).start()
 
@@ -516,9 +532,14 @@ class LipSyncGUIRecordOpen:
                     cap_status.config(text="⚠ 캡처 실패: 검은 화면 (팟플레이어가 가려져 있거나 GPU 렌더러 문제)", fg="#e0a03c")
                     return
                 img = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
+                # ── [정리] DIB 복사본(arr) 즉시 해제 — PNG 변환 완료 후 불필요 ──
+                del arr; arr = None
                 ts  = _t.strftime("%Y%m%d_%H%M%S")
                 out = os.path.join(ensure_subdir("Screenshot"), f"capture_{ts}.png")
                 Image.fromarray(img).save(out, "PNG")
+                # ── [정리] PIL 변환용 RGB 배열(img) 저장 완료 후 즉시 해제 ──────
+                del img; img = None
+                import gc as _gc; _gc.collect()
                 cap_status.config(text="✅ 저장: Screenshot/" + os.path.basename(out),
                                   fg=self.ACCENT3)
                 _show_overlay(self.root, "📷 장면이 캡처되었습니다.", duration_ms=3000)

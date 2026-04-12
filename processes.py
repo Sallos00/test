@@ -183,6 +183,18 @@ def proc_analyzer(lip_queue, audio_queue,
     lpb = collections.deque(maxlen=_MAX_BUF)
     aub = collections.deque(maxlen=_MAX_BUF)
 
+    # ── 버그1·3 수정: numpy 배열 사전 할당 ──────────────────────────────────
+    # resample_aligned()에서 매 사이클마다 fromiter로 새 배열을 생성하면
+    # 보정 첫 성공 시 scipy/numpy C heap이 32MB 단위로 확장되고
+    # 이후 OS에 반환되지 않아 PrivateWS가 계단식으로 급등함.
+    # _MAX_BUF 크기 버퍼를 미리 할당해두고 뷰(슬라이스)로 재사용하면
+    # C heap 재확장이 발생하지 않아 메모리가 안정됨.
+    _pre_lip_ts  = np.zeros(_MAX_BUF, dtype=np.float64)
+    _pre_lip_vs  = np.zeros(_MAX_BUF, dtype=np.float32)
+    _pre_aud_ts  = np.zeros(_MAX_BUF, dtype=np.float64)
+    _pre_rms_vs  = np.zeros(_MAX_BUF, dtype=np.float32)
+    _pre_vad_vs  = np.zeros(_MAX_BUF, dtype=np.float32)
+
     total_correction_ms = 0       # 누적 보정량 (팟플레이어 딜레이 절대값 추적)
     smoothed_offset     = 0.0
     ema_initialized     = False
@@ -250,14 +262,20 @@ def proc_analyzer(lip_queue, audio_queue,
 
     def resample_aligned(lip_buf, aud_buf, fps):
 
-        if len(lip_buf) < 2 or len(aud_buf) < 2:
+        nl = len(lip_buf)
+        na = len(aud_buf)
+        if nl < 2 or na < 2:
             return None, None
 
-        lip_ts = np.fromiter((x[0] for x in lip_buf), dtype=np.float64, count=len(lip_buf))
-        aud_ts = np.fromiter((x[0] for x in aud_buf), dtype=np.float64, count=len(aud_buf))
-        lip_vs = np.fromiter((x[1] for x in lip_buf), dtype=np.float32, count=len(lip_buf))
-        rms_vs = np.fromiter((x[1] for x in aud_buf), dtype=np.float32, count=len(aud_buf))  # rms
-        vad_vs = np.fromiter((x[2] for x in aud_buf), dtype=np.float32, count=len(aud_buf))  # vad
+        # ── 버그1·3 수정: 사전 할당 버퍼 재사용 (fromiter 대신 뷰 슬라이싱) ──
+        # fromiter는 호출마다 새 배열을 VirtualAlloc → C heap 계단 확장의 원인.
+        # 미리 할당된 _pre_* 버퍼의 앞부분만 뷰로 잘라 쓰면 추가 할당 없음.
+        lip_ts = _pre_lip_ts[:nl]; lip_vs = _pre_lip_vs[:nl]
+        aud_ts = _pre_aud_ts[:na]; rms_vs = _pre_rms_vs[:na]; vad_vs = _pre_vad_vs[:na]
+        for i, x in enumerate(lip_buf):
+            lip_ts[i] = x[0]; lip_vs[i] = x[1]
+        for i, x in enumerate(aud_buf):
+            aud_ts[i] = x[0]; rms_vs[i] = x[1]; vad_vs[i] = x[2]
 
         # VAD로 마스킹한 RMS diff
         # - RMS diff: 대사 시작/끝의 변화 시점을 잡음 → 절대 타임스탬프 편향 없음
@@ -608,6 +626,16 @@ def proc_analyzer(lip_queue, audio_queue,
                     try: q.get_nowait()
                     except: break
             gc.collect()
+            # ── 버그1·3 수정: WorkingSet 트리밍 ──────────────────────────────
+            # gc.collect()는 Python 객체만 회수하고 C heap(numpy arena)은 건드리지 않음.
+            # SetProcessWorkingSetSize(-1, -1)을 호출하면 OS가 유휴 물리 페이지를
+            # 즉시 회수해 PrivateWS를 실제 사용량 수준으로 낮춤.
+            # 보정/정상판정 직후에만 호출하므로 성능 영향 없음.
+            try:
+                import ctypes as _ct
+                _ct.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
+            except Exception:
+                pass
             add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
 
         if abs(smoothed_offset) >= THRESH and hwnd:

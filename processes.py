@@ -164,6 +164,8 @@ def proc_analyzer(lip_queue, audio_queue,
     MTM       = cfg["MAX_TOTAL_SYNC_MS"]
     OAS       = bool(cfg.get("OAS", cfg.get("OPED_AUTO_SKIP", False)))
     OSS       = int(cfg.get("OSS",  cfg.get("OPED_SKIP_SEC",  90)))
+    # ── [버그2&3 수정] 세대 ID — _refresh()에서 좀비 스레드 아이템 필터링에 사용 ──
+    _GENERATION = cfg.get("_generation", 0)
 
     OPED_ZONE_MS      = 90_000   # OP/ED 탐지 구간: 재생 위치 앞뒤 90초 이내
     OPED_COOLDOWN_SEC = 90       # OP/ED 감지 후 재감지 억제 시간
@@ -337,6 +339,8 @@ def proc_analyzer(lip_queue, audio_queue,
             log_lines=snap, potplayer_ok=pot_ok,
             lip_samples=lip_n, audio_samples=aud_n,
             notify=notify, oped_prompt=prompt_to_send,
+            # ── [버그2&3 수정] 세대 ID 포함 — GUI에서 좀비 스레드 필터링 ──
+            _generation=_GENERATION,
         ))
 
     def execute_skip() -> bool:

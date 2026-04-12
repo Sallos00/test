@@ -549,9 +549,15 @@ class _AudioRecorder:
         self._running = False
         if self._thread:
             self._thread.join(timeout=3)
+            self._thread = None
         if self._chunks:
             arr, start_qpc = _retiming_audio(self._chunks, self._sr, self._ch)
             self._first_audio_qpc_sec = start_qpc
+            # ── [정리] 재타이밍 완료 후 원본 chunk 버퍼 즉시 해제 ──────────────
+            # 녹화 시간에 비례한 float32 numpy 배열(수십~수백 MB)이
+            # _retiming_audio() 이후에도 self._chunks에 잔류하면 GC 대상이 안 됨.
+            self._chunks = []
+            import gc; gc.collect()
             return arr, self._sr, self._ch
         return None, self._sr, self._ch
 
@@ -675,6 +681,13 @@ class _ScreenRecorder:
             raise RuntimeError("녹화 파일 없음")
         if os.path.getsize(tmp) < 1024:
             raise RuntimeError(f"녹화 파일 너무 작음({os.path.getsize(tmp)}B)")
+        # ── [정리] stop() 완료 후 내부 참조 해제 ──────────────────────────────
+        # ffmpeg 프로세스 핸들, 스레드, 파일 핸들을 명시적으로 None 처리해
+        # 참조 카운트를 끊고 GC가 즉시 회수할 수 있게 함.
+        self._thread         = None
+        self._ffmpeg_proc    = None
+        self._ffmpeg_log_fh  = None
+        self._ffmpeg_log_path = None
         return tmp
 
 def _save_ffmpeg_log_on_fail(log_path: str, video_path: str):

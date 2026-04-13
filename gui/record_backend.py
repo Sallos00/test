@@ -1,5 +1,6 @@
 """gui/record_backend.py -- 오디오/화면 녹화 백엔드 (OBS 방식 싱크)"""
 import os, time, threading, subprocess, tempfile, ctypes, ctypes.wintypes as wt
+from mem_utils import run_gc
 
 try:
     import cv2, numpy as np; _CV2_OK = True
@@ -557,7 +558,7 @@ class _AudioRecorder:
             # 녹화 시간에 비례한 float32 numpy 배열(수십~수백 MB)이
             # _retiming_audio() 이후에도 self._chunks에 잔류하면 GC 대상이 안 됨.
             self._chunks = []
-            import gc; gc.collect()
+            run_gc()
             return arr, self._sr, self._ch
         return None, self._sr, self._ch
 

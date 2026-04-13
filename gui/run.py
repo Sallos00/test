@@ -12,7 +12,8 @@ import tkinter as tk
 import winreg
 import multiprocessing as _mp
 from multiprocessing import Process, Array as _MpArray
-from multiprocessing import Queue as _MpQueue
+from multiprocessing import Queue as _MpQueue, Pipe as _MpPipe
+from mem_utils import full_cleanup, full_cleanup_and_release, flush_queues, run_gc
 
 import auth as _auth_module
 
@@ -39,7 +40,7 @@ class LipSyncGUIRun:
             runtime_cfg = self._build_cfg()
             qsize = runtime_cfg.get("QUEUE_MAXSIZE", 200)
 
-            self._om_lip_queue   = _MpQueue(maxsize=qsize)   # 미사용이지만 시그니처 호환용
+            self._om_lip_queue   = _queue.Queue(maxsize=qsize)  # Pipe 불필요 — 스레드 간 더미 큐
             self._om_audio_queue = _queue.Queue(maxsize=qsize)
             self._om_log_queue   = _queue.Queue(maxsize=200)
             self._om_state_queue = _queue.Queue(maxsize=20)
@@ -338,22 +339,18 @@ class LipSyncGUIRun:
         # 싱크 ON 상태 전용 로그 큐 (T2 → GUI 직접 전달)
         self._main_log_queue = _queue.Queue(maxsize=200)
 
-        # ── 버그2 수정: 큐를 매번 새로 생성해 이전 numpy 버퍼 해제 ─────────
-        # _lip_queue: mp.Queue 파이프 버퍼(32MB)가 이전 P1 종료 후에도 남음.
-        # _audio_queue: T2 종료 후 큐 안에 numpy 배열이 잔류해 GC 안 됨.
-        # 두 큐 모두 매번 새로 만들고, 이전 큐는 명시적으로 드레인해 참조를 끊는다.
-        for _attr in ('_lip_queue', '_audio_queue'):
-            _old = getattr(self, _attr, None)
-            if _old is not None:
-                try:
-                    if hasattr(_old, 'cancel_join_thread'):
-                        _old.cancel_join_thread()
-                    while True:
-                        try: _old.get_nowait()
-                        except Exception: break
-                except Exception:
-                    pass
-        self._lip_queue   = _MpQueue(maxsize=50)
+        # ── 버그2 수정: 큐를 매번 새로 생성해 이전 버퍼 해제 ──────────────
+        # _lip_queue: Pipe로 교체 (mp.Queue 32MB 파이프 버퍼 → ~64KB)
+        # _audio_queue: T2 종료 후 잔류 numpy 배열 참조를 끊어 GC 가능 상태로 만든다.
+        _old_lip_w = getattr(self, '_lip_queue_w', None)
+        _old_lip_r = getattr(self, '_lip_queue_r', None)
+        _old_audio = getattr(self, '_audio_queue', None)
+        full_cleanup_and_release(
+            mp_queues=(_old_lip_w, _old_lip_r),  # Pipe Connection → close()
+            queues=(_old_audio,),                  # queue.Queue → drain only
+        )
+        # Pipe(duplex=False): P1(송신 _w) → T3(수신 _r), 버퍼 ~64KB
+        self._lip_queue_w, self._lip_queue_r = _MpPipe(duplex=False)
         self._audio_queue = _queue.Queue(maxsize=runtime_cfg.get("QUEUE_MAXSIZE", 200))
 
         from processes import proc_lip_capture, proc_audio_capture, proc_analyzer  # lazy import
@@ -361,7 +358,7 @@ class LipSyncGUIRun:
         # P1: 별도 프로세스 → multiprocessing.Event 필요 (threading.Event는 pickle 불가)
         self._p1_stop_flag = _mp.Event()
         p1 = Process(target=proc_lip_capture,
-                     args=(self._lip_queue, self._p1_stop_flag, runtime_cfg, self._stream_anchor),
+                     args=(self._lip_queue_w, self._p1_stop_flag, runtime_cfg, self._stream_anchor),
                      daemon=True)
         p1.start()
         self._processes.append(p1)
@@ -370,7 +367,7 @@ class LipSyncGUIRun:
         for target, args in [
             (proc_audio_capture, (self._audio_queue, self.stop_flag, runtime_cfg,
                                   self._main_log_queue, self._stream_anchor)),
-            (proc_analyzer,      (self._lip_queue, self._audio_queue,
+            (proc_analyzer,      (self._lip_queue_r, self._audio_queue,
                                   self.state_queue, self.cmd_queue,
                                   self.stop_flag, runtime_cfg,
                                   self._shared_pos, self._shared_dur)),
@@ -417,21 +414,13 @@ class LipSyncGUIRun:
             while True: self.state_queue.get_nowait()
         except Exception:
             pass
-        # 중지 즉시 큐 파이프 버퍼 해제 — 재시작까지 기다리지 않고 바로 메모리 반환.
-        # _lip_queue: mp.Queue 파이프 버퍼(32MB)를 드레인 + 피더 스레드 해제.
-        # _audio_queue: T2 종료 후 잔류 numpy 배열 참조를 끊어 GC 가능 상태로 만든다.
-        for _attr in ('_lip_queue', '_audio_queue', '_main_log_queue'):
-            _q = getattr(self, _attr, None)
-            if _q is None:
-                continue
-            try:
-                if hasattr(_q, 'cancel_join_thread'):
-                    _q.cancel_join_thread()
-                while True:
-                    try: _q.get_nowait()
-                    except Exception: break
-            except Exception:
-                pass
+        # 중지 즉시 Pipe 연결 닫기 + audio_queue 드레인 + GC  [A + C + D]
+        full_cleanup_and_release(
+            mp_queues=(getattr(self, '_lip_queue_w', None),
+                       getattr(self, '_lip_queue_r', None)),
+            queues=(getattr(self, '_audio_queue', None),
+                    getattr(self, '_main_log_queue', None)),
+        )
 
     def _reset(self):
         if self._running:
@@ -450,20 +439,12 @@ class LipSyncGUIRun:
             except Exception:
                 pass
             self._log_seen_count = 0
-            # ── [버그5 수정] GUI 측 큐/버퍼도 즉시 드레인 ────────────────────
-            for _attr in ('_lip_queue', '_audio_queue', '_main_log_queue'):
-                _q = getattr(self, _attr, None)
-                if _q is None:
-                    continue
-                try:
-                    if hasattr(_q, 'cancel_join_thread'):
-                        _q.cancel_join_thread()
-                    while True:
-                        try: _q.get_nowait()
-                        except Exception: break
-                except Exception:
-                    pass
-            import gc; gc.collect()
+            # ── [버그5 수정] GUI 측 큐/버퍼도 즉시 드레인 + GC  [A + C]
+            full_cleanup(
+                queues=(getattr(self, '_lip_queue_r', None),
+                        getattr(self, '_audio_queue', None),
+                        getattr(self, '_main_log_queue', None)),
+            )
             return
         # 싱크 OFF: oped 모니터에 oped_reset 전송 + 팟플레이어 직접 초기화
         if getattr(self, "_oped_monitor_running", False):
@@ -476,20 +457,12 @@ class LipSyncGUIRun:
                     self._om_state_queue.get_nowait()
             except Exception:
                 pass
-            # ── [버그5 수정] oped 모니터 큐/버퍼도 드레인 + GC ───────────────
-            for _attr in ('_om_lip_queue', '_om_audio_queue', '_om_log_queue'):
-                _q = getattr(self, _attr, None)
-                if _q is None:
-                    continue
-                try:
-                    if hasattr(_q, 'cancel_join_thread'):
-                        _q.cancel_join_thread()
-                    while True:
-                        try: _q.get_nowait()
-                        except Exception: break
-                except Exception:
-                    pass
-            import gc; gc.collect()
+            # ── [버그5 수정] oped 모니터 큐/버퍼도 드레인 + GC  [A + C]
+            full_cleanup(
+                queues=(getattr(self, '_om_lip_queue',   None),
+                        getattr(self, '_om_audio_queue', None),
+                        getattr(self, '_om_log_queue',   None)),
+            )
         hwnd = find_potplayer_hwnd()
         if not hwnd:
             self._proc_lbl.config(text="초기화 실패: 팟플레이어 미감지", fg=self.ACCENT2)

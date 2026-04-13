@@ -7,6 +7,7 @@ gui/record_open.py -- 녹화/캡처 팝업 열기 믹스인
   [기능3] OBS 방식 — 화면+오디오 동시 시작 후 ffmpeg 합산
 """
 import os, threading
+from mem_utils import run_gc
 import tkinter as tk
 
 
@@ -315,7 +316,6 @@ class LipSyncGUIRecordOpen:
                     # ── [정리] 저장 완료(성공/실패 무관) 후 대용량 버퍼 즉시 해제 ──
                     # audio_arr: 녹화 시간 × 채널 × 48000 크기 float32 배열 (수십~수백 MB)
                     # screen_rec / audio_rec: ffmpeg 핸들, chunk 리스트 등 참조 보유
-                    import gc as _gc
                     try: del audio_arr
                     except Exception: pass
                     try: del audio_result
@@ -326,7 +326,7 @@ class LipSyncGUIRecordOpen:
                         state["screen_rec"] = None
                         state["audio_rec"]  = None
                     except Exception: pass
-                    _gc.collect()
+                    run_gc()
 
             threading.Thread(target=_save, daemon=True).start()
 
@@ -539,7 +539,7 @@ class LipSyncGUIRecordOpen:
                 Image.fromarray(img).save(out, "PNG")
                 # ── [정리] PIL 변환용 RGB 배열(img) 저장 완료 후 즉시 해제 ──────
                 del img; img = None
-                import gc as _gc; _gc.collect()
+                run_gc()
                 cap_status.config(text="✅ 저장: Screenshot/" + os.path.basename(out),
                                   fg=self.ACCENT3)
                 _show_overlay(self.root, "📷 장면이 캡처되었습니다.", duration_ms=3000)

@@ -16,6 +16,7 @@ from audio_com import qpc_freq, qpc_now
 from log_utils import (make_add_log, STATUS_OK, STATUS_CORRECTED, STATUS_COLLECTING,
                        STATUS_NO_SIGNAL, STATUS_LOW_CONF, STATUS_COOLDOWN,
                        STATUS_UNDETECTED, STATUS_CEILING, STATUS_NO_POT, STATUS_BUFFERING)
+from mem_utils import full_cleanup, clear_buffers, flush_queues, run_gc
 
 def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
     """팟플레이어 화면 캡처 → 입술 개구 신호 추출 프로세스."""
@@ -194,8 +195,9 @@ def proc_analyzer(lip_queue, audio_queue,
 
     log_lines    = collections.deque(maxlen=100)
     prev_title   = ""
-    audio_warned = False   # 오디오 미감지 경고 1회 플래그
-    audio_det    = False   # 오디오 최초 감지 알림 플래그
+    audio_warned  = False  # 오디오 미감지 경고 1회 플래그
+    audio_det     = False  # 오디오 최초 감지 알림 플래그
+    _is_recording = False  # 녹화 중 정리 억제 플래그 (recording_start/stop 명령으로 갱신)
 
     oped_confirm  = {"오프닝": 0,     "엔딩": 0}
     oped_last_t   = {"오프닝": 0.0,   "엔딩": 0.0}
@@ -223,16 +225,18 @@ def proc_analyzer(lip_queue, audio_queue,
         return cv < MUSIC_MAX_CV and fill > MUSIC_MIN_FILL
 
     def drain_queues():
-        import queue as _q
         for q, buf, tag in [(lip_queue, lpb, "👁"), (audio_queue, aub, "🔊")]:
             while True:
                 try:
-                    # mp.Queue와 queue.Queue 모두 get_nowait() 지원
-                    # mp.Queue는 block=False가 더 안전 (타임아웃 없이 즉시 반환)
-                    try:
-                        item = q.get_nowait()
-                    except Exception:
-                        break
+                    if hasattr(q, 'poll'):
+                        if not q.poll():
+                            break
+                        item = q.recv()
+                    else:
+                        try:
+                            item = q.get_nowait()
+                        except Exception:
+                            break
                     if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
                         add_log(f"{tag} {item[1]}")
                     else:
@@ -369,9 +373,7 @@ def proc_analyzer(lip_queue, audio_queue,
         smoothed_offset     = 0.0
         ema_initialized     = False
         last_correction_t   = 0.0
-        offset_buf.clear()
-        lpb.clear()
-        aub.clear()
+        clear_buffers(offset_buf, lpb, aub)
 
     def reset_oped():
         nonlocal oped_confirm, oped_last_t, oped_prompted
@@ -381,35 +383,33 @@ def proc_analyzer(lip_queue, audio_queue,
         pending_prompt[0] = None
 
     def _flush_and_gc(label: str):
-        """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC (문제 2·3 수정)."""
-        import gc
-        offset_buf.clear()
-        lpb.clear()
-        aub.clear()
-        # lip_queue / audio_queue 잔류분 드레인
-        for q in (lip_queue, audio_queue):
-            while True:
-                try: q.get_nowait()
-                except: break
-        gc.collect()
+        """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC  [A + B + C]
+        녹화 중(_is_recording=True)에는 실행하지 않는다.
+        """
+        if _is_recording:
+            return
+        full_cleanup(
+            queues=(lip_queue, audio_queue),
+            bufs=(offset_buf, lpb, aub),
+        )
         add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
 
     def _idle_gc_if_due(label: str):
         """팟플레이어 감지됐으나 싱크·녹화 작업이 없는 대기 상태에서
-        60초마다 버퍼·큐·GC를 정리한다. _last_idle_gc_t를 갱신해 중복 실행을 방지."""
+        60초마다 버퍼·큐·GC를 정리한다. _last_idle_gc_t를 갱신해 중복 실행을 방지.
+        = full_cleanup  [A + B + C]  (60초 주기)
+        녹화 중(_is_recording=True)에는 실행하지 않는다.
+        """
         nonlocal _last_idle_gc_t
+        if _is_recording:
+            return
         _now = time.perf_counter()
         if _now - _last_idle_gc_t < _IDLE_GC_INTERVAL:
             return
-        import gc
-        offset_buf.clear()
-        lpb.clear()
-        aub.clear()
-        for q in (lip_queue, audio_queue):
-            while True:
-                try: q.get_nowait()
-                except: break
-        gc.collect()
+        full_cleanup(
+            queues=(lip_queue, audio_queue),
+            bufs=(offset_buf, lpb, aub),
+        )
         _last_idle_gc_t = _now
         add_log(f"🧹 [대기 중 - {label}] 주기적 메모리 정리 완료")
 
@@ -471,6 +471,10 @@ def proc_analyzer(lip_queue, audio_queue,
             elif cmd == "stop":
                 stop_flag.set()
                 return
+            elif cmd == "recording_start":
+                _is_recording = True
+            elif cmd == "recording_stop":
+                _is_recording = False
 
         drain_queues()
 
@@ -481,23 +485,20 @@ def proc_analyzer(lip_queue, audio_queue,
 
         # ── [버그1 수정] 팟플레이어가 없으면 버퍼 정리 후 대기 상태로 early-continue ──
         if not pot_ok:
-            if lpb or aub:
-                lpb.clear()
-                aub.clear()
-                import gc; gc.collect()
-                _last_idle_gc_t = time.perf_counter()
-            else:
-                # 버퍼가 이미 비어 있어도 60초마다 큐 드레인 + GC 실행
-                _now = time.perf_counter()
-                if _now - _last_idle_gc_t >= _IDLE_GC_INTERVAL:
-                    import gc
-                    for q in (lip_queue, audio_queue):
-                        while True:
-                            try: q.get_nowait()
-                            except: break
-                    gc.collect()
-                    _last_idle_gc_t = _now
-                    add_log("🧹 [대기 중 - 팟플레이어 미감지] 주기적 메모리 정리 완료")
+            if not _is_recording:
+                if lpb or aub:
+                    full_cleanup(
+                        queues=(lip_queue, audio_queue),
+                        bufs=(lpb, aub),
+                    )
+                    _last_idle_gc_t = time.perf_counter()
+                else:
+                    _now = time.perf_counter()
+                    if _now - _last_idle_gc_t >= _IDLE_GC_INTERVAL:
+                        flush_queues(lip_queue, audio_queue)
+                        run_gc()
+                        _last_idle_gc_t = _now
+                        add_log("🧹 [대기 중 - 팟플레이어 미감지] 주기적 메모리 정리 완료")
             if in_cooldown:
                 in_cooldown = False
             push_state(STATUS_NO_POT, 0, total_correction_ms, log_lines, pot_ok,

@@ -16,6 +16,7 @@ from audio_com import qpc_freq, qpc_now
 from log_utils import (make_add_log, STATUS_OK, STATUS_CORRECTED, STATUS_COLLECTING,
                        STATUS_NO_SIGNAL, STATUS_LOW_CONF, STATUS_COOLDOWN,
                        STATUS_UNDETECTED, STATUS_CEILING, STATUS_NO_POT, STATUS_BUFFERING)
+from mem_utils import full_cleanup, full_cleanup_and_release
 
 def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
     """팟플레이어 화면 캡처 → 입술 개구 신호 추출 프로세스."""
@@ -204,6 +205,16 @@ def proc_analyzer(lip_queue, audio_queue,
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
 
+    # ── 녹화 중 정리 억제 플래그 ─────────────────────────────────────────────
+    # GUI 에서 "recording_start" / "recording_stop" cmd 로 갱신
+    _is_recording_active = False
+
+    # ── 팟플레이어 미감지 쿨다운 (조건 1) ────────────────────────────────────
+    # 미감지 시 정리 후 60초간 재정리 억제
+    NO_POT_CLEANUP_CD  = 60.0
+    _no_pot_cleanup_t  = 0.0   # 마지막 미감지 정리 시각
+    _prev_pot_ok       = True  # 직전 루프의 pot_ok (감지→미감지 전환 감지용)
+
     add_log = make_add_log(log_lines)
 
     def is_music_playing() -> bool:
@@ -223,23 +234,45 @@ def proc_analyzer(lip_queue, audio_queue,
         return cv < MUSIC_MAX_CV and fill > MUSIC_MIN_FILL
 
     def drain_queues():
-        import queue as _q
-        for q, buf, tag in [(lip_queue, lpb, "👁"), (audio_queue, aub, "🔊")]:
-            while True:
-                try:
-                    # mp.Queue와 queue.Queue 모두 get_nowait() 지원
-                    # mp.Queue는 block=False가 더 안전 (타임아웃 없이 즉시 반환)
+        """lip_queue(Pipe Connection 또는 mp.Queue)와 audio_queue(queue.Queue)를
+        드레인해 lpb / aub 버퍼에 적재한다.
+        lip_queue가 Pipe Connection이면 poll()+recv(), 아니면 get_nowait() 사용.
+        """
+        # ── lip_queue 드레인 ──────────────────────────────────────────────────
+        _lip_is_pipe = hasattr(lip_queue, 'poll') and not hasattr(lip_queue, 'get_nowait')
+        while True:
+            try:
+                if _lip_is_pipe:
+                    if not lip_queue.poll():
+                        break
+                    item = lip_queue.recv()
+                else:
                     try:
-                        item = q.get_nowait()
+                        item = lip_queue.get_nowait()
                     except Exception:
                         break
-                    if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
-                        add_log(f"{tag} {item[1]}")
-                    else:
-                        buf.append(item)
-                except Exception:
-                    break
-        # BUF_SEC 기준으로 트리밍 (문제 2 수정)
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
+                    add_log(f"👁 {item[1]}")
+                else:
+                    lpb.append(item)
+            except (EOFError, OSError):
+                # Pipe writer 쪽이 닫혔음 — P1 종료 신호, 조용히 종료
+                break
+            except Exception:
+                break
+
+        # ── audio_queue 드레인 ───────────────────────────────────────────────
+        while True:
+            try:
+                item = audio_queue.get_nowait()
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
+                    add_log(f"🔊 {item[1]}")
+                else:
+                    aub.append(item)
+            except Exception:
+                break
+
+        # BUF_SEC 기준으로 트리밍 (오래된 샘플 제거)
         _trim_win = max(BUF_SEC, MUSIC_WINDOW_SEC)
         if lpb:
             latest_lip = lpb[-1][0]
@@ -381,17 +414,18 @@ def proc_analyzer(lip_queue, audio_queue,
         pending_prompt[0] = None
 
     def _flush_and_gc(label: str):
-        """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC (문제 2·3 수정)."""
-        import gc
-        offset_buf.clear()
-        lpb.clear()
-        aub.clear()
-        # lip_queue / audio_queue 잔류분 드레인
-        for q in (lip_queue, audio_queue):
-            while True:
-                try: q.get_nowait()
-                except: break
-        gc.collect()
+        """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC.
+        녹화 중(_is_recording_active=True)이면 절대 실행하지 않는다 (조건 4).
+        mem_utils.full_cleanup 을 사용해 A(드레인)+B(버퍼클리어)+C(GC) 수행.
+        큐는 재사용하므로 close()/join_thread()는 호출하지 않는다.
+        """
+        if _is_recording_active:
+            add_log(f"⏸ [{label}] 녹화 중 — 메모리 정리 억제")
+            return
+        full_cleanup(
+            queues=(lip_queue, audio_queue),
+            bufs=(offset_buf, lpb, aub),
+        )
         add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
 
     # BUF_SEC 동안 대기하되 stop_flag가 세워지면 즉시 탈출
@@ -418,13 +452,23 @@ def proc_analyzer(lip_queue, audio_queue,
                     post_key_to_potplayer(hwnd, VK_OEM_2, shift=True)
                     time.sleep(0.05)
                     post_key_to_potplayer(hwnd, 0x6F, shift=True)
-                    # [버그5 수정] reset 시 flush_and_gc로 메모리/버퍼 완전 정리
+                    # 싱크 시작 시 1·2번 쿨다운 초기화 + 버퍼·큐 정리 (조건 3)
+                    # 녹화 중이면 _flush_and_gc 내부에서 억제됨 (조건 4)
+                    _no_pot_cleanup_t = 0.0   # 미감지 쿨다운 초기화
                     _flush_and_gc("수동 초기화")
                     reset_sync()
                     in_cooldown = False
                     add_log("↺ 싱크 초기화")
                 else:
                     add_log("⚠ 팟플레이어 미감지")
+            elif cmd == "recording_start":
+                # 조건 4: 녹화 시작 → 정리 억제 플래그 ON
+                _is_recording_active = True
+                add_log("🔴 녹화 시작 — 메모리 정리 억제 활성화")
+            elif cmd == "recording_stop":
+                # 조건 4: 녹화 종료 → 정리 억제 플래그 OFF
+                _is_recording_active = False
+                add_log("⏹ 녹화 종료 — 메모리 정리 억제 해제")
             elif cmd == "oped_skip":
                 execute_skip()
                 zone = pending_prompt[0].get("zone", "오프닝") if pending_prompt[0] else "오프닝"
@@ -454,18 +498,37 @@ def proc_analyzer(lip_queue, audio_queue,
         lip_n  = len(lpb)
         aud_n  = len(aub)
 
-        # ── [버그1 수정] 팟플레이어가 없으면 버퍼 정리 후 대기 상태로 early-continue ──
+        # ── 조건 1: 팟플레이어 미감지 → 정리 + 60초 쿨다운 ─────────────────
+        # 조건 4: 녹화 중이면 정리하지 않음
         if not pot_ok:
-            if lpb or aub:
-                lpb.clear()
-                aub.clear()
-                import gc; gc.collect()
+            _now_t = time.time()
+            # 미감지 전환 직후 OR 이전 쿨다운이 만료된 경우에만 정리
+            _no_pot_cd_expired = (_now_t - _no_pot_cleanup_t) >= NO_POT_CLEANUP_CD
+            if (lpb or aub) and _no_pot_cd_expired and not _is_recording_active:
+                full_cleanup(queues=(lip_queue, audio_queue), bufs=(offset_buf, lpb, aub))
+                _no_pot_cleanup_t = _now_t
+                add_log(f"🧹 [팟플레이어 미감지] 버퍼 정리 → {NO_POT_CLEANUP_CD:.0f}초 쿨다운")
             if in_cooldown:
                 in_cooldown = False
+            _prev_pot_ok = False
             push_state(STATUS_NO_POT, 0, total_correction_ms, log_lines, pot_ok,
                        0, 0)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
+
+        # ── 조건 2: 팟플레이어 재감지 (미감지→감지 전환) ───────────────────
+        # 미감지 쿨다운 초기화 + 정리 수행 후 새 60초 쿨다운 시작
+        # 조건 4: 녹화 중이면 정리하지 않음
+        if not _prev_pot_ok and pot_ok:
+            if not _is_recording_active:
+                _no_pot_cleanup_t = 0.0   # 쿨다운 초기화
+                full_cleanup(queues=(lip_queue, audio_queue), bufs=(offset_buf, lpb, aub))
+                _no_pot_cleanup_t = time.time()
+                add_log(f"🧹 [팟플레이어 재감지] 버퍼 정리 → {NO_POT_CLEANUP_CD:.0f}초 쿨다운")
+            else:
+                add_log("⏸ [팟플레이어 재감지] 녹화 중 — 정리 억제")
+            in_cooldown = False
+        _prev_pot_ok = True
 
         if hwnd:
             try:
@@ -476,8 +539,12 @@ def proc_analyzer(lip_queue, audio_queue,
                     post_key_to_potplayer(hwnd, VK_OEM_2, shift=True)
                     time.sleep(0.05)
                     post_key_to_potplayer(hwnd, 0x6F, shift=True)
-                    lpb.clear()
-                    aub.clear()
+                    # 영상 변경 시에도 녹화 중이 아닐 때만 정리
+                    if not _is_recording_active:
+                        full_cleanup(queues=(lip_queue, audio_queue), bufs=(offset_buf, lpb, aub))
+                    else:
+                        lpb.clear()
+                        aub.clear()
                     reset_sync()
                     reset_oped()
                     in_cooldown = False
@@ -655,7 +722,9 @@ def proc_analyzer(lip_queue, audio_queue,
             total_correction_ms += steps * STEP * sign
             last_correction_t    = time.time()
             status = STATUS_CORRECTED
-            # ── 버그4 수정: 보정 후 즉시 버퍼·큐 정리 + 쿨다운 플래그 세팅 ───
+            # 조건 3: 싱크 보정 완료 → 1·2번 쿨다운 초기화 + 버퍼·큐 정리
+            # 조건 4: 녹화 중이면 _flush_and_gc 내부에서 억제됨
+            _no_pot_cleanup_t = 0.0
             _flush_and_gc("싱크 보정 완료")
             in_cooldown = True
 
@@ -665,7 +734,9 @@ def proc_analyzer(lip_queue, audio_queue,
             add_log(f"✅ 싱크 정상 (offset={smoothed_offset:.1f}ms, 임계값 ±{THRESH}ms 이내)")
             status = STATUS_OK
             last_correction_t = time.time()   # 정상 판정도 쿨다운 기산점 갱신
-            # ── 버그4 수정: 정상 판정 후 즉시 버퍼·큐 정리 + 쿨다운 플래그 세팅 ─
+            # 조건 3: 싱크 정상 → 1·2번 쿨다운 초기화 + 버퍼·큐 정리
+            # 조건 4: 녹화 중이면 _flush_and_gc 내부에서 억제됨
+            _no_pot_cleanup_t = 0.0
             _flush_and_gc("싱크 정상 확인")
             in_cooldown = True
 

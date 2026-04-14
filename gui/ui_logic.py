@@ -236,19 +236,22 @@ class LipSyncGUILogic:
             cached = cache[i]
 
             display_title = _os.path.splitext(title)[0]
-            # 제목 줄바꿈: ① " - " 구분자 기준 우선 ② 없으면 길이(30자) 초과 시 공백 기준
+            # 제목 줄바꿈: " - " 기준 분리 후 각 파트도 30자 초과 시 공백 기준 재분리
             _WRAP = 30
+
+            def _wrap_line(s, limit=_WRAP):
+                if len(s) <= limit:
+                    return s
+                cut = s.rfind(" ", 0, limit + 1)
+                if cut == -1:
+                    cut = limit
+                return s[:cut] + "\n" + _wrap_line(s[cut:].lstrip(), limit)
+
             if " - " in display_title:
                 first, rest = display_title.split(" - ", 1)
-                display_text = first + "\n- " + rest
-            elif len(display_title) > _WRAP:
-                # 30자 전후 가장 가까운 공백에서 줄바꿈
-                cut = display_title.rfind(" ", 0, _WRAP + 1)
-                if cut == -1:
-                    cut = _WRAP
-                display_text = display_title[:cut] + "\n" + display_title[cut:].lstrip()
+                display_text = _wrap_line(first) + "\n- " + _wrap_line(rest)
             else:
-                display_text = display_title
+                display_text = _wrap_line(display_title)
 
             cached["title_lbl"].config(text=display_text)
             cached["ts_lbl"].config(text=ts if ts else "")

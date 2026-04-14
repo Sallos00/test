@@ -88,16 +88,16 @@ class LipSyncGUILogic:
                 if fname_noext == title or fname == title:
                     exact_match = os.path.join(dirpath, fname)
                     break
-                # 1.5순위: 코덱·해상도 괄호 제거 후 일치 (예: "제목 (1280x720 x264 AAC)" vs "제목")
+                # 1.5순위: 코덱·해상도 괄호/대괄호 제거 후 일치
+                # (예: "제목 (1280x720 x264 AAC)" / "제목 [1080p AAC]" vs "제목")
                 _CODEC_RE = re.compile(
-                    r'\s*\([^)]*(?:\d{3,4}[xX×]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^)]*\)',
+                    r'(?:\s*\([^)]*(?:\d{3,4}[xX\u00d7]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^)]*\)'
+                    r'|\s*\[[^\]]*(?:\d{3,4}[xX\u00d7]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^\]]*\])',
                     re.IGNORECASE
                 )
                 fname_stripped = _CODEC_RE.sub('', fname_noext).strip()
-                if fname_stripped == title or fname_noext == re.sub(
-                    r'\s*\([^)]*(?:\d{3,4}[xX×]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^)]*\)',
-                    '', title, flags=re.IGNORECASE
-                ).strip():
+                title_stripped = _CODEC_RE.sub('', title).strip()
+                if fname_stripped == title or fname_stripped == title_stripped:
                     exact_match = os.path.join(dirpath, fname)
                     break
                 # 2순위: 같은 시리즈 + 화수 일치
@@ -236,9 +236,17 @@ class LipSyncGUILogic:
             cached = cache[i]
 
             display_title = _os.path.splitext(title)[0]
+            # 제목 줄바꿈: ① " - " 구분자 기준 우선 ② 없으면 길이(30자) 초과 시 공백 기준
+            _WRAP = 30
             if " - " in display_title:
                 first, rest = display_title.split(" - ", 1)
                 display_text = first + "\n- " + rest
+            elif len(display_title) > _WRAP:
+                # 30자 전후 가장 가까운 공백에서 줄바꿈
+                cut = display_title.rfind(" ", 0, _WRAP + 1)
+                if cut == -1:
+                    cut = _WRAP
+                display_text = display_title[:cut] + "\n" + display_title[cut:].lstrip()
             else:
                 display_text = display_title
 
@@ -299,13 +307,15 @@ class LipSyncGUILogic:
         if not title or not title.strip():
             return
 
-        # 다섯 번째 개선: 화질·코덱 정보가 포함된 괄호만 제거
-        # (예: "(1280x720 x264 AAC)", "(1080p HEVC AAC)" → 삭제)
-        # 일반 괄호(부제목, 연도 등)는 유지해 파일명 매칭이 깨지지 않도록 함
-        title = re.sub(
-            r'\s*\([^)]*(?:\d{3,4}[xX\xd7]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^)]*\)',
-            '', title, flags=re.IGNORECASE
-        ).strip()
+        # 다섯 번째 개선: 화질·코덱 정보가 포함된 괄호/대괄호만 제거
+        # (예: "(1280x720 x264 AAC)", "[1080p HEVC AAC]" → 삭제)
+        # 일반 괄호·대괄호(부제목, 배포그룹 등)는 유지해 파일명 매칭이 깨지지 않도록 함
+        _CODEC_PAT = re.compile(
+            r'(?:\s*\([^)]*(?:\d{3,4}[xX\u00d7]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^)]*\)'
+            r'|\s*\[[^\]]*(?:\d{3,4}[xX\u00d7]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^\]]*\])',
+            re.IGNORECASE
+        )
+        title = _CODEC_PAT.sub('', title).strip()
 
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)

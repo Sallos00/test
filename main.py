@@ -38,8 +38,11 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
 
     QSIZE       = CFG["QUEUE_MAXSIZE"]
-    # P2·P3는 스레드 → queue.Queue (직렬화 오버헤드 없음)
-    # lip_queue(P1↔T3)는 run.py에서 Pipe로 생성·관리 (32MB mp.Queue 파이프 버퍼 제거)
+    # P1(프로세스)↔메인 간 큐는 multiprocessing.Queue 유지
+    # lip_queue는 32MB 파이프 버퍼가 page-in되는 원인 → maxsize 50으로 제한
+    # (ANALYSIS_INTERVAL=3초, 15fps → 최대 45샘플이면 충분)
+    # P2·P3는 스레드로 전환 → queue.Queue 사용 (직렬화 오버헤드 없음)
+    lip_queue   = mp.Queue(maxsize=50)            # P1(프로세스) → P3(스레드)
     audio_queue = queue.Queue(maxsize=QSIZE)     # P2(스레드)   → P3(스레드)
     state_queue = queue.Queue(maxsize=20)        # P3(스레드)   → GUI
     cmd_queue   = queue.Queue(maxsize=10)        # GUI          → P3(스레드)
@@ -47,5 +50,5 @@ if __name__ == "__main__":
 
     root = tk.Tk()
     app  = LipSyncGUI(root, state_queue, cmd_queue, stop_flag,
-                      audio_queue=audio_queue)
+                      lip_queue=lip_queue, audio_queue=audio_queue)
     root.mainloop()

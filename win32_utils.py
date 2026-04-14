@@ -57,23 +57,14 @@ VK_OEM_COMMA  = 0xBC  # ',' key  (Shift+, = '<')
 VK_OEM_2      = 0xBF  # '/' key
 
 def queue_put(q, item):
-    """큐 또는 Pipe Connection에 안전하게 데이터를 넣는다.
-    - queue.Queue / mp.Queue: put_nowait() 사용, Full이면 오래된 항목 버리고 재시도
-    - multiprocessing.Connection (Pipe 송신 끝): send() 사용
-    """
+    """멀티프로세싱 큐에 안전하게 데이터를 넣는다."""
     try:
-        if hasattr(q, 'send'):          # Pipe Connection
-            q.send(item)
-        else:                           # queue.Queue / mp.Queue
-            try:
-                q.put_nowait(item)
-            except queue.Full:
-                try: q.get_nowait()
-                except: pass
-                try: q.put_nowait(item)
-                except: pass
-    except Exception:
-        pass
+        q.put_nowait(item)
+    except queue.Full:
+        try: q.get_nowait()
+        except: pass
+        try: q.put_nowait(item)
+        except: pass
 
 _hwnd_cache = [0, 0.0]   # [hwnd, last_check_time]
 

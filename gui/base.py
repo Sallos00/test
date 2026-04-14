@@ -42,12 +42,11 @@ class LipSyncGUIBase:
     STARTUP_NAME = "AutoSync"
 
     def __init__(self, root: tk.Tk, state_queue, cmd_queue, stop_flag,
-                 lip_queue=None, audio_queue=None):
+                 audio_queue=None):
         self.root          = root
         self.state_queue   = state_queue
         self.cmd_queue     = cmd_queue
         self.stop_flag     = stop_flag
-        self._lip_queue    = lip_queue
         self._audio_queue  = audio_queue
         self._running      = False
         self._closing      = False

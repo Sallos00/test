@@ -61,42 +61,54 @@ class LipSyncGUILogic:
             return
         VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv",
                       ".ts", ".m2ts", ".flv", ".webm", ".m4v"}
-        base = _strip_episode_number(title)
-        # 제목에서 화수 숫자 추출: "17화", "17편", "S01E17", 순수 숫자 등
+
+        # ── [버그3 수정] () [] 코덱/해상도 정보를 제거한 정규화 함수 ──────────
+        def _normalize(name: str) -> str:
+            """파일명에서 () [] 안의 코덱·해상도 정보를 제거하고 소문자로 반환."""
+            n = os.path.splitext(name)[0]
+            n = re.sub(r'\s*\([^)]*\)', '', n)   # (1280x720 x264 AAC) 등 제거
+            n = re.sub(r'\s*\[[^\]]*\]', '', n)   # [720p BluRay x264] 등 제거
+            return re.sub(r'[\s_\-\.]+', ' ', n).strip().lower()
+
+        # 검색 기준값: 기록된 title을 정규화
+        title_norm = _normalize(title)
+        base       = _strip_episode_number(title_norm)
+
+        # 화수 숫자 추출
         ep_num = None
-        m = re.search(r'제?(\d+)\s*[화편부회장권]', title)
+        m = re.search(r'제?(\d+)\s*[화편부회장권]', title_norm)
         if not m:
-            m = re.search(r'[Ss]\d{1,2}[Ee](\d{1,3})', title)
+            m = re.search(r'[Ss]\d{1,2}[Ee](\d{1,3})', title_norm)
         if not m:
-            nums = re.findall(r'(?<!\d)(\d+)(?!\d)', title)
+            nums = re.findall(r'(?<!\d)(\d+)(?!\d)', title_norm)
             if nums:
-                m_val = nums[-1]
-                ep_num = m_val
+                ep_num = nums[-1]
         if m and ep_num is None:
             ep_num = m.group(1)
 
-        found = None
-        exact_match = None
+        exact_match  = None
         series_match = None
 
         for dirpath, _, fnames in os.walk(d):
             for fname in fnames:
                 if os.path.splitext(fname)[1].lower() not in VIDEO_EXTS:
                     continue
-                fname_noext = os.path.splitext(fname)[0]
-                # 1순위: 완전 일치
-                if fname_noext == title or fname == title:
-                    exact_match = os.path.join(dirpath, fname)
+                fname_norm = _normalize(fname)
+                fpath      = os.path.join(dirpath, fname)
+
+                # 1순위: 정규화 후 완전 일치
+                if fname_norm == title_norm:
+                    exact_match = fpath
                     break
+
                 # 2순위: 같은 시리즈 + 화수 일치
-                if _strip_episode_number(fname) == base and ep_num is not None:
-                    # fname 안에서 같은 위치의 숫자가 ep_num과 일치하는지 확인
-                    fname_nums = re.findall(r'(?<!\d)(\d+)(?!\d)', fname_noext)
+                fname_base = _strip_episode_number(fname_norm)
+                if fname_base and base and fname_base == base and ep_num is not None:
+                    fname_nums = re.findall(r'(?<!\d)(\d+)(?!\d)', fname_norm)
                     if ep_num in fname_nums:
-                        series_match = os.path.join(dirpath, fname)
+                        if series_match is None:
+                            series_match = fpath
             if exact_match:
-                break
-            if found:
                 break
 
         found = exact_match or series_match
@@ -287,8 +299,11 @@ class LipSyncGUILogic:
         if not title or not title.strip():
             return
 
-        # 다섯 번째 개선: 괄호 안 내용 제거 (예: "(AniTv 1080p x264 AAC)" 삭제)
+        # ── [버그3 수정] () 및 [] 안의 코덱·해상도 정보 제거 ─────────────────
+        # 예: "Dekiru Neko - 04 (1280x720 x264 AAC)" → "Dekiru Neko - 04"
+        #      "One Piece [720p BluRay x264]" → "One Piece"
         title = re.sub(r'\s*\([^)]*\)', '', title).strip()
+        title = re.sub(r'\s*\[[^\]]*\]', '', title).strip()
 
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
@@ -421,12 +436,18 @@ class LipSyncGUILogic:
                         title = _extract_potplayer_title(buf.value)
 
                         if title and title != prev_title:
+                            old_title  = prev_title
                             prev_title  = title
                             was_running = True
                             self._log_lines.append(
                                 f"[{_t.strftime('%H:%M:%S')}] 🔍 제목 감지: {title}")
                             self.root.after(
                                 0, lambda t=title: self.record_video_history(t))
+                            # ── [버그1 수정] 동영상 변경 시 싱크 초기화 ──────
+                            # 이전 제목이 있는 상태에서 새 제목으로 바뀌면
+                            # (= 다른 동영상으로 전환) 싱크/버퍼를 초기화한다.
+                            if old_title and old_title != title:
+                                self.root.after(0, self._reset_on_video_change)
                         else:
                             was_running = True
                     else:
@@ -445,6 +466,24 @@ class LipSyncGUILogic:
 
         t = threading.Thread(target=_watch, daemon=True, name="title-watcher")
         t.start()
+
+    def _reset_on_video_change(self):
+        """동영상 변경 감지 시 싱크·메모리·캐시·버퍼를 초기화한다."""
+        import time as _t
+        try:
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] ↺ 동영상 변경 감지 → 싱크/버퍼 초기화")
+        except Exception:
+            pass
+        # _reset()을 재사용: 싱크 ON/OFF 상태 모두 처리
+        try:
+            self._reset()
+        except Exception as e:
+            try:
+                self._log_lines.append(
+                    f"[{_t.strftime('%H:%M:%S')}] ❌ 동영상 변경 초기화 오류: {e}")
+            except Exception:
+                pass
 
     def _toggle_gear_menu(self):
         if self._gear_menu_open: self._close_gear_menu()
@@ -499,13 +538,21 @@ def _strip_series_name(name: str) -> str:
     예: '디지몬 어드벤처 1화' → '디지몬 어드벤처'
         'Attack on Titan S01E03' → 'attack on titan'
         '[SubGroup] One Piece - 1050' → 'one piece'
+        'Dekiru Neko - 04 (1280x720 x264 AAC)' → 'dekiru neko'
+        'One Piece [720p BluRay x264] - 1050' → 'one piece'
     """
     name = os.path.splitext(name)[0]
+    # 앞쪽 [자막그룹] 제거
     name = re.sub(r'^[\[\(][^\]\)]{1,30}[\]\)]\s*', '', name)
-    name = re.sub(r'[\[\(](?:1080|720|480|2160|4K|BluRay|WEB|HDTV|HEVC|x264|x265|AAC|AC3)[^\]\)]*[\]\)]', '', name, flags=re.IGNORECASE)
+    # () [] 안의 코덱·해상도 정보 제거 (순서 중요: 화수 제거 전에 먼저)
+    name = re.sub(r'\s*\([^)]*\)', '', name)
+    name = re.sub(r'\s*\[[^\]]*\]', '', name)
+    # S01E03, Ep.12 형식 에피소드 번호 제거
     name = re.sub(r'\bS\d{1,2}E\d{1,3}\b', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\b[Ee]p(?:isode)?[.\s]*\d+\b', '', name, flags=re.IGNORECASE)
+    # 한국어 화수 (1화, 2편 등) 제거
     name = re.sub(r'제?\d+\s*[화편부회장권화]', '', name)
+    # 숫자만 있는 화수 제거
     name = re.sub(r'(?<![\w가-힣])[-_\s]*\d{1,4}(?![\w가-힣])', '', name)
     name = re.sub(r'[\s_\-\.]+', ' ', name).strip()
     return name.lower()

@@ -57,7 +57,21 @@ VK_OEM_COMMA  = 0xBC  # ',' key  (Shift+, = '<')
 VK_OEM_2      = 0xBF  # '/' key
 
 def queue_put(q, item):
-    """멀티프로세싱 큐에 안전하게 데이터를 넣는다."""
+    """큐 또는 Pipe Connection에 안전하게 데이터를 넣는다.
+    - mp.Queue / queue.Queue : put_nowait() 사용, Full이면 오래된 항목 제거 후 재시도
+    - multiprocessing.Connection (Pipe writer) : send() 사용
+      Pipe는 maxsize 개념이 없으므로 OS 커널 버퍼가 찰 때만 블로킹됨.
+      BrokenPipeError / EOFError 는 상대방 종료를 의미하므로 조용히 무시.
+    """
+    # Pipe Connection 판별: send 있고 put_nowait 없음
+    if hasattr(q, 'send') and not hasattr(q, 'put_nowait'):
+        try:
+            q.send(item)
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        except Exception:
+            pass
+        return
     try:
         q.put_nowait(item)
     except queue.Full:

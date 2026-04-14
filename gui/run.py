@@ -117,6 +117,17 @@ class LipSyncGUIRun:
     def _toggle(self):
         if not self._running:
             self._stop_oped_monitor()   # 싱크 시작 전 모니터 중지 (중복 방지)
+            # ── [버그2 수정] on->off->on 시 잔류 커맨드/상태 제거 ──────────
+            # stop_flag는 _start_processes에서 clear()하지만, cmd_queue에
+            # 이전 "stop" 커맨드가 남아 있으면 T3가 즉시 종료돼 싱크가 시작 안됨.
+            try:
+                while True: self.cmd_queue.get_nowait()
+            except Exception:
+                pass
+            try:
+                while True: self.state_queue.get_nowait()
+            except Exception:
+                pass
             hwnd = find_potplayer_hwnd()
             if not hwnd:
                 self._start_btn.config(text="⏳ 대기 중...",
@@ -466,16 +477,28 @@ class LipSyncGUIRun:
             except Exception:
                 pass
             self._log_seen_count = 0
-            # ── GUI 측 큐/버퍼도 즉시 드레인 (mem_utils 사용) ────────────────
-            # _lip_queue(mp.Queue)는 재사용이므로 close() 하지 않고 드레인만 수행
+            # ── [버그4 수정] 초기화 시 메모리·캐시·버퍼·파이프 버퍼 완전 비우기 ─
             _qs = [q for q in (
                 getattr(self, '_lip_queue', None),
                 getattr(self, '_audio_queue', None),
                 getattr(self, '_main_log_queue', None),
             ) if q is not None]
             full_cleanup(queues=_qs)
+            # log_lines 버퍼 비우기
+            if hasattr(self, '_log_lines'):
+                self._log_lines.clear()
+            self._log_popup_rendered  = 0
+            self._log_popup_last_line = None
+            # UI 초기화
+            self._offset_lbl.config(text="— ms", fg=self.ACCENT)
+            self._corr_lbl.config(text="+0 ms")
+            self._lip_cnt.config(text="0")
+            self._aud_cnt.config(text="0")
+            self._bar.place(x=0, y=0, width=0, height=4)
+            self._badge.config(text="  대기 중  ", fg=self.TEXT, bg=self.BG3)
             return
-        # 싱크 OFF: oped 모니터에 oped_reset 전송 + 팟플레이어 직접 초기화
+        # ── [버그4 수정] 싱크 OFF에서도 버퍼 완전 초기화 ────────────────────
+        # oped 모니터에 oped_reset 전송 + 모든 큐/버퍼 비우기
         if getattr(self, "_oped_monitor_running", False):
             try:
                 self._om_cmd_queue.put_nowait("oped_reset")
@@ -486,22 +509,35 @@ class LipSyncGUIRun:
                     self._om_state_queue.get_nowait()
             except Exception:
                 pass
-            # oped 모니터 큐: 모두 queue.Queue → 드레인만
             _om_qs = [q for q in (
                 getattr(self, '_om_lip_queue', None),
                 getattr(self, '_om_audio_queue', None),
                 getattr(self, '_om_log_queue', None),
             ) if q is not None]
             full_cleanup(queues=_om_qs)
+
+        # log_lines 버퍼 및 UI 초기화 (싱크 OFF에서도)
+        if hasattr(self, '_log_lines'):
+            self._log_lines.clear()
+        self._log_popup_rendered  = 0
+        self._log_popup_last_line = None
+        self._om_log_seen_count   = 0
+        self._offset_lbl.config(text="— ms", fg=self.ACCENT)
+        self._corr_lbl.config(text="+0 ms")
+        self._lip_cnt.config(text="0")
+        self._aud_cnt.config(text="0")
+        self._bar.place(x=0, y=0, width=0, height=4)
+        self._badge.config(text="  대기 중  ", fg=self.TEXT, bg=self.BG3)
+
         hwnd = find_potplayer_hwnd()
         if not hwnd:
-            self._proc_lbl.config(text="초기화 실패: 팟플레이어 미감지", fg=self.ACCENT2)
+            # [버그4 수정] 팟플레이어 없어도 버퍼 클리어는 이미 완료됨
+            self._proc_lbl.config(text="버퍼 초기화 완료 (팟플레이어 미감지)", fg=self.ACCENT3)
             return
         try:
             post_key_to_potplayer(hwnd, VK_OEM_2, shift=True)
             time.sleep(0.05)
             post_key_to_potplayer(hwnd, 0x6F, shift=True)
-            self._corr_lbl.config(text="+0 ms")
             self._proc_lbl.config(text="수동 초기화 완료", fg=self.ACCENT3)
         except Exception:
             self._proc_lbl.config(text="초기화 실패", fg=self.ACCENT2)

@@ -440,9 +440,9 @@ class LipSyncGUIRun:
                 pass
             self._log_seen_count = 0
             # ── [버그5 수정] GUI 측 큐/버퍼도 즉시 드레인 + GC  [A + C]
+            # _lip_queue_r(Pipe recv)는 drain 제외 — T3가 읽어야 하는 채널
             full_cleanup(
-                queues=(getattr(self, '_lip_queue_r', None),
-                        getattr(self, '_audio_queue', None),
+                queues=(getattr(self, '_audio_queue', None),
                         getattr(self, '_main_log_queue', None)),
             )
             return

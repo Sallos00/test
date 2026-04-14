@@ -607,7 +607,8 @@ def proc_analyzer(lip_queue, audio_queue,
             add_log("🔄 쿨다운 종료 → 버퍼 수집 재개")
 
         if aud_n < 10 or (lip_n < 10 and not has_prompt):
-            _idle_gc_if_due("데이터 수집 대기")
+            # 버퍼가 비어있는 건 싱크 초기 정상 상태 — _idle_gc_if_due 호출 안 함
+            # (정리 타이머가 울려 lpb/aub를 비우면 수집이 더 느려짐)
             push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
                        lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))

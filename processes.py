@@ -385,11 +385,12 @@ def proc_analyzer(lip_queue, audio_queue,
     def _flush_and_gc(label: str):
         """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC  [A + B + C]
         녹화 중(_is_recording=True)에는 실행하지 않는다.
+        lip_queue는 Pipe 수신 끝 — drain하면 T3가 읽을 데이터를 소비하므로 제외.
         """
         if _is_recording:
             return
         full_cleanup(
-            queues=(lip_queue, audio_queue),
+            queues=(audio_queue,),
             bufs=(offset_buf, lpb, aub),
         )
         add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
@@ -407,7 +408,7 @@ def proc_analyzer(lip_queue, audio_queue,
         if _now - _last_idle_gc_t < _IDLE_GC_INTERVAL:
             return
         full_cleanup(
-            queues=(lip_queue, audio_queue),
+            queues=(audio_queue,),
             bufs=(offset_buf, lpb, aub),
         )
         _last_idle_gc_t = _now
@@ -487,15 +488,16 @@ def proc_analyzer(lip_queue, audio_queue,
         if not pot_ok:
             if not _is_recording:
                 if lpb or aub:
+                    # lip_queue(Pipe recv)는 drain 제외 — T3 데이터 소비 방지
                     full_cleanup(
-                        queues=(lip_queue, audio_queue),
+                        queues=(audio_queue,),
                         bufs=(lpb, aub),
                     )
                     _last_idle_gc_t = time.perf_counter()
                 else:
                     _now = time.perf_counter()
                     if _now - _last_idle_gc_t >= _IDLE_GC_INTERVAL:
-                        flush_queues(lip_queue, audio_queue)
+                        flush_queues(audio_queue)           # lip_queue 제외
                         run_gc()
                         _last_idle_gc_t = _now
                         add_log("🧹 [대기 중 - 팟플레이어 미감지] 주기적 메모리 정리 완료")

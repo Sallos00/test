@@ -38,11 +38,14 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
 
     QSIZE       = CFG["QUEUE_MAXSIZE"]
-    # P1(프로세스)↔메인 간 큐는 multiprocessing.Queue 유지
-    # lip_queue는 32MB 파이프 버퍼가 page-in되는 원인 → maxsize 50으로 제한
-    # (ANALYSIS_INTERVAL=3초, 15fps → 최대 45샘플이면 충분)
-    # P2·P3는 스레드로 전환 → queue.Queue 사용 (직렬화 오버헤드 없음)
-    lip_queue   = mp.Queue(maxsize=50)            # P1(프로세스) → P3(스레드)
+    # P1(프로세스)↔T3(스레드) 간 lip_queue: Pipe(단방향)로 교체
+    #   - mp.Queue는 생성 시 OS 파이프 버퍼 ~32MB를 사전 할당.
+    #   - Pipe는 실제 전송 데이터만큼만 버퍼를 사용 → 메모리 절감.
+    #   - 초기값은 더미(재시작 시 _start_processes에서 항상 새로 생성).
+    _lip_r, _lip_w = mp.Pipe(duplex=False)
+    lip_queue   = _lip_r          # reader: T3(proc_analyzer)
+    # _lip_w(writer)는 _start_processes에서 P1에 전달 후 부모에서 close됨.
+    # 여기서는 참조만 유지해 GC 방지; 실제 close는 _start_processes 담당.
     audio_queue = queue.Queue(maxsize=QSIZE)     # P2(스레드)   → P3(스레드)
     state_queue = queue.Queue(maxsize=20)        # P3(스레드)   → GUI
     cmd_queue   = queue.Queue(maxsize=10)        # GUI          → P3(스레드)

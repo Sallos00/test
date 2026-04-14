@@ -88,18 +88,6 @@ class LipSyncGUILogic:
                 if fname_noext == title or fname == title:
                     exact_match = os.path.join(dirpath, fname)
                     break
-                # 1.5순위: 코덱·해상도 괄호/대괄호 제거 후 일치
-                # (예: "제목 (1280x720 x264 AAC)" / "제목 [1080p AAC]" vs "제목")
-                _CODEC_RE = re.compile(
-                    r'(?:\s*\([^)]*(?:\d{3,4}[xX\u00d7]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^)]*\)'
-                    r'|\s*\[[^\]]*(?:\d{3,4}[xX\u00d7]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^\]]*\])',
-                    re.IGNORECASE
-                )
-                fname_stripped = _CODEC_RE.sub('', fname_noext).strip()
-                title_stripped = _CODEC_RE.sub('', title).strip()
-                if fname_stripped == title or fname_stripped == title_stripped:
-                    exact_match = os.path.join(dirpath, fname)
-                    break
                 # 2순위: 같은 시리즈 + 화수 일치
                 if _strip_episode_number(fname) == base and ep_num is not None:
                     # fname 안에서 같은 위치의 숫자가 ep_num과 일치하는지 확인
@@ -236,22 +224,11 @@ class LipSyncGUILogic:
             cached = cache[i]
 
             display_title = _os.path.splitext(title)[0]
-            # 제목 줄바꿈: " - " 기준 분리 후 각 파트도 30자 초과 시 공백 기준 재분리
-            _WRAP = 30
-
-            def _wrap_line(s, limit=_WRAP):
-                if len(s) <= limit:
-                    return s
-                cut = s.rfind(" ", 0, limit + 1)
-                if cut == -1:
-                    cut = limit
-                return s[:cut] + "\n" + _wrap_line(s[cut:].lstrip(), limit)
-
             if " - " in display_title:
                 first, rest = display_title.split(" - ", 1)
-                display_text = _wrap_line(first) + "\n- " + _wrap_line(rest)
+                display_text = first + "\n- " + rest
             else:
-                display_text = _wrap_line(display_title)
+                display_text = display_title
 
             cached["title_lbl"].config(text=display_text)
             cached["ts_lbl"].config(text=ts if ts else "")
@@ -310,15 +287,8 @@ class LipSyncGUILogic:
         if not title or not title.strip():
             return
 
-        # 다섯 번째 개선: 화질·코덱 정보가 포함된 괄호/대괄호만 제거
-        # (예: "(1280x720 x264 AAC)", "[1080p HEVC AAC]" → 삭제)
-        # 일반 괄호·대괄호(부제목, 배포그룹 등)는 유지해 파일명 매칭이 깨지지 않도록 함
-        _CODEC_PAT = re.compile(
-            r'(?:\s*\([^)]*(?:\d{3,4}[xX\u00d7]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^)]*\)'
-            r'|\s*\[[^\]]*(?:\d{3,4}[xX\u00d7]\d{3,4}|(?:1080|720|480|2160|4K|BluRay|WEB|HEVC|x264|x265|AAC|AC3|FLAC|H\.?264|H\.?265))[^\]]*\])',
-            re.IGNORECASE
-        )
-        title = _CODEC_PAT.sub('', title).strip()
+        # 다섯 번째 개선: 괄호 안 내용 제거 (예: "(AniTv 1080p x264 AAC)" 삭제)
+        title = re.sub(r'\s*\([^)]*\)', '', title).strip()
 
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
@@ -529,64 +499,14 @@ def _strip_series_name(name: str) -> str:
     예: '디지몬 어드벤처 1화' → '디지몬 어드벤처'
         'Attack on Titan S01E03' → 'attack on titan'
         '[SubGroup] One Piece - 1050' → 'one piece'
-        '원피스 013화 - 공포의 고양이형제' → '원피스'
-        '소드 아트 온라인 - 앨리시제이션 1화' → '소드 아트 온라인 - 앨리시제이션'
-
-    핵심 원칙:
-      " - 부제목" 제거는 화수 패턴이 확인된 경우에만 수행한다.
-      화수 없이 " - "만 있는 제목(시리즈명 자체에 " - "가 포함된 경우)은
-      건드리지 않아 시리즈명이 잘리지 않도록 한다.
     """
     name = os.path.splitext(name)[0]
-    # 앞쪽 배포그룹 태그 제거: [SubGroup], (SubGroup)
     name = re.sub(r'^[\[\(][^\]\)]{1,30}[\]\)]\s*', '', name)
-    # 화질·코덱 태그 제거: [1080p], (x264) 등
     name = re.sub(r'[\[\(](?:1080|720|480|2160|4K|BluRay|WEB|HDTV|HEVC|x264|x265|AAC|AC3)[^\]\)]*[\]\)]', '', name, flags=re.IGNORECASE)
-
-    # ── 화수 패턴 감지 ────────────────────────────────────────────────────────
-    # 아래 패턴 중 하나라도 발견되면 has_episode_marker = True
-    _EP_PATTERNS = [
-        r'제?\d+\s*[화편부회장권기]',              # 13화, 제13화, 13편, 13기 등
-        r'\d+\s*시즌',                             # 1시즌, 2시즌
-        r'\b[Ss]eason\s*\d+\b',                   # Season 1, Season2
-        r'\bS\d{1,2}E\d{1,3}\b',                  # S01E13
-        r'\b[Ee]p(?:isode)?[.\s]*\d+\b',          # ep13, Episode 13
-        r'(?<![가-힣\w])\d{1,4}(?![가-힣\w])',    # 순수 숫자 (경계 확인)
-    ]
-    has_episode_marker = any(re.search(p, name, re.IGNORECASE) for p in _EP_PATTERNS)
-
-    # ── 화수 패턴이 있을 때만 " - 부제목" 제거 ───────────────────────────────
-    # 예: "원피스 013화 - 공포의 고양이형제"
-    #   → 화수(013화) 감지 → " - 공포의 고양이형제" 제거 → "원피스 013화"
-    # 반례: "소드 아트 온라인 - 앨리시제이션 1화"
-    #   → 화수(1화) 감지되지만 " - " 앞에 화수가 없음
-    #     → 화수 앞의 " - 부제목" 부분만 골라 제거해야 하므로
-    #       아래에서 화수 제거 후 남는 " - ..." 토큰을 정리함
-    #
-    # 전략: " - " 뒤가 순수 부제목인지 시리즈명의 일부인지를
-    #   "화수 토큰이 ' - ' 앞에 위치하는가"로 판단한다.
-    #   즉, <시리즈명> <화수> - <부제목> 구조일 때만 " - 부제목"을 제거.
-    if has_episode_marker:
-        # 화수 토큰 바로 뒤에 오는 " - 부제목" 패턴만 제거
-        # 화수 후방에 " - 텍스트" 가 붙은 경우를 포착
-        name = re.sub(
-            r'(제?\d+\s*[화편부회장권기]|\d+\s*시즌|[Ss]eason\s*\d+|[Ss]\d{1,2}[Ee]\d{1,3}|[Ee]p(?:isode)?[.\s]*\d+)'
-            r'\s*[-–—]\s*.+$',
-            r'\1',   # 화수 토큰 자체는 남기고 부제목만 제거 (화수는 아래서 다시 지움)
-            name
-        )
-        # 순수 숫자 에피소드 (예: "One Piece - 1050") 처리:
-        # "시리즈명 - 숫자" 구조에서 " - 숫자" 제거
-        name = re.sub(r'\s*[-–—]\s*\d{1,4}\s*$', '', name)
-
-    # 화수·시즌 패턴 제거
     name = re.sub(r'\bS\d{1,2}E\d{1,3}\b', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\b[Ee]p(?:isode)?[.\s]*\d+\b', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'\b[Ss]eason\s*\d+\b', '', name)      # Season 1, Season2
-    name = re.sub(r'제?\d+\s*[화편부회장권화기]', '', name)  # 13화, 1기 등
-    name = re.sub(r'\d+\s*시즌', '', name)                 # 1시즌, 2시즌
+    name = re.sub(r'제?\d+\s*[화편부회장권화]', '', name)
     name = re.sub(r'(?<![\w가-힣])[-_\s]*\d{1,4}(?![\w가-힣])', '', name)
-
     name = re.sub(r'[\s_\-\.]+', ' ', name).strip()
     return name.lower()
 

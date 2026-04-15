@@ -236,11 +236,32 @@ class LipSyncGUILogic:
             cached = cache[i]
 
             display_title = _os.path.splitext(title)[0]
+
+            # ── [버그1 수정] 스마트 줄바꿈 ────────────────────────────────────
+            # ' - ' 기준으로 분리 후, 앞/뒤 파트가 30자 초과이면
+            # 해당 파트 내에서 띄어쓰기를 찾아 추가 줄바꿈 적용.
+            MAX_LINE = 30
+
+            def _smart_wrap(text: str) -> str:
+                """한 줄이 MAX_LINE 초과이면 직전 공백에서 줄바꿈."""
+                if len(text) <= MAX_LINE:
+                    return text
+                lines = []
+                while len(text) > MAX_LINE:
+                    cut = text.rfind(' ', 0, MAX_LINE)
+                    if cut <= 0:          # 공백이 없으면 MAX_LINE 위치에서 강제 분리
+                        cut = MAX_LINE
+                    lines.append(text[:cut])
+                    text = text[cut:].lstrip(' ')
+                if text:
+                    lines.append(text)
+                return '\n'.join(lines)
+
             if " - " in display_title:
                 first, rest = display_title.split(" - ", 1)
-                display_text = first + "\n- " + rest
+                display_text = _smart_wrap(first) + "\n- " + _smart_wrap(rest)
             else:
-                display_text = display_title
+                display_text = _smart_wrap(display_title)
 
             cached["title_lbl"].config(text=display_text)
             cached["ts_lbl"].config(text=ts if ts else "")

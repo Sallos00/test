@@ -236,6 +236,11 @@ class LipSyncGUILogic:
             cached = cache[i]
 
             display_title = _os.path.splitext(title)[0]
+            # ── [버그1 수정] 표시 전에도 () [] 코덱 정보 제거 ───────────────
+            # record_video_history에서 이미 제거하지만, 구버전 기록이나 예외 경로로
+            # 괄호가 포함된 채 저장된 기록도 올바르게 표시하기 위해 방어적으로 적용.
+            display_title = re.sub(r'\s*\([^)]*\)', '', display_title).strip()
+            display_title = re.sub(r'\s*\[[^\]]*\]', '', display_title).strip()
 
             # ── [버그1 수정] 스마트 줄바꿈 ────────────────────────────────────
             # ' - ' 기준으로 분리 후, 앞/뒤 파트가 30자 초과이면
@@ -555,12 +560,13 @@ class LipSyncGUILogic:
 
 
 def _strip_series_name(name: str) -> str:
-    """파일명/제목에서 화수 정보만 제거해 시리즈명을 추출.
+    """파일명/제목에서 화수·부제목 정보를 모두 제거해 시리즈명을 추출.
     예: '디지몬 어드벤처 1화' → '디지몬 어드벤처'
         'Attack on Titan S01E03' → 'attack on titan'
         '[SubGroup] One Piece - 1050' → 'one piece'
         'Dekiru Neko - 04 (1280x720 x264 AAC)' → 'dekiru neko'
         'One Piece [720p BluRay x264] - 1050' → 'one piece'
+        '원피스 019화 - 조로와 퀴나의 약속' → '원피스'   ← [버그2 수정]
     """
     name = os.path.splitext(name)[0]
     # 앞쪽 [자막그룹] 제거
@@ -568,6 +574,12 @@ def _strip_series_name(name: str) -> str:
     # () [] 안의 코덱·해상도 정보 제거 (순서 중요: 화수 제거 전에 먼저)
     name = re.sub(r'\s*\([^)]*\)', '', name)
     name = re.sub(r'\s*\[[^\]]*\]', '', name)
+    # ── [버그2 수정] 에피소드 부제 제거 ──────────────────────────────────────
+    # '원피스 019화 - 조로와 퀴나의 약속' 처럼 ' - 부제목' 형태가 붙으면
+    # 에피소드마다 부제목이 달라서 _strip_series_name 결과가 달라지고,
+    # 동일 시리즈임에도 덮어쓰기가 일어나지 않는 문제가 발생함.
+    # ' - ' 이후를 모두 제거해 순수 시리즈명+화수만 남김.
+    name = re.sub(r'\s*-\s*.+$', '', name)
     # S01E03, Ep.12 형식 에피소드 번호 제거
     name = re.sub(r'\bS\d{1,2}E\d{1,3}\b', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\b[Ee]p(?:isode)?[.\s]*\d+\b', '', name, flags=re.IGNORECASE)

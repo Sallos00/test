@@ -484,9 +484,7 @@ class LipSyncGUIRun:
                 getattr(self, '_main_log_queue', None),
             ) if q is not None]
             full_cleanup(queues=_qs)
-            # log_lines 버퍼 비우기
-            if hasattr(self, '_log_lines'):
-                self._log_lines.clear()
+            # [버그2 수정] log_lines는 지우지 않음 - 로그 기록은 유지
             self._log_popup_rendered  = 0
             self._log_popup_last_line = None
             # UI 초기화
@@ -516,9 +514,7 @@ class LipSyncGUIRun:
             ) if q is not None]
             full_cleanup(queues=_om_qs)
 
-        # log_lines 버퍼 및 UI 초기화 (싱크 OFF에서도)
-        if hasattr(self, '_log_lines'):
-            self._log_lines.clear()
+        # [버그2 수정] log_lines는 지우지 않음 - 로그 기록은 유지
         self._log_popup_rendered  = 0
         self._log_popup_last_line = None
         self._om_log_seen_count   = 0

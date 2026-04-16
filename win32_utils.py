@@ -62,6 +62,10 @@ def queue_put(q, item):
     - multiprocessing.Connection (Pipe writer) : send() 사용
       Pipe는 maxsize 개념이 없으므로 OS 커널 버퍼가 찰 때만 블로킹됨.
       BrokenPipeError / EOFError 는 상대방 종료를 의미하므로 조용히 무시.
+
+    [메모리 누수 방지] Queue가 가득 찬 경우 새 데이터를 버리지 않고
+    가장 오래된 데이터를 제거(get_nowait)한 뒤 새 데이터를 삽입한다.
+    모든 연산은 non-blocking(put_nowait / get_nowait)으로 처리한다.
     """
     # Pipe Connection 판별: send 있고 put_nowait 없음
     if hasattr(q, 'send') and not hasattr(q, 'put_nowait'):
@@ -72,13 +76,21 @@ def queue_put(q, item):
         except Exception:
             pass
         return
-    try:
-        q.put_nowait(item)
-    except queue.Full:
-        try: q.get_nowait()
-        except: pass
-        try: q.put_nowait(item)
-        except: pass
+
+    # [수정] Queue Full 시 오래된 항목을 모두 제거하고 새 데이터를 삽입한다.
+    # 단순히 1개만 꺼내는 것이 아니라, put_nowait가 성공할 때까지 반복 제거하여
+    # 경쟁 조건(race condition)에서도 안전하게 동작하도록 한다.
+    while True:
+        try:
+            q.put_nowait(item)  # non-blocking 삽입 시도
+            break               # 성공하면 종료
+        except queue.Full:
+            try:
+                q.get_nowait()  # 가장 오래된 항목 제거 (non-blocking)
+            except Exception:
+                break           # get도 실패하면 더 이상 시도하지 않음
+        except Exception:
+            break               # 예상치 못한 예외는 조용히 무시
 
 _hwnd_cache = [0, 0.0]   # [hwnd, last_check_time]
 

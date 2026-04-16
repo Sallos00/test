@@ -43,10 +43,12 @@ class LipSyncGUIRun:
             # _om_lip_queue: oped 모니터에서는 실제로 데이터를 넣지 않는 더미 큐.
             # 기존 mp.Queue(maxsize=qsize)는 OS 파이프 버퍼 ~32MB를 사전 할당함.
             # queue.Queue로 교체 → 파이프 버퍼 낭비 없음, 직렬화 오버헤드 없음.
-            self._om_lip_queue   = _queue.Queue(maxsize=qsize)  # 더미 — proc_analyzer 시그니처 호환
-            self._om_audio_queue = _queue.Queue(maxsize=qsize)
+            # [수정] maxsize를 요구사항에 맞게 명시적으로 고정
+            # lip_queue=20, audio_queue=30, state_queue=10 으로 제한하여 메모리 누적 방지
+            self._om_lip_queue   = _queue.Queue(maxsize=20)   # 더미 — proc_analyzer 시그니처 호환
+            self._om_audio_queue = _queue.Queue(maxsize=30)   # 오디오 샘플 누적 방지
             self._om_log_queue   = _queue.Queue(maxsize=200)
-            self._om_state_queue = _queue.Queue(maxsize=20)
+            self._om_state_queue = _queue.Queue(maxsize=10)   # 상태 메시지 누적 방지
             self._om_cmd_queue   = _queue.Queue(maxsize=10)
             self._om_stop_flag   = threading.Event()
 
@@ -376,7 +378,10 @@ class LipSyncGUIRun:
         _lip_r, _lip_w = _mp.Pipe(duplex=False)
         self._lip_queue        = _lip_r   # T3(proc_analyzer)가 읽는 쪽
         self._lip_queue_writer = _lip_w   # P1(proc_lip_capture)이 쓰는 쪽
-        self._audio_queue = _queue.Queue(maxsize=runtime_cfg.get("QUEUE_MAXSIZE", 200))
+        # [수정] audio_queue maxsize를 30으로 고정
+        # 기존 runtime_cfg["QUEUE_MAXSIZE"](기본 200)는 과도하게 크므로
+        # 메모리 누수를 유발한다. 30으로 제한하여 누적 방지.
+        self._audio_queue = _queue.Queue(maxsize=30)
 
         from processes import proc_lip_capture, proc_audio_capture, proc_analyzer  # lazy import
 

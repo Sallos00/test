@@ -237,10 +237,21 @@ def proc_analyzer(lip_queue, audio_queue,
         """lip_queue(Pipe Connection 또는 mp.Queue)와 audio_queue(queue.Queue)를
         드레인해 lpb / aub 버퍼에 적재한다.
         lip_queue가 Pipe Connection이면 poll()+recv(), 아니면 get_nowait() 사용.
+
+        [수정] 한 번의 drain_queues() 호출에서 처리하는 항목 수를 제한한다.
+        큐 전체를 한 번에 소비하면 대량 적체 시 lpb/aub가 순간적으로 폭증하여
+        메모리가 급격히 증가한다. 루프당 최대 처리 개수를 제한해 이를 방지한다.
         """
+        # [수정] 루프 1회당 최대 처리 개수 상한
+        # lip_queue: 영상 FPS 기준(30fps × 약 0.3초 여유) → 최대 10개
+        # audio_queue: 오디오 패킷 밀도 고려 → 최대 10개
+        _LIP_DRAIN_LIMIT   = 10
+        _AUDIO_DRAIN_LIMIT = 10
+
         # ── lip_queue 드레인 ──────────────────────────────────────────────────
         _lip_is_pipe = hasattr(lip_queue, 'poll') and not hasattr(lip_queue, 'get_nowait')
-        while True:
+        _lip_count = 0  # [수정] 처리 개수 카운터
+        while _lip_count < _LIP_DRAIN_LIMIT:  # [수정] 상한 초과 시 중단
             try:
                 if _lip_is_pipe:
                     if not lip_queue.poll():
@@ -255,6 +266,7 @@ def proc_analyzer(lip_queue, audio_queue,
                     add_log(f"👁 {item[1]}")
                 else:
                     lpb.append(item)
+                _lip_count += 1  # [수정] 성공 처리 시에만 카운트
             except (EOFError, OSError):
                 # Pipe writer 쪽이 닫혔음 — P1 종료 신호, 조용히 종료
                 break
@@ -262,13 +274,15 @@ def proc_analyzer(lip_queue, audio_queue,
                 break
 
         # ── audio_queue 드레인 ───────────────────────────────────────────────
-        while True:
+        _aud_count = 0  # [수정] 처리 개수 카운터
+        while _aud_count < _AUDIO_DRAIN_LIMIT:  # [수정] 상한 초과 시 중단
             try:
                 item = audio_queue.get_nowait()
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
                     add_log(f"🔊 {item[1]}")
                 else:
                     aub.append(item)
+                _aud_count += 1  # [수정] 성공 처리 시에만 카운트
             except Exception:
                 break
 

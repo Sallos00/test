@@ -228,6 +228,7 @@ def _abs_frame_scheduler(fps, running_flag, capture_fn, write_frame_cb):
             bgr, frame_qpc = capture_fn()
             if bgr is not None:
                 write_frame_cb(bgr, frame_qpc)
+                del bgr  # 인코딩 완료 후 즉시 해제 (루프 재진입 전까지 메모리 점유 방지)
         except Exception as e:
             _log(f"캡처 오류: {e}")
 
@@ -265,6 +266,7 @@ def _mss_capture_loop(width, height, fps, running_flag, write_frame_cb):
         arr = _printwindow_capture(target, gdi32, user32, cw, ch)
         frame_qpc = qpc_now()
         bgr = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+        del arr  # BGRA 원본 즉시 해제 (약 8MB/프레임, 30fps 반복)
         if (cw, ch) != (width, height):
             bgr = _cv2.resize(bgr, (width, height))
         return bgr, frame_qpc
@@ -308,8 +310,13 @@ def _wgc_capture_hwnd(hwnd, width, height, fps, running_flag, write_frame_cb):
     def _on_frame(sender, _):
         f = sender.try_get_next_frame()
         if f is not None:
+            # 이전 프레임이 아직 처리되지 않았다면 교체 전 해제
+            old = last_frame[0]
             last_frame[0] = f
             frame_ready.set()
+            if old is not None:
+                try: old.close()
+                except Exception: pass
     pool.frame_arrived += _on_frame
 
     try:
@@ -319,6 +326,8 @@ def _wgc_capture_hwnd(hwnd, width, height, fps, running_flag, write_frame_cb):
             f = last_frame[0]
             if f is None:
                 continue
+            last_frame[0] = None  # 참조 즉시 해제 (다음 _on_frame 콜백 전까지)
+            sb = buf = ref = arr = bgr = None  # 예외 경로에서 del 안전하게
             try:
                 frame_qpc = qpc_now()
                 sb    = wgi.SoftwareBitmap.create_copy_from_surface_async(f.surface).get()
@@ -328,11 +337,27 @@ def _wgc_capture_hwnd(hwnd, width, height, fps, running_flag, write_frame_cb):
                 fh, fw = plane.height, plane.width
                 arr   = np.frombuffer(bytes(ref), dtype=np.uint8).reshape(fh, fw, 4)
                 bgr   = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+                del arr  # BGRA 원본 즉시 해제
                 if (fw, fh) != (width, height):
                     bgr = _cv2.resize(bgr, (width, height))
                 write_frame_cb(bgr, frame_qpc)
+                del bgr  # 인코딩 완료 후 BGR 해제
             except Exception as e:
                 _log(f"WGC 프레임 오류: {e}")
+            finally:
+                # WinRT 참조 카운트 명시적 해제 (Python GC 의존 불가)
+                if ref is not None:
+                    try: del ref
+                    except Exception: pass
+                if buf is not None:
+                    try: del buf
+                    except Exception: pass
+                if sb is not None:
+                    try: del sb
+                    except Exception: pass
+                # 처리 완료된 WGC 프레임 해제
+                try: f.close()
+                except Exception: pass
     finally:
         try: session.close()
         except: pass
@@ -356,6 +381,7 @@ def _printwindow_loop(hwnd, width, height, fps, running_flag, write_frame_cb):
         arr = _printwindow_capture(hwnd, gdi32, user32, cw, ch)
         frame_qpc = qpc_now()
         bgr = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+        del arr  # BGRA 원본 즉시 해제
         if (cw, ch) != (width, height):
             bgr = _cv2.resize(bgr, (width, height))
         return bgr, frame_qpc
@@ -412,11 +438,13 @@ def _retiming_audio(chunks, sr: int, ch: int):
         raw = np.concatenate([a for _, a in wchunks]).astype(np.float32)
         if qpc_elapsed < 0.5:
             _place_corrected(raw, w_start)
+            del raw  # out_parts가 소유 → 로컬 참조 해제
             return
         clock_ratio = (total_frames / (qpc_elapsed * sr)) if qpc_elapsed > 0 else 1.0
         drift_ppm = abs(clock_ratio - 1.0) * 1e6
         if drift_ppm < 20.0:
             _place_corrected(raw, w_start)
+            del raw  # out_parts가 소유 → 로컬 참조 해제
             return
         _log(f"[ASRC] 드리프트 {drift_ppm:.1f}ppm (ratio={clock_ratio:.8f}) → 리샘플링")
         if _HAS_SCIPY:
@@ -429,6 +457,7 @@ def _retiming_audio(chunks, sr: int, ch: int):
                     corrected = np.stack(
                         [resample_poly(r2d[:, c], up, down) for c in range(ch)],
                         axis=1).reshape(-1).astype(np.float32)
+                    del r2d
                 else:
                     corrected = resample_poly(raw, up, down).astype(np.float32)
             except Exception as e:
@@ -441,23 +470,32 @@ def _retiming_audio(chunks, sr: int, ch: int):
                 corrected = np.stack(
                     [np.interp(idx, np.arange(len(r2d)), r2d[:, c])
                      for c in range(ch)], axis=1).reshape(-1).astype(np.float32)
+                del r2d, idx
             else:
                 idx = np.linspace(0, len(raw) - 1, target_frames)
                 corrected = np.interp(idx, np.arange(len(raw)), raw).astype(np.float32)
+                del idx
+        # corrected가 raw와 다른 객체인 경우에만 raw 해제 (fallback 시 corrected=raw)
+        if corrected is not raw:
+            del raw
         _place_corrected(corrected, w_start)
+        del corrected  # out_parts가 소유 → 로컬 참조 해제
 
     for qpc_sec, arr in chunks:
         window_chunks.append((qpc_sec, arr))
         if qpc_sec - window_start >= WINDOW_SEC:
             _flush_window(window_chunks, window_start)
-            window_chunks = []
+            window_chunks.clear()  # 처리 완료된 윈도우 참조 즉시 해제
             window_start  = qpc_sec
     if window_chunks:
         _flush_window(window_chunks, window_start)
+        window_chunks.clear()
 
     if not out_parts:
         return np.zeros(0, dtype=np.float32), start_qpc
-    return np.concatenate(out_parts).astype(np.float32), start_qpc
+    result = np.concatenate(out_parts).astype(np.float32)
+    out_parts.clear()  # concatenate 완료 후 서브 배열 참조 해제 (이중 보유 방지)
+    return result, start_qpc
 
 # 오디오 캡처
 class _AudioRecorder:
@@ -733,6 +771,7 @@ def _merge_audio(tmp_video: str, audio_arr, audio_sr: int,
                b"data" + struct.pack("<I", data_size))
     with open(tmp_audio, "wb") as wf:
         wf.write(wav_hdr + pcm.tobytes())
+    del pcm, audio_data  # WAV 파일 작성 완료 → int16/float32 배열 즉시 해제
 
     _offset = round(audio_offset_sec, 4)
     _log(f"[OBS싱크] 최종 오프셋 보정: audio_offset={_offset:.4f}s")

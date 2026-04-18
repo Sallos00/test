@@ -411,8 +411,10 @@ def _retiming_audio(chunks, sr, ch):
         window_chunks.clear()
     if not out_parts:
         return np.zeros(0, dtype=np.float32), start_qpc
-    result = np.concatenate(out_parts).astype(np.float32)
-    out_parts.clear()
+    try:
+        result = np.concatenate(out_parts).astype(np.float32)
+    finally:
+        out_parts.clear()  # 예외 발생 시에도 반드시 대용량 배열 리스트 해제
     return result, start_qpc
 
 def _audio_recorder_mta(recorder):
@@ -502,12 +504,21 @@ class _AudioRecorder:
         if self._thread:
             self._thread.join(timeout=3)
             self._thread = None
-        if self._chunks:
-            arr, start_qpc = _retiming_audio(self._chunks, self._sr, self._ch)
-            self._first_audio_qpc_sec = start_qpc
-            self._chunks = []
-            run_gc()
-            return arr, self._sr, self._ch
+        # ── [버그2 수정] chunks 즉시 참조 해제 ──────────────────────────────
+        # 기존: _retiming_audio() 성공 후 self._chunks = [] → 처리 중 청크+결과가
+        #        동시 메모리 점유(2배 사용), 예외 발생 시 청크가 영구 잔류.
+        # 수정: 먼저 로컬 변수로 이동 후 self._chunks를 즉시 비움 → GC 가능 상태로 전환.
+        #        finally 블록으로 로컬 참조도 예외 발생 시 반드시 해제 보장.
+        chunks = self._chunks
+        self._chunks = []          # 멤버 변수 즉시 해제 → GC 가능 상태로 전환
+        if chunks:
+            try:
+                arr, start_qpc = _retiming_audio(chunks, self._sr, self._ch)
+                self._first_audio_qpc_sec = start_qpc
+                run_gc()
+                return arr, self._sr, self._ch
+            finally:
+                del chunks         # 예외 발생 시에도 로컬 청크 참조 반드시 해제
         return None, self._sr, self._ch
 
 class _ScreenRecorder:
@@ -626,6 +637,11 @@ class _ScreenRecorder:
             raise RuntimeError(f"녹화 파일 너무 작음({os.path.getsize(tmp)}B)")
         self._thread = None; self._ffmpeg_proc = None
         self._ffmpeg_log_fh = None; self._ffmpeg_log_path = None
+        # ── [버그2 수정] 잔류 멤버 변수 명시적 해제 ─────────────────────────
+        # stop() 반환 후에도 _ScreenRecorder 인스턴스가 살아있을 수 있으므로
+        # GC가 수거하지 못하는 참조를 명시적으로 None 처리한다.
+        self._hwnd = None          # GDI 창 핸들 참조 해제
+        self._tmp_video = None     # 임시 파일 경로 참조 해제 (tmp는 지역 변수로 반환)
         return tmp
 
 def _merge_audio(tmp_video, audio_arr, audio_sr, audio_ch, out_path, audio_offset_sec=0.0):

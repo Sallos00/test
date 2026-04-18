@@ -16,7 +16,7 @@ from audio_com import qpc_freq, qpc_now
 from log_utils import (make_add_log, STATUS_OK, STATUS_CORRECTED, STATUS_COLLECTING,
                        STATUS_NO_SIGNAL, STATUS_LOW_CONF, STATUS_COOLDOWN,
                        STATUS_UNDETECTED, STATUS_CEILING, STATUS_NO_POT, STATUS_BUFFERING)
-from mem_utils import full_cleanup, full_cleanup_and_release
+from mem_utils import full_cleanup, full_cleanup_and_release, trim_working_set
 
 def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
     """팟플레이어 화면 캡처 → 입술 개구 신호 추출 프로세스."""
@@ -428,9 +428,10 @@ def proc_analyzer(lip_queue, audio_queue,
         pending_prompt[0] = None
 
     def _flush_and_gc(label: str):
-        """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC.
+        """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC + Working Set 트림.
         녹화 중(_is_recording_active=True)이면 절대 실행하지 않는다 (조건 4).
         mem_utils.full_cleanup 을 사용해 A(드레인)+B(버퍼클리어)+C(GC) 수행.
+        GC 직후 trim_working_set()으로 RAM 페이지를 OS에 반환한다.
         큐는 재사용하므로 close()/join_thread()는 호출하지 않는다.
         """
         if _is_recording_active:
@@ -440,6 +441,7 @@ def proc_analyzer(lip_queue, audio_queue,
             queues=(lip_queue, audio_queue),
             bufs=(offset_buf, lpb, aub),
         )
+        trim_working_set()   # GC 완료 직후 — 10초 쿨다운 전 최적 타이밍
         add_log(f"🧹 [{label}] 버퍼·큐 초기화 및 메모리 정리 완료 → {SYNC_COOLDOWN_SEC:.0f}초 쿨다운 시작")
 
     # BUF_SEC 동안 대기하되 stop_flag가 세워지면 즉시 탈출

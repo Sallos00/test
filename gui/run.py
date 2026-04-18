@@ -664,7 +664,7 @@ class LipSyncGUIRun:
                     self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
                 else:
                     self._proc_dot.config(fg=self.TEXT_DIM)
-                    self._proc_lbl.config(text="대기중", fg=self.TEXT_DIM)
+                    self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
 
         latest       = None
         main_toasts  = []

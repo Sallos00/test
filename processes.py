@@ -226,11 +226,14 @@ def proc_analyzer(lip_queue, audio_queue,
         if len(vals) < 10:
             return False
         arr      = np.array(vals, dtype=np.float32)
+        del vals  # 리스트 참조 해제
         mean_rms = float(arr.mean())
         if mean_rms < MUSIC_MIN_RMS:
+            del arr
             return False
         cv   = float(arr.std() / mean_rms) if mean_rms > 1e-9 else 999.0
         fill = float((arr > mean_rms * 0.5).sum()) / len(arr)
+        del arr  # numpy 배열 즉시 해제
         return cv < MUSIC_MAX_CV and fill > MUSIC_MIN_FILL
 
     def drain_queues():
@@ -318,15 +321,19 @@ def proc_analyzer(lip_queue, audio_queue,
         t_end   = min(lip_ts[-1], aud_ts[-1])
 
         if t_end - t_start < 1.0:
+            del lip_ts, aud_ts, lip_vs, rms_vs, vad_vs, rms_diff, aud_vs
             return None, None
 
         n_samples = int((t_end - t_start) * fps)
         if n_samples < fps:
+            del lip_ts, aud_ts, lip_vs, rms_vs, vad_vs, rms_diff, aud_vs
             return None, None
 
         t_grid  = np.linspace(t_start, t_end, n_samples)
         lip_sig = np.interp(t_grid, lip_ts, lip_vs)
         aud_sig = np.interp(t_grid, aud_ts, aud_vs)
+        # 중간 배열 즉시 해제 (수 MB 규모 누적 방지)
+        del lip_ts, aud_ts, lip_vs, rms_vs, vad_vs, rms_diff, aud_vs, t_grid
         return lip_sig, aud_sig
 
     def to_binary(signal, ratio):
@@ -367,7 +374,10 @@ def proc_analyzer(lip_queue, audio_queue,
         else:
             lag = peak_idx - center
 
-        return lag / fps * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean(), confidence
+        result = (lag / fps * 1000, lip_bin.std(), aud.std(), lip.mean(), aud.mean(), confidence)
+        # 교차상관 배열은 신호 길이의 2배 크기 → 즉시 해제
+        del corr, sub_corr, lip_bin, lip_sig, aud_sig
+        return result
 
     _last_log_snapshot = [None]
 
@@ -604,9 +614,11 @@ def proc_analyzer(lip_queue, audio_queue,
                         vals = [x[1] for x in aub if x[0] >= aub[-1][0] - MUSIC_WINDOW_SEC]
                         if vals:
                             arr  = np.array(vals, dtype=np.float32)
+                            del vals  # 리스트 참조 해제
                             mean = float(arr.mean())
                             cv   = float(arr.std() / mean) if mean > 1e-9 else 999.0
                             fill = float((arr > mean * 0.5).sum()) / len(arr)
+                            del arr  # numpy 배열 즉시 해제
                             add_log(f"🔍 {zone} rms={mean:.4f} cv={cv:.2f} fill={fill:.2f} "
                                     f"music={music} confirm={oped_confirm[zone]}/{MUSIC_CONFIRM}")
 
@@ -672,9 +684,12 @@ def proc_analyzer(lip_queue, audio_queue,
             continue
 
         raw_ms, lip_std, aud_std, lip_mean, aud_mean, confidence = compute_offset(lip_sig, aud_sig, video_fps)
+        # del 전에 len 값 보존
+        _n_sig = len(lip_sig)
 
         add_log(f"📊 raw={raw_ms:.0f}ms lip_std={lip_std:.3f} aud_std={aud_std:.4f} "
-                f"lip_mean={lip_mean:.4f} conf={confidence:.3f} n={len(lip_sig)}")
+                f"lip_mean={lip_mean:.4f} conf={confidence:.3f} n={_n_sig}")
+        del lip_sig, aud_sig  # 분석 완료 → 대형 신호 배열 즉시 해제
 
         if lip_mean < 0.002:
             push_state(STATUS_UNDETECTED, 0, total_correction_ms, log_lines, pot_ok,

@@ -565,6 +565,18 @@ class LipSyncGUIRun:
                     self._om_shared_pos[0] = pv
                     self._om_shared_dur[0] = dv
 
+        # ── Working Set 주기적 트림 ──────────────────────────────────────────
+        # 싱크 ON 중에는 proc_analyzer의 _flush_and_gc()가 보정/정상 판정마다 처리.
+        # 싱크 OFF + oped 모니터 대기 중(장시간 구동)에는 여기서 10분마다 한 번 트림.
+        # 10분보다 짧게 설정하면 방금 복구한 페이지를 바로 내려 페이지 폴트 낭비.
+        _WS_TRIM_INTERVAL = 600  # 10분(초)
+        if (not self._running
+                and _now - getattr(self, '_ws_trim_t', 0) >= _WS_TRIM_INTERVAL):
+            self._ws_trim_t = _now
+            from mem_utils import trim_working_set
+            trim_working_set()
+        # ─────────────────────────────────────────────────────────────────────
+
         # oped 모니터 상태 진단 (매 30초마다)
         if time.time() - getattr(self, "_diag_t", 0) > 30:
             self._diag_t = time.time()

@@ -5,6 +5,7 @@
   B. clear_buffers(*bufs): deque/list 버퍼 비우기
   C. run_gc()            : gc.collect() 실행
   D. release_mp_queue(q) : mp.Queue/Pipe close() + join_thread() → OS 파이프 버퍼 반환
+  E. trim_working_set()  : SetProcessWorkingSetSize(-1,-1) → RAM 페이지 OS 반환
 
   조합 함수:
     flush_queues(*qs)              = A × N
@@ -14,6 +15,7 @@
     full_cleanup_and_release(...)  = A × N  + B × N + C + D × N
 """
 import gc as _gc
+import ctypes as _ctypes
 
 
 # ── A. 큐/Pipe 드레인 ────────────────────────────────────────────────────────
@@ -127,3 +129,33 @@ def full_cleanup_and_release(queues=(), bufs=(), mp_queues=()) -> None:
     release_queues(*mp_queues)
     clear_buffers(*bufs)
     run_gc()
+
+
+# ── E. Working Set 트림 ──────────────────────────────────────────────────────
+def trim_working_set() -> None:
+    """프로세스 Working Set을 OS에 반환 요청 (Windows 전용).
+
+    SetProcessWorkingSetSize(handle, -1, -1) 을 호출해
+    현재 접근되지 않는 RAM 페이지를 OS에 돌려준다.
+    Commit(가상 주소 예약) 크기는 변하지 않으며,
+    이후 해당 페이지에 접근하면 페이지 폴트로 자동 복구된다.
+
+    주의: 복구 비용이 있으므로 반드시 '쉬는 구간'에만 호출한다.
+      - _flush_and_gc() 직후 (GC 완료 + 10초 쿨다운 직전)
+      - 싱크 OFF + 장시간 대기 중 주기 호출 (10분 간격)
+    비-Windows 환경에서는 조용히 무시된다.
+    """
+    try:
+        _kernel32 = _ctypes.windll.kernel32
+        handle = _kernel32.GetCurrentProcess()
+        # SIZE_T(-1) 캐스트 필수 — 그냥 -1 을 넘기면 64비트에서
+        # INVALID_HANDLE_VALUE 로 해석되어 효과 없음
+        _kernel32.SetProcessWorkingSetSize(
+            handle,
+            _ctypes.c_size_t(-1),
+            _ctypes.c_size_t(-1),
+        )
+    except AttributeError:
+        pass   # 비-Windows (windll 없음)
+    except Exception:
+        pass

@@ -657,8 +657,14 @@ class LipSyncGUIRun:
                 _aud_mode = getattr(self, "_aud_capture_mode", "")
                 _aud_suffix = f" ({_aud_mode})" if _aud_mode and aud_n > 0 else ""
                 self._aud_lbl.config(text=("캡처 중" if aud_n > 0 else "대기 중") + _aud_suffix, fg=c)
-                self._proc_dot.config(fg=self.ACCENT)
-                self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
+                # ── [버그1 수정] 세 가지 조건이 모두 충족될 때만 "OP/ED 감지 중" 표시 ──
+                # 조건1) 팟플레이어 감지됨, 조건2) 오디오 캡처 확인됨, 조건3) 메인 싱크 미실행
+                if pot_ok and aud_n > 0 and not self._running:
+                    self._proc_dot.config(fg=self.ACCENT)
+                    self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
+                else:
+                    self._proc_dot.config(fg=self.TEXT_DIM)
+                    self._proc_lbl.config(text="대기중", fg=self.TEXT_DIM)
 
         latest       = None
         main_toasts  = []

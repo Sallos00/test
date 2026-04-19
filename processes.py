@@ -204,6 +204,9 @@ def proc_analyzer(lip_queue, audio_queue,
     last_cd_log   = 0.0   # 쿨다운 로그 스로틀
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
+    # [Bug 2 수정] oped_skip/oped_no_skip 수신 시 pending_prompt[0]은 이미 push_state에서
+    # 소진된 상태이므로 zone 정보를 별도로 보존해야 함.
+    _last_oped_zone = [None]  # 마지막으로 팝업을 전송한 OP/ED zone
 
     # ── 녹화 중 정리 억제 플래그 ─────────────────────────────────────────────
     # GUI 에서 "recording_start" / "recording_stop" cmd 로 갱신
@@ -282,7 +285,10 @@ def proc_analyzer(lip_queue, audio_queue,
             try:
                 item = audio_queue.get_nowait()
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
-                    add_log(f"🔊 {item[1]}")
+                    # [Bug 1 수정] item[1]은 make_send_log()에서 이미 타임스탬프가 붙은
+                    # full 메시지("[HH:MM:SS] msg")임. add_log()를 사용하면 타임스탬프가
+                    # 이중으로 붙으므로, log_lines에 직접 append하여 방지.
+                    log_lines.append(f"🔊 {item[1]}")
                 else:
                     aub.append(item)
                 _aud_count += 1  # [수정] 성공 처리 시에만 카운트
@@ -436,6 +442,7 @@ def proc_analyzer(lip_queue, audio_queue,
         oped_last_t   = {"오프닝": 0.0,   "엔딩": 0.0}
         oped_prompted = {"오프닝": False,  "엔딩": False}
         pending_prompt[0] = None
+        _last_oped_zone[0] = None  # [Bug 2 수정] 초기화 시 zone 정보도 클리어
 
     def _flush_and_gc(label: str):
         """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC + Working Set 트림.
@@ -497,14 +504,19 @@ def proc_analyzer(lip_queue, audio_queue,
                 add_log("⏹ 녹화 종료 — 메모리 정리 억제 해제")
             elif cmd == "oped_skip":
                 execute_skip()
-                zone = pending_prompt[0].get("zone", "오프닝") if pending_prompt[0] else "오프닝"
+                # [Bug 2 수정] pending_prompt[0]은 push_state()에서 이미 소진된 상태.
+                # _last_oped_zone으로 zone을 추적해 올바른 쿨다운 키를 사용한다.
+                zone = _last_oped_zone[0] or "오프닝"
+                _last_oped_zone[0] = None
                 oped_confirm[zone]  = 0
                 oped_last_t[zone]   = time.time()
                 oped_prompted[zone] = False
                 pending_prompt[0]   = None
                 add_log(f"⏭ {zone} 스킵 완료 → 쿨다운 {OPED_COOLDOWN_SEC}초")
             elif cmd == "oped_no_skip":
-                zone = pending_prompt[0].get("zone", "오프닝") if pending_prompt[0] else "오프닝"
+                # [Bug 2 수정] oped_skip과 동일하게 _last_oped_zone으로 zone 추적
+                zone = _last_oped_zone[0] or "오프닝"
+                _last_oped_zone[0] = None
                 oped_confirm[zone]  = 0
                 oped_last_t[zone]   = time.time()
                 oped_prompted[zone] = False
@@ -634,6 +646,7 @@ def proc_analyzer(lip_queue, audio_queue,
                         elif not oped_prompted[zone]:
                             oped_prompt           = {"zone": zone, "skip_sec": OSS}
                             oped_prompted[zone]   = True
+                            _last_oped_zone[0]    = zone  # [Bug 2 수정] 팝업 전송 zone 기억
                             add_log(f"🎵 {zone} 팝업 전송")
                 elif oped_confirm[zone] > 0:
                     oped_confirm[zone] -= 1
@@ -668,9 +681,11 @@ def proc_analyzer(lip_queue, audio_queue,
         lip_sig, aud_sig = resample_aligned(lpb, aub, video_fps)
 
         if lip_sig is None or aud_sig is None:
-            if has_prompt:
-                push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
-                           lip_n, aud_n, notify, oped_prompt)
+            # [Bug 2 수정] oped prompt 유무와 무관하게 항상 상태를 전송.
+            # 이전에는 has_prompt가 False이면 state_queue에 아무것도 보내지 않아
+            # GUI가 stale 상태(이전 badge/status)를 계속 표시하는 문제가 있었음.
+            push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
+                       lip_n, aud_n, notify, oped_prompt)
             time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
             continue
 

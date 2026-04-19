@@ -58,6 +58,13 @@ class RefreshMixin:
                         )
                         self._badge.config(text="  대기 중  ", fg=self.TEXT, bg=self.BG3)
                         self._start_oped_monitor()
+                        # ── [Fix 이슈2] 자동 재시작 대기 구간 진입 → 팝업 억제 플래그 설정 ──
+                        # _stop_processes()로 _running=False가 된 이후부터
+                        # _wait_for_potplayer → _start_processes()로 _running=True가 될
+                        # 때까지, 살아있는 _monitor_for_popup 스레드가 "동영상 감지" 팝업을
+                        # 띄우지 않도록 _waiting_for_restart=True로 이 구간을 명시한다.
+                        # 플래그는 _start_processes() 진입 시 해제된다.
+                        self._waiting_for_restart = True
                         threading.Thread(
                             target=self._wait_for_potplayer, daemon=True).start()
                         self._pot_exit_handling = False

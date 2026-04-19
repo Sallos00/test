@@ -112,6 +112,7 @@ class LipSyncGUIRun:
         self._om_stop_flag            = None
         self._om_cmd_queue            = None
         self._om_state_queue          = None
+        self._om_log_queue            = None   # [Bug 1 수정] 로그 큐 참조도 무효화해 stale 데이터 수집 방지
         self._om_threads              = []
         self._oped_monitor_running    = False
         self._om_log_seen_count       = 0
@@ -334,6 +335,7 @@ class LipSyncGUIRun:
         """P1(프로세스) + T2·T3(스레드) 시작."""
         self._stop_oped_monitor()   # 싱크 시작 시 별도 모니터 중지
         self._running = True
+        self._pot_exit_handling = False  # [Bug 3 수정] 팟플레이어 종료 자동처리 플래그 초기화
         self.stop_flag.clear()
         runtime_cfg = self._build_cfg()
 
@@ -565,6 +567,39 @@ class LipSyncGUIRun:
                     self._om_shared_pos[0] = pv
                     self._om_shared_dur[0] = dv
 
+            # ── [Bug 3 수정] 싱크 작동 중 팟플레이어 종료 감지 → 자동 대기 상태 전환 ──
+            # 팟플레이어가 사라졌을 때 proc_analyzer가 STATUS_NO_POT을 보내더라도
+            # GUI는 _running=True 상태를 유지해 "싱크 작동 중"으로 보임.
+            # hwnd 캐시를 직접 확인해 즉시 감지하고 백그라운드 스레드에서
+            # _stop_processes() 후 _wait_for_potplayer()로 전환한다.
+            if (self._running and not hwnd
+                    and not getattr(self, "_pot_exit_handling", False)):
+                self._pot_exit_handling = True
+                def _handle_pot_exit():
+                    self._stop_processes()
+                    def _update_ui():
+                        if self._closing:
+                            self._pot_exit_handling = False
+                            return
+                        self._start_btn.config(
+                            text="⏳ 대기 중...",
+                            bg=self.BG3, fg=self.TEXT_DIM,
+                            activebackground=self.BORDER,
+                            state="disabled"
+                        )
+                        self._proc_lbl.config(
+                            text="팟플레이어 실행을 기다리는 중...", fg=self.ACCENT
+                        )
+                        self._badge.config(text="  대기 중  ", fg=self.TEXT, bg=self.BG3)
+                        self._start_oped_monitor()
+                        threading.Thread(
+                            target=self._wait_for_potplayer, daemon=True).start()
+                        self._pot_exit_handling = False
+                    self.root.after(0, _update_ui)
+                threading.Thread(
+                    target=_handle_pot_exit, daemon=True,
+                    name="pot-exit-handler").start()
+
         # ── Working Set 주기적 트림 ──────────────────────────────────────────
         # 싱크 ON 중에는 proc_analyzer의 _flush_and_gc()가 보정/정상 판정마다 처리.
         # 싱크 OFF + oped 모니터 대기 중(장시간 구동)에는 여기서 10분마다 한 번 트림.
@@ -635,10 +670,18 @@ class LipSyncGUIRun:
                     # oped monitor도 동일한 wrap 감지 적용
                     wrap = (seen >= len(om_logs) and last_log is not None
                             and om_logs[-1] != last_log)
-                    if wrap or seen > len(om_logs):
+                    # [Bug 1 수정] wrap 발생 시 전체를 재추가하지 않고 마지막 1개만 추가.
+                    # 기존 코드(seen=0 후 전체 재추가)는 _log_lines에 T2·T3 이외 소스의
+                    # 로그(audio capture 직접 로그 등)를 모두 덮어씌우는 문제가 있었음.
+                    if wrap:
+                        self._log_lines.append(om_logs[-1])
+                    elif seen > len(om_logs):
                         seen = 0
-                    for line in om_logs[seen:]:
-                        self._log_lines.append(line)
+                        for line in om_logs[seen:]:
+                            self._log_lines.append(line)
+                    else:
+                        for line in om_logs[seen:]:
+                            self._log_lines.append(line)
                     self._om_log_seen_count = len(om_logs)
                     self._om_log_seen_last  = om_logs[-1] if om_logs else None
                 # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
@@ -752,18 +795,24 @@ class LipSyncGUIRun:
                 seen     = getattr(self, "_log_seen_count", 0)
                 last_log = getattr(self, "_log_seen_last", None)
 
-                # ── [버그 수정] deque wrap 감지 ──────────────────────────────
+                # ── [Bug 1 수정] deque wrap 감지 및 단일 항목 추가 ────────────
                 # log_lines는 maxlen=100 deque. 100개가 꽉 찬 뒤 새 항목이 들어오면
-                # len(logs)는 항상 100으로 고정되어 seen == len(logs) 가 유지됨.
-                # 이 상태에서 logs[-1](마지막 줄)이 이전과 달라지면 wrap이 발생한 것.
-                # wrap 발생 시 seen을 0으로 리셋해 전체를 다시 _log_lines에 동기화.
+                # len(logs)는 항상 100으로 고정되어 seen == len(logs)가 유지됨.
+                # 이 상태에서 logs[-1]이 이전과 달라지면 wrap이 발생한 것.
+                # 기존: seen=0 후 전체 100개 재추가 → 오디오 캡처 로그 등
+                # 다른 소스의 로그가 모두 덮어씌워지는 문제 발생.
+                # 수정: wrap 시 마지막 1개(신규 항목)만 추가.
                 wrap = (seen >= len(logs) and last_log is not None
                         and logs[-1] != last_log)
-                if wrap or seen > len(logs):
+                if wrap:
+                    self._log_lines.append(logs[-1])
+                elif seen > len(logs):
                     seen = 0
-
-                for line in logs[seen:]:
-                    self._log_lines.append(line)
+                    for line in logs[seen:]:
+                        self._log_lines.append(line)
+                else:
+                    for line in logs[seen:]:
+                        self._log_lines.append(line)
                 self._log_seen_count = len(logs)
                 self._log_seen_last  = logs[-1] if logs else None
 

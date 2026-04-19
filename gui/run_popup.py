@@ -4,7 +4,7 @@ _toggle, _wait_for_potplayer, _monitor_for_popup, _show_start_popup
 
 [수정]
 - _toggle (stop 경로): _start_oped_monitor() 호출 후 팟플레이어 상태를
-  즉시 확인해 "OP/ED 감지 중" 또는 "OP/ED 대기 중"을 표시.
+  즉시 확인해 "OP/ED 감지 중" 또는 "대기 중"을 표시.
   (기존: "중지됨" 고정 → _refresh()가 6초 후에야 OP/ED 상태 갱신)
 """
 import time
@@ -50,7 +50,7 @@ class PopupMixin:
             # ── [Bug Fix] 싱크 중단 후 즉시 OP/ED 상태 표시 ─────────────────
             # 기존: "중지됨"으로 고정하고 _refresh()가 6초 후에야 갱신.
             # 수정: _start_oped_monitor() 직후 팟플레이어 상태를 확인해
-            #       즉시 "OP/ED 감지 중" / "OP/ED 대기 중"을 표시한다.
+            #       즉시 "OP/ED 감지 중" / "대기 중"을 표시한다.
             self._start_oped_monitor()
             if getattr(self, "_oped_monitor_running", False):
                 hwnd_now = find_potplayer_hwnd()
@@ -60,7 +60,7 @@ class PopupMixin:
                     self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
                 else:
                     self._proc_dot.config(fg=self.TEXT_DIM)
-                    self._proc_lbl.config(text="OP/ED 대기 중", fg=self.TEXT_DIM)
+                    self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
             else:
                 self._proc_lbl.config(text="중지됨", fg=self.TEXT_DIM)
 

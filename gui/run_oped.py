@@ -1,6 +1,11 @@
 """
 gui/run_oped.py -- OP/ED 백그라운드 모니터 Mixin
 _start_oped_monitor, _stop_oped_monitor, _show_oped_skip_popup
+
+[수정]
+- _start_oped_monitor: 스레드 목표에 예외 래퍼 추가 (무음 종료 방지)
+- _stop_oped_monitor:  join timeout 2s → 8s
+  (proc_analyzer의 BUF_SEC(3s) 초기 대기 + INTERVAL(3s) sleep을 충분히 커버)
 """
 import time
 import threading
@@ -13,13 +18,14 @@ from multiprocessing import Array as _MpArray
 
 from win32_utils import find_potplayer_hwnd
 
+# oped monitor 스레드 join timeout:
+# proc_analyzer 초기 대기(BUF_SEC=3s) + 루프 sleep(INTERVAL=3s) + 여유(2s)
+_OM_JOIN_TIMEOUT = 8
+
 
 class OpedMonitorMixin:
 
     # ── OP/ED 백그라운드 모니터 (싱크 OFF 상태에서도 동작) ───────────────────
-    # 싱크가 꺼져 있어도 OP/ED 음악 감지 + 팝업/자동스킵은 항상 동작해야 한다.
-    # P2(오디오캡처) + P3(싱크분석, lip 없이 오디오만) 를 별도로 구동한다.
-
     def _start_oped_monitor(self):
         """싱크 미실행 상태 전용 OP/ED 감지 스레드(T2+T3) 시작."""
         if getattr(self, "_oped_monitor_running", False):
@@ -27,20 +33,13 @@ class OpedMonitorMixin:
         try:
             runtime_cfg = self._build_cfg()
 
-            # _om_lip_queue: oped 모니터에서는 실제로 데이터를 넣지 않는 더미 큐.
-            # 기존 mp.Queue(maxsize=qsize)는 OS 파이프 버퍼 ~32MB를 사전 할당함.
-            # queue.Queue로 교체 → 파이프 버퍼 낭비 없음, 직렬화 오버헤드 없음.
-            # [수정] maxsize를 요구사항에 맞게 명시적으로 고정
-            # lip_queue=20, audio_queue=30, state_queue=10 으로 제한하여 메모리 누적 방지
-            self._om_lip_queue   = _queue.Queue(maxsize=20)   # 더미 — proc_analyzer 시그니처 호환
-            self._om_audio_queue = _queue.Queue(maxsize=30)   # 오디오 샘플 누적 방지
+            self._om_lip_queue   = _queue.Queue(maxsize=20)
+            self._om_audio_queue = _queue.Queue(maxsize=30)
             self._om_log_queue   = _queue.Queue(maxsize=200)
-            self._om_state_queue = _queue.Queue(maxsize=10)   # 상태 메시지 누적 방지
+            self._om_state_queue = _queue.Queue(maxsize=10)
             self._om_cmd_queue   = _queue.Queue(maxsize=10)
             self._om_stop_flag   = threading.Event()
 
-            # shared_pos/dur: GUI 메인스레드가 갱신, T3가 읽음
-            # 스레드 간 공유 → 일반 list + lock (Value 불필요)
             self._om_pos_lock    = threading.Lock()
             self._om_shared_pos  = [-1]
             self._om_shared_dur  = [-1]
@@ -48,27 +47,58 @@ class OpedMonitorMixin:
             self._om_stream_anchor = _MpArray(_ct.c_double, [0.0, 48000.0, 1.0])
 
             from processes import proc_audio_capture, proc_analyzer  # lazy import
+
+            # ── [Bug Fix] 스레드 예외 래퍼 ──────────────────────────────────
+            # 스레드 내부 예외(ImportError 등)는 무음 종료로 이어진다.
+            # 래퍼로 감싸 _log_lines에 기록해 문제를 가시화한다.
+            if not hasattr(self, "_log_lines"):
+                self._log_lines = collections.deque(maxlen=100)
+            _log_ref = self._log_lines
+
+            def _wrap_om(fn, label):
+                def _safe(*args):
+                    try:
+                        fn(*args)
+                    except Exception as _e:
+                        import traceback as _tb, time as _t
+                        _log_ref.append(
+                            f"[{_t.strftime('%H:%M:%S')}] "
+                            f"❌ oped 스레드[{label}] 비정상 종료: {_e}"
+                        )
+                        _log_ref.append(_tb.format_exc()[-300:])
+                return _safe
+
+            # 현재 세션 flag/queue를 클로저에 캡처
+            _cur_stop   = self._om_stop_flag
+            _cur_audio  = self._om_audio_queue
+            _cur_state  = self._om_state_queue
+            _cur_cmd    = self._om_cmd_queue
+            _cur_anchor = self._om_stream_anchor
+            _cur_pos    = self._om_shared_pos
+            _cur_dur    = self._om_shared_dur
+
             self._om_threads = []
-            for target, args in [
+            for fn, args, label in [
                 (proc_audio_capture, (
-                    self._om_audio_queue,
-                    self._om_stop_flag,
+                    _cur_audio,
+                    _cur_stop,
                     runtime_cfg,
                     self._om_log_queue,
-                    self._om_stream_anchor,
-                )),
+                    _cur_anchor,
+                ), "T2_om_audio"),
                 (proc_analyzer, (
                     self._om_lip_queue,
-                    self._om_audio_queue,
-                    self._om_state_queue,
-                    self._om_cmd_queue,
-                    self._om_stop_flag,
+                    _cur_audio,
+                    _cur_state,
+                    _cur_cmd,
+                    _cur_stop,
                     runtime_cfg,
-                    self._om_shared_pos,
-                    self._om_shared_dur,
-                )),
+                    _cur_pos,
+                    _cur_dur,
+                ), "T3_om_analyzer"),
             ]:
-                t = threading.Thread(target=target, args=args, daemon=True)
+                t = threading.Thread(
+                    target=_wrap_om(fn, label), args=args, daemon=True)
                 t.start()
                 self._om_threads.append(t)
 
@@ -78,7 +108,8 @@ class OpedMonitorMixin:
             import time as _t
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)
-            self._log_lines.append(f"[{_t.strftime('%H:%M:%S')}] ⚠ oped 모니터 시작 실패: {e}")
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] ⚠ oped 모니터 시작 실패: {e}")
 
     def _stop_oped_monitor(self):
         """OP/ED 감지 전용 스레드 중지."""
@@ -90,25 +121,22 @@ class OpedMonitorMixin:
                 self._om_cmd_queue.put_nowait("stop")
             except Exception:
                 pass
+            # ── [Bug Fix] join timeout을 _OM_JOIN_TIMEOUT(8s)으로 증가 ──────
+            # 기존 2s는 proc_analyzer의 BUF_SEC(3s)+INTERVAL(3s)보다 짧아
+            # join이 먼저 타임아웃되어 좀비 스레드가 발생하였음.
             for t in getattr(self, "_om_threads", []):
-                t.join(timeout=2)
+                t.join(timeout=_OM_JOIN_TIMEOUT)
         except Exception:
             pass
-        # ── [버그2 수정] 큐/flag를 명시적으로 None 처리해 재사용 방지 ─────────
-        # _start_oped_monitor()에서 항상 새 인스턴스를 생성하므로 여기서 무효화
         self._om_stop_flag            = None
         self._om_cmd_queue            = None
         self._om_state_queue          = None
-        self._om_log_queue            = None   # [Bug 1 수정] 로그 큐 참조도 무효화해 stale 데이터 수집 방지
+        self._om_log_queue            = None
         self._om_threads              = []
         self._oped_monitor_running    = False
         self._om_log_seen_count       = 0
 
     # ── OP/ED 스킵 팝업 ──────────────────────────────────────────────────────
-    # P3가 oped_prompt를 state_queue에 실어 보내면 _refresh()가 호출
-    # [스킵]              → "oped_skip"    → P3가 스킵 실행 + 쿨다운
-    # [닫기] / 10초 경과  → "oped_no_skip" → P3가 쿨다운만 시작
-
     def _show_oped_skip_popup(self, prompt_info: dict, use_om_queue: bool = False):
         if getattr(self, "_oped_popup_open", False):
             return
@@ -129,12 +157,11 @@ class OpedMonitorMixin:
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
         pw = round(280 * r)
         ph = round(88  * r)
-        # 멀티모니터: 가상 데스크탑 전체 범위로 클램프
         import ctypes as _ct
-        vx = _ct.windll.user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
-        vy = _ct.windll.user32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
-        vw = _ct.windll.user32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
-        vh = _ct.windll.user32.GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
+        vx = _ct.windll.user32.GetSystemMetrics(76)
+        vy = _ct.windll.user32.GetSystemMetrics(77)
+        vw = _ct.windll.user32.GetSystemMetrics(78)
+        vh = _ct.windll.user32.GetSystemMetrics(79)
         px = max(vx, min(rect.right  - pw - 12, vx + vw - pw))
         py = max(vy, min(rect.bottom - ph - 48, vy + vh - ph))
 
@@ -142,12 +169,11 @@ class OpedMonitorMixin:
 
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True)
-        popup.attributes("-topmost", False)   # owned window가 z-order 연동을 담당
+        popup.attributes("-topmost", False)
         popup.configure(bg=self.BORDER)
         popup.geometry(f"{pw}x{ph}+{px}+{py}")
         popup.update_idletasks()
 
-        # owner를 팟플레이어로 설정 → 팟플레이어가 뒤로 가면 팝업도 같이 뒤로 감
         _GWLP_HWNDPARENT = -8
         try:
             _ov_hwnd  = int(popup.wm_frame(), 16)
@@ -160,7 +186,6 @@ class OpedMonitorMixin:
         except Exception:
             pass
 
-        # 팟플레이어 이동 시 팝업 위치 동기화
         def _track_popup():
             try:
                 if not popup.winfo_exists():
@@ -188,7 +213,6 @@ class OpedMonitorMixin:
 
         def send_cmd(cmd: str):
             try:
-                # oped 모니터 큐 또는 싱크 큐로 전송
                 if use_om_queue and hasattr(self, "_om_cmd_queue"):
                     self._om_cmd_queue.put_nowait(cmd)
                 else:

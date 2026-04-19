@@ -1,6 +1,11 @@
 """
 gui/run_popup.py -- 팟플레이어 감지·시작 팝업 Mixin
 _toggle, _wait_for_potplayer, _monitor_for_popup, _show_start_popup
+
+[수정]
+- _toggle (stop 경로): _start_oped_monitor() 호출 후 팟플레이어 상태를
+  즉시 확인해 "OP/ED 감지 중" 또는 "OP/ED 대기 중"을 표시.
+  (기존: "중지됨" 고정 → _refresh()가 6초 후에야 OP/ED 상태 갱신)
 """
 import time
 import threading
@@ -14,10 +19,7 @@ class PopupMixin:
 
     def _toggle(self):
         if not self._running:
-            self._stop_oped_monitor()   # 싱크 시작 전 모니터 중지 (중복 방지)
-            # ── [버그2 수정] on->off->on 시 잔류 커맨드/상태 제거 ──────────
-            # stop_flag는 _start_processes에서 clear()하지만, cmd_queue에
-            # 이전 "stop" 커맨드가 남아 있으면 T3가 즉시 종료돼 싱크가 시작 안됨.
+            self._stop_oped_monitor()   # 싱크 시작 전 모니터 중지
             try:
                 while True: self.cmd_queue.get_nowait()
             except Exception:
@@ -44,8 +46,24 @@ class PopupMixin:
                                    bg=self.BG3, fg=self.ACCENT,
                                    activebackground=self.BORDER,
                                    state="normal")
-            self._proc_lbl.config(text="중지됨", fg=self.TEXT_DIM)
-            self._start_oped_monitor()   # 싱크 정지 후 모니터 재시작
+
+            # ── [Bug Fix] 싱크 중단 후 즉시 OP/ED 상태 표시 ─────────────────
+            # 기존: "중지됨"으로 고정하고 _refresh()가 6초 후에야 갱신.
+            # 수정: _start_oped_monitor() 직후 팟플레이어 상태를 확인해
+            #       즉시 "OP/ED 감지 중" / "OP/ED 대기 중"을 표시한다.
+            self._start_oped_monitor()
+            if getattr(self, "_oped_monitor_running", False):
+                hwnd_now = find_potplayer_hwnd()
+                if hwnd_now and is_potplayer_running():
+                    # 팟플레이어 실행 중 → OP/ED 감지 시작 상태 표시
+                    self._proc_dot.config(fg=self.ACCENT)
+                    self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
+                else:
+                    self._proc_dot.config(fg=self.TEXT_DIM)
+                    self._proc_lbl.config(text="OP/ED 대기 중", fg=self.TEXT_DIM)
+            else:
+                self._proc_lbl.config(text="중지됨", fg=self.TEXT_DIM)
+
             threading.Thread(
                 target=self._monitor_for_popup,
                 kwargs={"wait_for_exit": True},
@@ -102,7 +120,6 @@ class PopupMixin:
                 return
         except Exception:
             return
-        # 재생 감지 시 싱크 보정 탭으로 자동 전환
         if hasattr(self, "_switch_tab_fn"):
             self._switch_tab_fn("sync")
 
@@ -111,7 +128,6 @@ class PopupMixin:
         popup.resizable(False, False)
         popup.configure(bg=self.BG)
         popup.grab_set()
-        # 위젯을 먼저 구성하고 마지막에 표시 → 깜빡임 방지
         popup.withdraw()
 
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
@@ -126,9 +142,6 @@ class PopupMixin:
                  font=("Segoe UI", max(8, round(9 * r))),
                  bg=self.BG, fg=self.TEXT, justify="center").pack()
 
-        # 팝업이 뜨는 시점에 창 제목에서 동영상 제목을 추출해 시청기록 저장
-        # 기록 기준 1: 재생 감지 팝업 발생 시점에 시청 기록 저장
-        # (title_watcher와 중복돼도 record_video_history 내부에서 타임스탬프 갱신만 함)
         try:
             import ctypes as _ct
             _u32 = _ct.windll.user32
@@ -189,5 +202,4 @@ class PopupMixin:
                 pass
 
         auto_close_id[0] = self.root.after(1000, _tick)
-        # 위젯 구성 완료 후 배치/표시
         self._place_popup(popup, pw, ph)

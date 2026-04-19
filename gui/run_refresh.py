@@ -1,6 +1,12 @@
 """
 gui/run_refresh.py -- 100ms 주기 UI 갱신 Mixin
 _refresh
+
+[수정]
+- 메인 state_queue 블록: _oped_monitor_running=True이고 _running=False일 때
+  좀비 T3의 상태가 proc_dot/proc_lbl을 덮어쓰지 않도록 가드 추가.
+  (기존: 좀비 T3 → state_queue → main 블록 → proc_dot=TEXT_DIM 덮어씀
+         → oped 모니터가 ACCENT로 설정해도 즉시 원래대로 돌아감)
 """
 import time
 import threading
@@ -16,7 +22,6 @@ class RefreshMixin:
         if self._closing:
             return
 
-        # 재생 위치/길이 갱신 — 500ms 간격으로 throttle (FindWindowW 비용 절감)
         _now = time.time()
         if _now - getattr(self, '_hwnd_refresh_t', 0) >= 0.5:
             self._hwnd_refresh_t = _now
@@ -33,11 +38,6 @@ class RefreshMixin:
                     self._om_shared_pos[0] = pv
                     self._om_shared_dur[0] = dv
 
-            # ── [Bug 3 수정] 싱크 작동 중 팟플레이어 종료 감지 → 자동 대기 상태 전환 ──
-            # 팟플레이어가 사라졌을 때 proc_analyzer가 STATUS_NO_POT을 보내더라도
-            # GUI는 _running=True 상태를 유지해 "싱크 작동 중"으로 보임.
-            # hwnd 캐시를 직접 확인해 즉시 감지하고 백그라운드 스레드에서
-            # _stop_processes() 후 _wait_for_potplayer()로 전환한다.
             if (self._running and not hwnd
                     and not getattr(self, "_pot_exit_handling", False)):
                 self._pot_exit_handling = True
@@ -66,19 +66,13 @@ class RefreshMixin:
                     target=_handle_pot_exit, daemon=True,
                     name="pot-exit-handler").start()
 
-        # ── Working Set 주기적 트림 ──────────────────────────────────────────
-        # 싱크 ON 중에는 proc_analyzer의 _flush_and_gc()가 보정/정상 판정마다 처리.
-        # 싱크 OFF + oped 모니터 대기 중(장시간 구동)에는 여기서 10분마다 한 번 트림.
-        # 10분보다 짧게 설정하면 방금 복구한 페이지를 바로 내려 페이지 폴트 낭비.
-        _WS_TRIM_INTERVAL = 600  # 10분(초)
+        _WS_TRIM_INTERVAL = 600
         if (not self._running
                 and _now - getattr(self, '_ws_trim_t', 0) >= _WS_TRIM_INTERVAL):
             self._ws_trim_t = _now
             from mem_utils import trim_working_set
             trim_working_set()
-        # ─────────────────────────────────────────────────────────────────────
 
-        # oped 모니터 상태 진단 (매 30초마다)
         if time.time() - getattr(self, "_diag_t", 0) > 30:
             self._diag_t = time.time()
             running = getattr(self, "_oped_monitor_running", False)
@@ -91,8 +85,6 @@ class RefreshMixin:
                 self._log_lines = collections.deque(maxlen=100)
             self._log_lines.append(msg)
 
-        # ── P2 로그 큐 수집 (싱크 ON/OFF 무관하게 항상 처리) ────────────────
-        # audio_capture.py 의 send_log() 가 이미 타임스탬프를 붙여서 보냄
         for _lq_attr in ("_main_log_queue", "_om_log_queue"):
             _lq = getattr(self, _lq_attr, None)
             if _lq is None:
@@ -103,7 +95,6 @@ class RefreshMixin:
                     if not hasattr(self, "_log_lines"):
                         self._log_lines = collections.deque(maxlen=100)
                     self._log_lines.append(f"🔊 {msg}")
-                    # 캡처 방식 감지 — send_log 메시지에서 추출
                     if "[ProcessLoopback]" in msg:
                         self._aud_capture_mode = "ProcessLoopback"
                     elif "[GlobalLoopback]" in msg:
@@ -111,7 +102,7 @@ class RefreshMixin:
                 except Exception:
                     break
 
-        # ── oped 모니터(싱크 OFF) state_queue 처리 ───────────────────────
+        # ── oped 모니터 state_queue 처리 ─────────────────────────────────────
         if getattr(self, "_oped_monitor_running", False):
             om_latest  = None
             om_prompts = []
@@ -133,12 +124,8 @@ class RefreshMixin:
                         self._log_lines = collections.deque(maxlen=100)
                     seen     = getattr(self, "_om_log_seen_count", 0)
                     last_log = getattr(self, "_om_log_seen_last", None)
-                    # oped monitor도 동일한 wrap 감지 적용
                     wrap = (seen >= len(om_logs) and last_log is not None
                             and om_logs[-1] != last_log)
-                    # [Bug 1 수정] wrap 발생 시 전체를 재추가하지 않고 마지막 1개만 추가.
-                    # 기존 코드(seen=0 후 전체 재추가)는 _log_lines에 T2·T3 이외 소스의
-                    # 로그(audio capture 직접 로그 등)를 모두 덮어씌우는 문제가 있었음.
                     if wrap:
                         self._log_lines.append(om_logs[-1])
                     elif seen > len(om_logs):
@@ -150,10 +137,8 @@ class RefreshMixin:
                             self._log_lines.append(line)
                     self._om_log_seen_count = len(om_logs)
                     self._om_log_seen_last  = om_logs[-1] if om_logs else None
-                # 싱크 OFF 상태에서 팟플레이어·오디오·프로세스 상태 표시 갱신
                 pot_ok = om_latest.get("potplayer_ok", False)
                 aud_n  = om_latest.get("audio_samples", 0) if pot_ok else 0
-                # 팟플레이어 종료 감지 → 시청 기록 탭으로 전환
                 if not pot_ok and getattr(self, "_pot_was_ok", False):
                     if hasattr(self, "_switch_tab_fn"):
                         self._switch_tab_fn("history")
@@ -166,8 +151,6 @@ class RefreshMixin:
                 _aud_mode = getattr(self, "_aud_capture_mode", "")
                 _aud_suffix = f" ({_aud_mode})" if _aud_mode and aud_n > 0 else ""
                 self._aud_lbl.config(text=("캡처 중" if aud_n > 0 else "대기 중") + _aud_suffix, fg=c)
-                # ── [버그1 수정] 세 가지 조건이 모두 충족될 때만 "OP/ED 감지 중" 표시 ──
-                # 조건1) 팟플레이어 감지됨, 조건2) 오디오 캡처 확인됨, 조건3) 메인 싱크 미실행
                 if pot_ok and aud_n > 0 and not self._running:
                     self._proc_dot.config(fg=self.ACCENT)
                     self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
@@ -175,6 +158,7 @@ class RefreshMixin:
                     self._proc_dot.config(fg=self.TEXT_DIM)
                     self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
 
+        # ── 메인 state_queue 처리 ─────────────────────────────────────────────
         latest       = None
         main_toasts  = []
         main_prompts = []
@@ -207,7 +191,6 @@ class RefreshMixin:
             corr   = latest.get("correction_ms", 0)
             logs   = latest.get("log_lines", [])
 
-            # 팟플레이어 종료 감지 → 시청 기록 탭으로 전환
             if not pot_ok and getattr(self, "_pot_was_ok", False):
                 if hasattr(self, "_switch_tab_fn"):
                     self._switch_tab_fn("history")
@@ -252,22 +235,25 @@ class RefreshMixin:
             self._corr_lbl.config(text=f"{sign}{corr} ms")
             self._lip_cnt.config(text=str(lip_n))
             self._aud_cnt.config(text=str(aud_n))
-            pc = self.ACCENT3 if self._running else self.TEXT_DIM
-            self._proc_dot.config(fg=pc)
-            # 마지막으로 본 줄 이후 새 항목만 추가
+
+            # ── [Bug Fix] proc_dot 덮어쓰기 방지 ────────────────────────────
+            # 기존: self._running 여부만 보고 항상 proc_dot을 갱신.
+            #       → oped 모니터가 ACCENT(초록)으로 설정한 proc_dot을
+            #         좀비 T3의 state가 TEXT_DIM(회색)으로 즉시 덮어씀.
+            # 수정: 싱크 실행 중일 때만 갱신. oped 모니터 모드에서는
+            #       위의 oped 블록이 이미 proc_dot을 올바르게 설정했으므로
+            #       여기서 건드리지 않는다.
+            if self._running:
+                self._proc_dot.config(fg=self.ACCENT3)
+            elif not getattr(self, "_oped_monitor_running", False):
+                self._proc_dot.config(fg=self.TEXT_DIM)
+            # _oped_monitor_running=True인 경우: oped 블록이 이미 처리함
+
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)
             if logs:
                 seen     = getattr(self, "_log_seen_count", 0)
                 last_log = getattr(self, "_log_seen_last", None)
-
-                # ── [Bug 1 수정] deque wrap 감지 및 단일 항목 추가 ────────────
-                # log_lines는 maxlen=100 deque. 100개가 꽉 찬 뒤 새 항목이 들어오면
-                # len(logs)는 항상 100으로 고정되어 seen == len(logs)가 유지됨.
-                # 이 상태에서 logs[-1]이 이전과 달라지면 wrap이 발생한 것.
-                # 기존: seen=0 후 전체 100개 재추가 → 오디오 캡처 로그 등
-                # 다른 소스의 로그가 모두 덮어씌워지는 문제 발생.
-                # 수정: wrap 시 마지막 1개(신규 항목)만 추가.
                 wrap = (seen >= len(logs) and last_log is not None
                         and logs[-1] != last_log)
                 if wrap:

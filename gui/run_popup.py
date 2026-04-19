@@ -94,16 +94,6 @@ class PopupMixin:
                     time.sleep(0.1)
 
         while not self._closing and not self._running:
-            # ── [Fix 이슈2] 자동 재시작 대기 구간에서는 감지 체크 건너뜀 ─────
-            # PotPlayer가 싱크 도중 종료→재시작될 때 _running=False가 되는
-            # 짧은 구간에서 이 루프가 "동영상 감지" 팝업을 발생시키는 오동작 방지.
-            # _pot_exit_handling : _stop_processes() 완료 전 구간 커버
-            # _waiting_for_restart: 그 이후 _start_processes() 직전 구간 커버
-            if (getattr(self, '_pot_exit_handling', False)
-                    or getattr(self, '_waiting_for_restart', False)):
-                time.sleep(0.1)
-                continue
-
             hwnd = find_potplayer_hwnd()
             if hwnd and is_potplayer_playing(hwnd) and is_potplayer_running():
                 if self._closing or self._running:

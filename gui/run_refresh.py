@@ -54,7 +54,7 @@ class RefreshMixin:
                             state="disabled"
                         )
                         self._proc_lbl.config(
-                            text="팟플레이어 실행을 기다리는 중...", fg=self.ACCENT
+                            text="대기 중", fg=self.ACCENT
                         )
                         self._badge.config(text="  대기 중  ", fg=self.TEXT, bg=self.BG3)
                         self._start_oped_monitor()

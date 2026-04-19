@@ -224,7 +224,7 @@ class ProcessMixin:
 
         hwnd = find_potplayer_hwnd()
         if not hwnd:
-            self._proc_lbl.config(text="버퍼 초기화 완료 (팟플레이어 미감지)", fg=self.ACCENT3)
+            self._proc_lbl.config(text="초기화 완료", fg=self.ACCENT3)
             return
         try:
             post_key_to_potplayer(hwnd, VK_OEM_2, shift=True)

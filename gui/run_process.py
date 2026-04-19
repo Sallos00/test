@@ -35,6 +35,26 @@ class ProcessMixin:
         #   자연스럽게 종료되고, 새 T2/T3는 새 Event를 사용해 간섭 없이 동작한다.
         self.stop_flag = threading.Event()
 
+        # ── [Fix 이슈1] 프로세스 재시작 시 핸들 캐시 강제 갱신 ─────────────
+        # PotPlayer 재시작 직후 _cached_hwnd=None이 남아 있으면,
+        # _start_processes()로 _running=True가 된 직후 _refresh()가
+        # "not hwnd & _running=True" 조건을 오인해 _handle_pot_exit를
+        # 즉시 재발동하는 타이밍 버그가 발생한다.
+        # 모듈 레벨 캐시(_hwnd_cache)와 인스턴스 캐시(_cached_hwnd) 둘 다
+        # 강제 갱신해 다음 _refresh() 틱에서 실제 hwnd를 정확히 바인딩한다.
+        try:
+            from win32_utils import _hwnd_cache as _wc
+            _wc[1] = 0.0                           # 모듈 레벨 1초 캐시 즉시 만료
+        except Exception:
+            pass
+        self._cached_hwnd = find_potplayer_hwnd()  # 인스턴스 캐시 즉시 재조회
+        self._hwnd_refresh_t = time.time()         # _refresh 0.5s 타이머 갱신
+
+        # ── [Fix 이슈2] 자동 재시작 대기 구간 종료 → 팝업 억제 해제 ─────────
+        # _waiting_for_restart=True로 억제 중인 _monitor_for_popup을
+        # 싱크가 정상 시작되는 이 시점에 해제한다.
+        self._waiting_for_restart = False
+
         self._running = True
         self._pot_exit_handling = False
         runtime_cfg = self._build_cfg()

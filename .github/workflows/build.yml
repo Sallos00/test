@@ -67,6 +67,11 @@ jobs:
             gui\ui_logic.py ^
             gui\ui_logic2.py ^
             gui\run.py ^
+            gui\run_oped.py ^
+            gui\run_process.py ^
+            gui\run_popup.py ^
+            gui\run_notify.py ^
+            gui\run_refresh.py ^
             gui\auth.py ^
             gui\record_open.py ^
             gui\record_backend.py
@@ -101,6 +106,11 @@ jobs:
           --hidden-import="gui.ui_logic2"
           --hidden-import="gui.auth"
           --hidden-import="gui.run"
+          --hidden-import="gui.run_oped"
+          --hidden-import="gui.run_process"
+          --hidden-import="gui.run_popup"
+          --hidden-import="gui.run_notify"
+          --hidden-import="gui.run_refresh"
           --hidden-import="gui.record_open"
           --hidden-import="gui.record_backend"
           --hidden-import="cv2"

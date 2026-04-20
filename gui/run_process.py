@@ -10,16 +10,31 @@ _start_processes, _stop_processes, _reset
   '미감지' 고정 현상 방지 (oped 모니터 종료 후 UI에 잔류하는 pot_ok=False 즉시 교정)
 - [이슈2] _start_processes 진입 시 대기 중인 팝업 after_id 취소 +
   이미 열린 팝업 위젯(_start_popup_widget) 강제 소멸 → 싱크 중 팝업 노출 차단
+- [버그 수정] _start_processes 완료 시점에 aud_lbl도 즉시 갱신 (재연결 직후 표기 지연 방지)
+  Windows 빌드 버전 기반으로 캡처 모드를 결정해 pot_lbl과 동시에 aud_lbl 업데이트.
 """
 import time
 import threading
 import collections
 import queue as _queue
 import multiprocessing as _mp
+import platform as _platform
 from multiprocessing import Process, Array as _MpArray
 
 from win32_utils import find_potplayer_hwnd, post_key_to_potplayer, VK_OEM_2
 from mem_utils import full_cleanup_and_release, full_cleanup
+
+# Windows 빌드 확인 — ProcessLoopback은 빌드 19041(20H1) 이상에서만 지원
+def _windows_build() -> int:
+    try:
+        return int(_platform.version().split(".")[-1])
+    except Exception:
+        return 0
+
+_WIN_BUILD                = _windows_build()
+_SUPPORT_PROCESS_LOOPBACK = (_WIN_BUILD >= 19041)
+# 빌드 버전으로 결정한 오디오 캡처 모드 문자열 (UI 즉시 표기에 사용)
+_AUDIO_CAPTURE_MODE       = "ProcessLoopback" if _SUPPORT_PROCESS_LOOPBACK else "GlobalLoopback"
 
 # proc_analyzer가 각 루프 끝에서 sleep하는 최대 시간 (ANALYSIS_INTERVAL = 3.0s).
 # 스레드 join timeout은 이 값보다 충분히 크게 설정해야 좀비 스레드를 막을 수 있다.
@@ -153,10 +168,20 @@ class ProcessMixin:
         # _stop_oped_monitor() 종료 후 oped 모니터의 마지막 potplayer_ok=False 값이
         # UI에 잔류한 채 T3의 첫 상태 보고가 도달하기 전까지 '미감지'로 고정됨.
         # 해결: _start_processes 완료 시점에 hwnd를 직접 조회하여 즉시 '연결됨'으로 갱신.
+        #
+        # [버그 수정] 재연결 시 aud_lbl도 즉시 갱신:
+        # 기존에는 pot_lbl만 즉시 갱신하고 aud_lbl은 T3 상태가 도달할 때까지 대기
+        # → 재연결 직후 aud_lbl이 "대기 중"으로 잔류하는 표기 지연 발생.
+        # 해결: hwnd 확인 후 Windows 빌드 기반 캡처 모드를 pot_lbl과 함께 즉시 표기.
         _hwnd_now = find_potplayer_hwnd()
         if _hwnd_now:
             self._pot_dot.config(fg=self.ACCENT3)
             self._pot_lbl.config(text="연결됨", fg=self.ACCENT3)
+            # ── [미감지 → 연결됨] 전환: 오디오 장치 상태 즉시 갱신 ──────────
+            # 요구사항: pot "연결됨" 시 Windows 빌드 버전 체크 후 캡처 모드 즉시 표기
+            self._aud_dot.config(fg=self.ACCENT3)
+            self._aud_lbl.config(
+                text=f"캡처 중 ({_AUDIO_CAPTURE_MODE})", fg=self.ACCENT3)
 
     def _stop_processes(self):
         self._running = False

@@ -2,9 +2,9 @@
 audio_capture.py -- Windows WASAPI ProcessLoopback 캡처 진입점
 
 audio_queue에 (t_stream, rms, vad) 튜플을 전송한다.
-  t_stream : 오디오 스트림 기준 위치(초) — 립 캡처와 공통 기준점
-             첫 패킷의 (qp_origin, dp_origin, sr)로 확립한 선형 관계로 변환
-             lip_capture도 qpc_now()를 동일 공식으로 변환해 기준 통일
+  t_stream : qp_origin 기준 경과시간(초) — 립 캡처와 공통 기준점
+             [버그 수정] 기존 dp_origin/sr(절대 재생 위치) 오프셋 제거.
+             _make_stream_converter 참조.
   rms      : 원본 신호 RMS — OP/ED 음악 감지에 사용
   vad      : 음성 감지 이진값 (0.0 / 1.0) — 싱크 보정에 사용
              ZCR + RMS 조합으로 BGM과 대사를 구분
@@ -97,18 +97,34 @@ def _compute_vad(arr, sr: int) -> float:
 
 
 # ── 스트림 기준 타임스탬프 변환 ───────────────────────────────────────────────
-# 오디오의 qp(DAC 출력 QPC틱)와 립의 qpc_now()는 같은 QPC 클럭이지만
-# 가리키는 사건이 달라 계통 오차가 발생한다.
-# 첫 패킷의 (qp_origin, dp_origin)으로 선형 변환식을 확립하면
-# 임의의 QPC 틱 → 스트림 위치(초)로 통일할 수 있다:
-#   t_stream = (qp - qp_origin) / freq + dp_origin / sr
-# 립도 동일 공식으로 변환하면 두 신호가 완전히 같은 기준축을 갖는다.
+# 오디오의 qp(DAC 출력 QPC틱)와 립의 qpc_now()는 같은 QPC 클럭.
+# 첫 패킷의 qp_origin을 기준점으로 설정하면:
+#   t_stream = (qp - qp_origin) / freq
+# 립도 동일 공식으로 변환하면 두 신호가 완전히 같은 기준축(0초~)을 갖는다.
+# [버그 수정] 기존 공식의 dp_origin/sr (절대 재생 위치 오프셋) 제거.
+#   dp_origin은 stream_anchor에 저장되지 않아 proc_lip_capture가 보정 불가능하며,
+#   영상이 재생 중인 경우 타임스탬프가 수십~수백 초 차이가 나
+#   resample_aligned가 항상 None을 반환하는 원인이 됐음.
 
 def _make_stream_converter(dp_origin: int, qp_origin: int, sr: int, freq: int):
-    """QPC 틱 → 스트림 위치(초) 변환 함수를 반환."""
-    dp_offset = dp_origin / sr   # 스트림 시작 기준 오프셋(초)
+    """QPC 틱 → 스트림 경과시간(초) 변환 함수를 반환.
+
+    [버그 수정] dp_offset(= dp_origin / sr) 제거.
+    기존 공식: t_stream = (qp - qp_origin) / freq + dp_origin / sr
+      문제: dp_origin은 캡처 시작 시 렌더 스트림의 절대 재생 위치(프레임 수)이며
+            영상이 2분 재생 중이라면 dp_origin/sr ≈ 120초.
+            오디오 타임스탬프가 ~120초부터 시작되는 반면,
+            proc_lip_capture는 stream_anchor에 dp_origin을 저장하지 않아
+            t_hw = (qpc_now - qp_origin) / freq_anc 로 ~0초부터 시작.
+            두 신호가 절대 겹치지 않아 resample_aligned가 항상 None을 반환하고
+            버퍼가 영구적으로 STATUS_COLLECTING에 머묾.
+    수정 공식: t_stream = (qp - qp_origin) / freq
+      두 신호 모두 qp_origin 기준 경과시간(0초~)으로 통일.
+      싱크 보정은 두 신호 간 상대 시간차만 필요하므로 절대 위치 불필요.
+    """
+    # dp_origin은 이 수정으로 미사용이 되지만, 서명은 하위 호환을 위해 유지
     def convert(qp: int) -> float:
-        return (qp - qp_origin) / freq + dp_offset
+        return (qp - qp_origin) / freq
     return convert
 
 

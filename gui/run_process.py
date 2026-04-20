@@ -195,6 +195,15 @@ class ProcessMixin:
     def _stop_processes(self):
         self._running = False
         self.stop_flag.set()
+        # ── [재연결 수정] PID 캐시 즉시 무효화 ───────────────────────────────
+        # 팟플레이어 종료 즉시 _pid_cache를 초기화해 새 T2가 죽은 PID를
+        # 사용하지 않도록 한다. (_stop_processes → _start_processes 순으로 호출되므로
+        # 여기서 한 번만 무효화해도 새 캡처 세션이 올바른 PID를 탐색한다.)
+        try:
+            from audio_capture import invalidate_pid_cache
+            invalidate_pid_cache()
+        except Exception:
+            pass
         if hasattr(self, "_p1_stop_flag"):
             self._p1_stop_flag.set()
         try:

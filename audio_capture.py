@@ -11,6 +11,7 @@ audio_queue에 (t_stream, rms, vad) 튜플을 전송한다.
 """
 import ctypes
 import time
+import threading
 import platform
 # multiprocessing Queue/Value 불필요 (스레드 전환)
 from win32_utils import CFG, queue_put
@@ -34,26 +35,43 @@ def _windows_build() -> int:
 _WIN_BUILD                = _windows_build()
 _SUPPORT_PROCESS_LOOPBACK = (_WIN_BUILD >= 19041)
 
-# 팟플레이어 PID 탐색 (0.5초 캐시)
+# 팟플레이어 PID 탐색 (5초 캐시)
+# ── [재연결 수정] threading.Lock으로 Race Condition 방지 ──────────────────────
+# _pid_cache는 T2(proc_audio_capture)와 oped 모니터 스레드 등 복수 스레드에서
+# 동시에 읽고 쓸 수 있으므로 Lock으로 보호한다.
+_pid_lock  = threading.Lock()
 _pid_cache = [None, 0.0]
+
+def invalidate_pid_cache():
+    """PID 캐시를 즉시 무효화한다.
+    팟플레이어 종료/재시작 시 _stop_processes() 또는 새 캡처 세션 시작 시 호출해
+    종료된 팟플레이어의 stale PID가 새 T2에서 재사용되지 않도록 한다.
+    """
+    with _pid_lock:
+        _pid_cache[0] = None
+        _pid_cache[1] = 0.0
 
 def _find_potplayer_pid():
     import psutil
     now = time.time()
-    # 수정: 이전에 _pid_cache[0] is not None 조건으로 인해
-    # 팟플레이어가 없을 때(None 저장) 캐시가 전혀 동작하지 않아
-    # 0.5초마다 전체 프로세스를 순회하며 메모리가 계속 증가했음.
-    # 시간 기준으로만 캐시 판단하도록 수정.
-    if now - _pid_cache[1] < 5.0:
-        return _pid_cache[0]
-    for p in psutil.process_iter(["pid", "name"]):
-        if "potplayer" in p.info["name"].lower():
-            _pid_cache[0] = p.info["pid"]
-            _pid_cache[1] = now
+    # ── 캐시 유효 여부 확인 (Lock 안에서만 읽기) ───────────────────────────
+    with _pid_lock:
+        if now - _pid_cache[1] < 5.0:
             return _pid_cache[0]
-    _pid_cache[0] = None
-    _pid_cache[1] = now
-    return None
+    # 캐시 만료 → 전체 프로세스 재탐색 (Lock 밖에서 수행 — psutil 블로킹 방지)
+    found_pid = None
+    try:
+        for p in psutil.process_iter(["pid", "name"]):
+            if "potplayer" in p.info["name"].lower():
+                found_pid = p.info["pid"]
+                break
+    except Exception:
+        pass
+    # 탐색 결과를 Lock 안에서 캐시에 기록
+    with _pid_lock:
+        _pid_cache[0] = found_pid
+        _pid_cache[1] = now
+    return found_pid
 
 
 # ── VAD (Voice Activity Detection) ────────────────────────────────────────────
@@ -135,7 +153,12 @@ def _run_capture_session(pid, audio_queue, stop_flag, send_log, stream_anchor):
 
     t = threading.Thread(target=_session_mta, daemon=True)
     t.start()
-    t.join()
+    # ── [재연결 수정] t.join()에 타임아웃 추가 ───────────────────────────────
+    # 기존: t.join() — 타임아웃 없음 → _session_mta가 예상 밖의 이유로 블로킹되면
+    #   T2 스레드 전체가 영구 대기하여 _stop_processes()의 5초 join에 걸려 좀비화.
+    # 수정: 30초 타임아웃 — stop_flag가 세워지면 _run_capture_impl이 WAIT_MS(10ms)
+    #   이내에 종료되므로 30초는 충분한 안전 마진이다. 초과 시 daemon 스레드로 자연 소멸.
+    t.join(timeout=30.0)
     return result_box[0] if result_box[0] is not None else (False, "MTA 스레드 비정상 종료")
 
 
@@ -328,6 +351,12 @@ def proc_audio_capture(audio_queue, stop_flag, cfg: dict,
         sys.stdout = open(os.devnull, "w")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w")
+
+    # ── [재연결 수정] stale PID 캐시 즉시 무효화 ─────────────────────────────
+    # 새 캡처 세션 시작마다 캐시를 초기화해 종료된 팟플레이어의 PID가 재사용되는
+    # 것을 방지한다. 모듈 레벨 _pid_cache는 스레드 간 공유되므로 반드시 Lock으로
+    # 보호된 invalidate_pid_cache()를 통해 초기화한다.
+    invalidate_pid_cache()
 
     if stream_anchor is None:
         stream_anchor = [0, 48000, qpc_freq()]  # 더미 — 공유 안 됨

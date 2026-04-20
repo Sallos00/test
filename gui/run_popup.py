@@ -6,6 +6,11 @@ _toggle, _wait_for_potplayer, _monitor_for_popup, _show_start_popup
 - _toggle (stop 경로): _start_oped_monitor() 호출 후 팟플레이어 상태를
   즉시 확인해 "OP/ED 감지 중" 또는 "대기 중"을 표시.
   (기존: "중지됨" 고정 → _refresh()가 6초 후에야 OP/ED 상태 갱신)
+- [이슈2] 싱크 작업 중 '동영상 감지' 팝업 차단:
+  · _monitor_for_popup: 팝업 트리거 직전 _running 이중 검사.
+  · _show_start_popup: 진입 시 _running 즉시 검사 + 팝업 위젯을
+    _start_popup_widget에 저장 → _start_processes가 강제 소멸 가능.
+  · on_yes / on_no: 닫힐 때 _start_popup_widget 참조 해제.
 """
 import time
 import threading
@@ -95,11 +100,15 @@ class PopupMixin:
 
         while not self._closing and not self._running:
             hwnd = find_potplayer_hwnd()
+            # ── [Bug Fix 이슈2] 싱크 중 팝업 차단 ────────────────────────────
+            # 팝업 트리거 직전에 self._running을 한 번 더 검사하고,
+            # after_idle 예약 전에도 검사해 경쟁 조건을 최소화한다.
             if hwnd and is_potplayer_playing(hwnd) and is_potplayer_running():
                 if self._closing or self._running:
                     return
                 self._popup_open = True
                 def _safe_show():
+                    # ── 싱크가 이미 시작됐으면 팝업을 표시하지 않는다 ──────
                     if not self._closing and not self._running:
                         self._show_start_popup()
                     else:
@@ -113,6 +122,7 @@ class PopupMixin:
     def _show_start_popup(self):
         """동영상 재생 감지 시 싱크 시작 여부 팝업."""
         try:
+            # ── [Bug Fix 이슈2] 싱크 시작 직후 호출되는 경우 즉시 차단 ──────
             if self._running or self._closing:
                 self._popup_open = False
                 return
@@ -124,6 +134,8 @@ class PopupMixin:
             self._switch_tab_fn("sync")
 
         popup = tk.Toplevel(self.root)
+        # ── 팝업 위젯을 인스턴스에 저장 → _start_processes가 강제 종료 가능 ─
+        self._start_popup_widget = popup
         popup.title("Auto Sync")
         popup.resizable(False, False)
         popup.configure(bg=self.BG)
@@ -166,6 +178,7 @@ class PopupMixin:
                 try: self.root.after_cancel(auto_close_id[0])
                 except Exception: pass
             self._popup_open = False
+            self._start_popup_widget = None
             popup.destroy()
             self._toggle()
 
@@ -174,6 +187,7 @@ class PopupMixin:
                 try: self.root.after_cancel(auto_close_id[0])
                 except Exception: pass
             self._popup_open = False
+            self._start_popup_widget = None
             popup.destroy()
             threading.Thread(
                 target=self._monitor_for_popup,

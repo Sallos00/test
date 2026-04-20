@@ -7,12 +7,35 @@ _refresh
   좀비 T3의 상태가 proc_dot/proc_lbl을 덮어쓰지 않도록 가드 추가.
   (기존: 좀비 T3 → state_queue → main 블록 → proc_dot=TEXT_DIM 덮어씀
          → oped 모니터가 ACCENT로 설정해도 즉시 원래대로 돌아감)
+
+[버그 수정] 팟플레이어 상태 전환(Transition) 시 즉시 UI 갱신:
+  · [연결됨 → 미감지]: _handle_pot_exit → _update_ui() 내에서
+    pot_lbl="미감지"(ACCENT2), aud_lbl="대기 중"(TEXT_DIM),
+    proc_lbl="대기 중"(TEXT_DIM) 을 즉시 반영.
+    (기존: proc_lbl만 갱신 + 색상 오류(ACCENT→TEXT_DIM), pot/aud 미갱신)
+  · 오디오 장치 표기를 aud_n 의존성에서 Windows 빌드 기반 즉시 표기로 변경.
+    (기존: aud_n>0 일 때만 "캡처 중" → 재연결 직후 표기 지연 발생)
+  · OP/ED 모니터 블록의 proc_lbl 표기에서 불필요한 aud_n>0 조건 제거.
+    (요구사항: pot "연결됨" 이면 "OP/ED 감지 중", pot "미감지" 이면 "대기 중")
 """
 import time
 import threading
 import collections
+import platform as _platform
 
 from win32_utils import find_potplayer_hwnd, get_playback_info
+
+# Windows 빌드 확인 — ProcessLoopback은 빌드 19041(20H1) 이상에서만 지원
+def _windows_build() -> int:
+    try:
+        return int(_platform.version().split(".")[-1])
+    except Exception:
+        return 0
+
+_WIN_BUILD                = _windows_build()
+_SUPPORT_PROCESS_LOOPBACK = (_WIN_BUILD >= 19041)
+# 빌드 버전으로 결정한 오디오 캡처 모드 문자열 (UI 즉시 표기에 사용)
+_AUDIO_CAPTURE_MODE       = "ProcessLoopback" if _SUPPORT_PROCESS_LOOPBACK else "GlobalLoopback"
 
 
 class RefreshMixin:
@@ -47,16 +70,27 @@ class RefreshMixin:
                         if self._closing:
                             self._pot_exit_handling = False
                             return
+                        # ── [연결됨 → 미감지] 전환: 상태 표기 즉시 갱신 ──────────
+                        # 요구사항:
+                        #   pot_lbl  → "미감지" (ACCENT2)
+                        #   aud_lbl  → "대기 중" (TEXT_DIM)
+                        #   proc_lbl → "대기 중" (TEXT_DIM)
+                        self._pot_dot.config(fg=self.ACCENT2)
+                        self._pot_lbl.config(text="미감지", fg=self.ACCENT2)
+                        self._aud_dot.config(fg=self.TEXT_DIM)
+                        self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+                        self._proc_dot.config(fg=self.TEXT_DIM)
+                        self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
                         self._start_btn.config(
                             text="⏳ 대기 중...",
                             bg=self.BG3, fg=self.TEXT_DIM,
                             activebackground=self.BORDER,
                             state="disabled"
                         )
-                        self._proc_lbl.config(
-                            text="대기 중", fg=self.ACCENT
-                        )
                         self._badge.config(text="  대기 중  ", fg=self.TEXT, bg=self.BG3)
+                        # 싱크 일시 중단 상태: oped 모니터 유지 + 팟플 재연결 대기.
+                        # 팟플레이어 재감지 시 _wait_for_potplayer → _start_processes 로
+                        # 싱크가 자동으로 재개된다.
                         self._start_oped_monitor()
                         threading.Thread(
                             target=self._wait_for_potplayer, daemon=True).start()
@@ -95,6 +129,8 @@ class RefreshMixin:
                     if not hasattr(self, "_log_lines"):
                         self._log_lines = collections.deque(maxlen=100)
                     self._log_lines.append(f"🔊 {msg}")
+                    # _aud_capture_mode는 UI 표기에 더 이상 사용되지 않으나
+                    # 디버그 로그 분류 목적으로 유지.
                     if "[ProcessLoopback]" in msg:
                         self._aud_capture_mode = "ProcessLoopback"
                     elif "[GlobalLoopback]" in msg:
@@ -137,21 +173,36 @@ class RefreshMixin:
                             self._log_lines.append(line)
                     self._om_log_seen_count = len(om_logs)
                     self._om_log_seen_last  = om_logs[-1] if om_logs else None
+
                 pot_ok = om_latest.get("potplayer_ok", False)
-                aud_n  = om_latest.get("audio_samples", 0) if pot_ok else 0
                 if not pot_ok and getattr(self, "_pot_was_ok", False):
                     if hasattr(self, "_switch_tab_fn"):
                         self._switch_tab_fn("history")
                 self._pot_was_ok = pot_ok
+
+                # ── 팟플레이어 상태 표기 ─────────────────────────────────────
+                # pot_ok=True → "연결됨", pot_ok=False → "미감지"
                 c = self.ACCENT3 if pot_ok else self.ACCENT2
                 self._pot_dot.config(fg=c)
                 self._pot_lbl.config(text="연결됨" if pot_ok else "미감지", fg=c)
-                c = self.ACCENT3 if aud_n > 0 else self.TEXT_DIM
-                self._aud_dot.config(fg=c)
-                _aud_mode = getattr(self, "_aud_capture_mode", "")
-                _aud_suffix = f" ({_aud_mode})" if _aud_mode and aud_n > 0 else ""
-                self._aud_lbl.config(text=("캡처 중" if aud_n > 0 else "대기 중") + _aud_suffix, fg=c)
-                if pot_ok and aud_n > 0 and not self._running:
+
+                # ── 오디오 장치 상태 표기 ─────────────────────────────────────
+                # 요구사항: pot "연결됨" → Windows 빌드 기반 캡처 모드 즉시 표기
+                #            pot "미감지" → "대기 중"
+                # (기존: aud_n>0 조건에 의존 → 연결 초기에 표기 지연 발생)
+                if pot_ok:
+                    self._aud_dot.config(fg=self.ACCENT3)
+                    self._aud_lbl.config(
+                        text=f"캡처 중 ({_AUDIO_CAPTURE_MODE})", fg=self.ACCENT3)
+                else:
+                    self._aud_dot.config(fg=self.TEXT_DIM)
+                    self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+
+                # ── 프로세스 상태 표기 ────────────────────────────────────────
+                # 요구사항: pot "연결됨" + 싱크 미실행 → "OP/ED 감지 중"
+                #            pot "미감지"              → "대기 중"
+                # (기존: aud_n>0 조건이 불필요하게 추가되어 있어 오도적 표기 발생)
+                if pot_ok and not self._running:
                     self._proc_dot.config(fg=self.ACCENT)
                     self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
                 else:
@@ -195,16 +246,23 @@ class RefreshMixin:
                 if hasattr(self, "_switch_tab_fn"):
                     self._switch_tab_fn("history")
             self._pot_was_ok = pot_ok
+
+            # ── 팟플레이어 상태 표기 ─────────────────────────────────────────
             c = self.ACCENT3 if pot_ok else self.ACCENT2
             t = "연결됨" if pot_ok else "미감지"
             self._pot_dot.config(fg=c); self._pot_lbl.config(text=t, fg=c)
 
-            _aud_n_disp = aud_n if pot_ok else 0
-            c = self.ACCENT3 if _aud_n_disp > 0 else self.TEXT_DIM
-            _aud_mode = getattr(self, "_aud_capture_mode", "")
-            _aud_suffix = f" ({_aud_mode})" if _aud_mode and _aud_n_disp > 0 else ""
-            t = ("캡처 중" if _aud_n_disp > 0 else "대기 중") + _aud_suffix
-            self._aud_dot.config(fg=c); self._aud_lbl.config(text=t, fg=c)
+            # ── 오디오 장치 상태 표기 ─────────────────────────────────────────
+            # 요구사항: pot "연결됨" → Windows 빌드 기반 캡처 모드 즉시 표기
+            #            pot "미감지" → "대기 중"
+            # (기존: aud_n>0 의존으로 재연결 직후 표기 지연, 색상 불일치 발생)
+            if pot_ok:
+                self._aud_dot.config(fg=self.ACCENT3)
+                self._aud_lbl.config(
+                    text=f"캡처 중 ({_AUDIO_CAPTURE_MODE})", fg=self.ACCENT3)
+            else:
+                self._aud_dot.config(fg=self.TEXT_DIM)
+                self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
 
             if self._running and lip_n > 0:
                 sign = "+" if offset > 0 else ""
@@ -236,18 +294,29 @@ class RefreshMixin:
             self._lip_cnt.config(text=str(lip_n))
             self._aud_cnt.config(text=str(aud_n))
 
-            # ── [Bug Fix] proc_dot 덮어쓰기 방지 ────────────────────────────
-            # 기존: self._running 여부만 보고 항상 proc_dot을 갱신.
-            #       → oped 모니터가 ACCENT(초록)으로 설정한 proc_dot을
-            #         좀비 T3의 state가 TEXT_DIM(회색)으로 즉시 덮어씀.
-            # 수정: 싱크 실행 중일 때만 갱신. oped 모니터 모드에서는
-            #       위의 oped 블록이 이미 proc_dot을 올바르게 설정했으므로
-            #       여기서 건드리지 않는다.
-            if self._running:
+            # ── 프로세스 상태 표기 ─────────────────────────────────────────────
+            # 요구사항:
+            #   pot "연결됨" + 싱크 실행 중 → "P1·T2·T3 실행 중"
+            #   pot "미감지"               → "대기 중" (싱크 실행 여부 무관)
+            #   pot "연결됨" + 싱크 미실행 → oped 모니터 블록이 처리, 덮어쓰지 않음
+            #
+            # [Bug Fix] 기존: self._running 여부만 보고 항상 proc_dot/lbl을 갱신.
+            #   → oped 모니터가 ACCENT(초록)로 설정한 proc_dot을
+            #     좀비 T3의 state가 TEXT_DIM(회색)으로 즉시 덮어씀.
+            if pot_ok and self._running:
                 self._proc_dot.config(fg=self.ACCENT3)
-            elif not getattr(self, "_oped_monitor_running", False):
+                self._proc_lbl.config(text="P1·T2·T3 실행 중", fg=self.ACCENT3)
+            elif not pot_ok:
+                # pot "미감지": 싱크 실행 여부 무관하게 "대기 중"
                 self._proc_dot.config(fg=self.TEXT_DIM)
-            # _oped_monitor_running=True인 경우: oped 블록이 이미 처리함
+                self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+            elif not getattr(self, "_oped_monitor_running", False):
+                # pot_ok=True, _running=False, oped 모니터도 없는 경우
+                self._proc_dot.config(fg=self.TEXT_DIM)
+                self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+            # pot_ok=True + _running=False + _oped_monitor_running=True:
+            #   → oped 모니터 블록이 이미 proc_dot/proc_lbl을 올바르게 설정했으므로
+            #     여기서 건드리지 않는다.
 
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)

@@ -6,6 +6,10 @@ _start_processes, _stop_processes, _reset
 - _start_processes: stop_flag.clear() 대신 새 threading.Event() 생성 (좀비 스레드 부활 방지)
 - _stop_processes:  스레드 join timeout 2s → 5s (T3 sleep INTERVAL=3s 보다 크게)
 - T2/T3 스레드 목표에 예외 래퍼 추가 (무음 종료 방지)
+- [이슈1] _start_processes 완료 시점에 hwnd 직접 조회 → 팟플 재시작 직후
+  '미감지' 고정 현상 방지 (oped 모니터 종료 후 UI에 잔류하는 pot_ok=False 즉시 교정)
+- [이슈2] _start_processes 진입 시 대기 중인 팝업 after_id 취소 +
+  이미 열린 팝업 위젯(_start_popup_widget) 강제 소멸 → 싱크 중 팝업 노출 차단
 """
 import time
 import threading
@@ -27,6 +31,27 @@ class ProcessMixin:
     def _start_processes(self):
         """P1(프로세스) + T2·T3(스레드) 시작."""
         self._stop_oped_monitor()   # 싱크 시작 시 별도 모니터 중지
+
+        # ── [Bug Fix 이슈2] 싱크 시작 시 대기 중인 '동영상 감지' 팝업 즉시 취소 ──
+        # _monitor_for_popup이 after_idle로 예약한 _safe_show 콜백을 취소하고,
+        # 이미 열려 있는 팝업 창(countdown 진행 중)도 강제로 닫는다.
+        # 경쟁 조건: _running=False인 순간 팝업이 트리거되었으나
+        #   그 직후 _start_processes가 호출되면 팝업이 싱크 중에도 노출됨.
+        _pending = getattr(self, '_popup_after_id', None)
+        if _pending is not None:
+            try:
+                self.root.after_cancel(_pending)
+            except Exception:
+                pass
+            self._popup_after_id = None
+        self._popup_open = False
+        _open_popup = getattr(self, '_start_popup_widget', None)
+        if _open_popup is not None:
+            try:
+                _open_popup.destroy()
+            except Exception:
+                pass
+            self._start_popup_widget = None
 
         # ── [Bug Fix 1] 세션마다 새 stop_flag 생성 ──────────────────────────
         # 기존: self.stop_flag.clear() → 직전 세션에서 죽지 못한 좀비 T3가
@@ -123,6 +148,15 @@ class ProcessMixin:
                                state="normal")
         self._proc_lbl.config(text="P1·T2·T3 실행 중", fg=self.ACCENT3)
         self._toast("🎬 Auto Sync", "싱크 보정이 시작되었습니다.")
+
+        # ── [Bug Fix 이슈1] 재시작 직후 '미감지' 상태 고정 방지 ─────────────
+        # _stop_oped_monitor() 종료 후 oped 모니터의 마지막 potplayer_ok=False 값이
+        # UI에 잔류한 채 T3의 첫 상태 보고가 도달하기 전까지 '미감지'로 고정됨.
+        # 해결: _start_processes 완료 시점에 hwnd를 직접 조회하여 즉시 '연결됨'으로 갱신.
+        _hwnd_now = find_potplayer_hwnd()
+        if _hwnd_now:
+            self._pot_dot.config(fg=self.ACCENT3)
+            self._pot_lbl.config(text="연결됨", fg=self.ACCENT3)
 
     def _stop_processes(self):
         self._running = False

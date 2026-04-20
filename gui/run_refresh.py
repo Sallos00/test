@@ -70,6 +70,17 @@ class RefreshMixin:
                         if self._closing:
                             self._pot_exit_handling = False
                             return
+                        # ── [UI 탭 전환 버그 수정] 팟플레이어 종료 즉시 탭 전환 ──
+                        # 기존: state_queue 드레인 타이밍에 의존 → _stop_processes가
+                        #   state_queue를 먼저 비우면 pot_ok=False 상태가 소실되어
+                        #   탭 전환이 영구적으로 발생하지 않는 경쟁조건 존재.
+                        # 수정: _update_ui에서 _pot_was_ok를 직접 확인해 즉시 호출.
+                        #   _refresh의 omed/main 블록과의 중복 전환은 이 시점에
+                        #   _pot_was_ok=False로 설정함으로써 방지한다.
+                        if getattr(self, "_pot_was_ok", False) and hasattr(self, "_switch_tab_fn"):
+                            self._switch_tab_fn("history")
+                        self._pot_was_ok = False   # 즉시 미감지 상태로 고정
+
                         # ── [연결됨 → 미감지] 전환: 상태 표기 즉시 갱신 ──────────
                         # 요구사항:
                         #   pot_lbl  → "미감지" (ACCENT2)
@@ -92,8 +103,12 @@ class RefreshMixin:
                         # 팟플레이어 재감지 시 _wait_for_potplayer → _start_processes 로
                         # 싱크가 자동으로 재개된다.
                         self._start_oped_monitor()
-                        threading.Thread(
-                            target=self._wait_for_potplayer, daemon=True).start()
+                        # ── [반복 실행 오류·재연결 수정] 중복 대기 스레드 방지 ──
+                        # _waiting_for_pot 플래그가 세워져 있으면 이미 대기 중인
+                        # 스레드가 존재하므로 새 스레드를 추가로 생성하지 않는다.
+                        if not getattr(self, "_waiting_for_pot", False):
+                            threading.Thread(
+                                target=self._wait_for_potplayer, daemon=True).start()
                         self._pot_exit_handling = False
                     self.root.after(0, _update_ui)
                 threading.Thread(

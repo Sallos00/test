@@ -199,7 +199,7 @@ class LipSyncGUILayout:
         self._proc_lbl.pack(side="left", padx=4, anchor="center")
         dr = reg(tk.Frame(card, bg=self.BG2), bg="BG2")
         dr.pack(fill="x", pady=(4, 0))
-        reg(tk.Label(dr, text="재생 위치", font=MONO, bg=self.BG2, fg=self.TEXT_MID, width=11, anchor="w"), bg="BG2", fg="TEXT_MID").pack(side="left", anchor="center")
+        reg(tk.Label(dr, text="타임 라인", font=MONO, bg=self.BG2, fg=self.TEXT_MID, width=11, anchor="w"), bg="BG2", fg="TEXT_MID").pack(side="left", anchor="center")
         self._dur_lbl = reg(tk.Label(dr, text="— / —", font=MONO, bg=self.BG2, fg=self.TEXT_MID), bg="BG2", fg="TEXT_MID")
         self._dur_lbl.pack(side="left", padx=4, anchor="center")
         or_ = reg(tk.Frame(sync_frame, bg=self.BG, padx=P), bg="BG")

@@ -141,24 +141,34 @@ def _run_capture_session(pid, audio_queue, stop_flag, send_log, stream_anchor):
     result_box = [None]
 
     def _session_mta():
-        hr_co = _ole32.CoInitializeEx(None, 0x0)
-        co_ok = hr_co in (0, 1)
+        # ── [버그 수정] CoInitializeEx를 try 블록 안으로 이동 ─────────────────
+        # 이전: try 블록 밖에 있어서 CoInitializeEx 자체가 예외를 던지면
+        #   result_box[0]가 None인 채로 스레드가 종료되었음.
+        co_ok = False
         try:
+            hr_co = _ole32.CoInitializeEx(None, 0x0)
+            # S_OK(0) 또는 S_FALSE(1, 이미 초기화됨)일 때만 CoUninitialize 호출
+            co_ok = hr_co in (0, 1)
             result_box[0] = _run_capture_impl(pid, audio_queue, stop_flag, send_log, stream_anchor)
-        except Exception as e:
-            result_box[0] = (False, f"예외(MTA): {e}")
+        except BaseException as e:
+            # ── [버그 수정] Exception → BaseException ─────────────────────────
+            # MemoryError, SystemExit, KeyboardInterrupt 등 Exception에 포함되지
+            # 않는 예외까지 포획하여 result_box[0]가 항상 설정되도록 보장.
+            result_box[0] = (False, f"예외(MTA): {type(e).__name__}: {e}")
         finally:
             if co_ok:
                 _ole32.CoUninitialize()
 
     t = threading.Thread(target=_session_mta, daemon=True)
     t.start()
-    # ── [재연결 수정] t.join()에 타임아웃 추가 ───────────────────────────────
-    # 기존: t.join() — 타임아웃 없음 → _session_mta가 예상 밖의 이유로 블로킹되면
-    #   T2 스레드 전체가 영구 대기하여 _stop_processes()의 5초 join에 걸려 좀비화.
-    # 수정: 30초 타임아웃 — stop_flag가 세워지면 _run_capture_impl이 WAIT_MS(10ms)
-    #   이내에 종료되므로 30초는 충분한 안전 마진이다. 초과 시 daemon 스레드로 자연 소멸.
-    t.join(timeout=30.0)
+    # ── [버그 수정] t.join(timeout=30.0) → t.join() ──────────────────────────
+    # 이전(버그): 30초 타임아웃 → 정상 캡처가 30초를 초과하는 순간 result_box[0]가
+    #   None 상태로 반환되어 "MTA 스레드 비정상 종료" 로그가 반복 출력됐고,
+    #   동시에 이전 MTA 스레드가 살아있는 상태에서 새 스레드가 생성되어 장치 충돌.
+    # 수정: 타임아웃 제거. stop_flag가 세워지면 _run_capture_impl의 루프는
+    #   WaitForSingleObject 최대 대기(WAIT_MS=10ms) 이내에 정상 종료되므로
+    #   블로킹 우려가 없다. 진짜 비정상 블로킹 시에는 daemon 스레드로 자연 소멸.
+    t.join()
     return result_box[0] if result_box[0] is not None else (False, "MTA 스레드 비정상 종료")
 
 
@@ -244,8 +254,11 @@ def _run_capture_impl(pid, audio_queue, stop_flag, send_log, stream_anchor):
 
         return True, ""
 
-    except OSError as e:
-        return False, str(e)
+    except Exception as e:
+        # ── [버그 수정] OSError → Exception ──────────────────────────────────
+        # ctypes.ArgumentError, ValueError, OSError 외 모든 예외를 포획하여
+        # 스레드가 비정상 종료(Crash)되지 않도록 보장.
+        return False, f"{type(e).__name__}: {e}"
     finally:
         if cap:
             try: audio_client_stop(client)
@@ -264,13 +277,17 @@ def _run_global_loopback_session(audio_queue, stop_flag, send_log, stream_anchor
     result_box = [None]
 
     def _mta():
-        hr_co = _ole32.CoInitializeEx(None, 0x0)
-        co_ok = hr_co in (0, 1)
+        # ── [버그 수정] CoInitializeEx를 try 블록 안으로 이동 ─────────────────
+        # _run_capture_session과 동일한 이유: CoInitializeEx 예외 시
+        # result_box[0]가 None으로 남는 문제 방지.
+        co_ok = False
         client  = None
         cap     = None
         h_event = None
         freq    = qpc_freq()
         try:
+            hr_co   = _ole32.CoInitializeEx(None, 0x0)
+            co_ok   = hr_co in (0, 1)
             client  = activate_global_loopback()
             sr, ch  = audio_client_initialize_loopback(client)
             h_event = _kernel32.CreateEventW(None, False, False, None)
@@ -316,8 +333,9 @@ def _run_global_loopback_session(audio_queue, stop_flag, send_log, stream_anchor
                     release_buffer(cap, num_frames)
 
             result_box[0] = (True, "")
-        except Exception as e:
-            result_box[0] = (False, str(e))
+        except BaseException as e:
+            # ── [버그 수정] Exception → BaseException ─────────────────────────
+            result_box[0] = (False, f"{type(e).__name__}: {e}")
         finally:
             if cap:
                 try: audio_client_stop(client)

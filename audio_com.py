@@ -172,8 +172,13 @@ def activate_process_loopback(pid: int) -> ctypes.c_void_p:
     result_box = [None, None]
 
     def _do_activate():
-        hr_co = _ole32.CoInitializeEx(None, 0x0)
+        # ── [버그 수정] CoInitializeEx를 try 블록 안으로 이동 ─────────────────
+        # 이전: CoInitializeEx가 try 밖에 있어 예외 발생 시 result_box[1]에
+        #   기록되지 않고, CoUninitialize도 누락되어 COM 리소스 누수 발생.
+        co_ok = False
         try:
+            hr_co = _ole32.CoInitializeEx(None, 0x0)
+            co_ok = hr_co in (0, 1)
             mmdevapi   = ctypes.windll.LoadLibrary("Mmdevapi.dll")
             fn_activate = ctypes.WINFUNCTYPE(
                 ctypes.c_long,
@@ -213,6 +218,10 @@ def activate_process_loopback(pid: int) -> ctypes.c_void_p:
                 handler.close()
         except Exception as e:
             result_box[1] = e
+        finally:
+            # ── [버그 수정] CoUninitialize 누락 추가 ─────────────────────────
+            if co_ok:
+                _ole32.CoUninitialize()
 
     t = threading.Thread(target=_do_activate, daemon=True)
     t.start()

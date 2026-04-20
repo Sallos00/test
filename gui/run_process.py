@@ -45,6 +45,15 @@ class ProcessMixin:
 
     def _start_processes(self):
         """P1(프로세스) + T2·T3(스레드) 시작."""
+
+        # ── [반복 실행 오류 수정] 이중 시작 방지 ────────────────────────────
+        # 복수의 _wait_for_potplayer 스레드가 동시에 pot 감지 후 after(0)을 통해
+        # _start_processes를 연속 호출하면, 두 번째 호출이 첫 번째가 생성한
+        # 파이프·큐를 강제 해제해 T2/T3가 즉시 죽는 문제가 발생한다.
+        # self._running이 True이면 이미 세션이 활성화된 상태이므로 즉시 반환한다.
+        if self._running:
+            return
+
         self._stop_oped_monitor()   # 싱크 시작 시 별도 모니터 중지
 
         # ── [Bug Fix 이슈2] 싱크 시작 시 대기 중인 '동영상 감지' 팝업 즉시 취소 ──
@@ -225,6 +234,15 @@ class ProcessMixin:
             queues=_other_qs,
             mp_queues=([_lip_q] if _lip_q is not None else []),
         )
+
+        # ── [반복 실행 오류 수정] 큐·파이프 참조 초기화 ─────────────────────
+        # _stop_processes 후 참조가 남아있으면, 재시작 시 _start_processes가
+        # 이미 해제된 자원을 다시 full_cleanup_and_release하려다 OSError/데이터
+        # 손상이 발생한다. None으로 초기화해 이중 해제를 완전히 방지한다.
+        self._lip_queue        = None
+        self._lip_queue_writer = None
+        self._audio_queue      = None
+        self._main_log_queue   = None
 
     def _reset(self):
         if self._running:

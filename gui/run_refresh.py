@@ -65,55 +65,81 @@ class RefreshMixin:
                     and not getattr(self, "_pot_exit_handling", False)):
                 self._pot_exit_handling = True
                 def _handle_pot_exit():
-                    self._stop_processes()
-                    def _update_ui():
-                        if self._closing:
-                            self._pot_exit_handling = False
-                            return
-                        # ── [UI 탭 전환 버그 수정] 팟플레이어 종료 즉시 탭 전환 ──
-                        # 기존: state_queue 드레인 타이밍에 의존 → _stop_processes가
-                        #   state_queue를 먼저 비우면 pot_ok=False 상태가 소실되어
-                        #   탭 전환이 영구적으로 발생하지 않는 경쟁조건 존재.
-                        # 수정: _update_ui에서 _pot_was_ok를 직접 확인해 즉시 호출.
-                        #   _refresh의 omed/main 블록과의 중복 전환은 이 시점에
-                        #   _pot_was_ok=False로 설정함으로써 방지한다.
-                        if getattr(self, "_pot_was_ok", False) and hasattr(self, "_switch_tab_fn"):
-                            self._switch_tab_fn("history")
-                        self._pot_was_ok = False   # 즉시 미감지 상태로 고정
+                    # ── [재연결 수정] try/finally로 _pot_exit_handling 해제 보장 ──
+                    # 기존: _stop_processes()에서 예외 발생 시 _update_ui가 스케줄되지
+                    #   않아 _pot_exit_handling이 True로 영구 고착 →
+                    #   _refresh()의 exit 감지 조건이 항상 False가 되어
+                    #   팟플레이어 재시작 후에도 재연결 로직이 동작하지 않는 문제.
+                    # 수정: _scheduled 플래그로 _update_ui 스케줄 성공 여부를 추적,
+                    #   실패 시 finally 블록에서 즉시 플래그 해제 + 재연결 스레드 시작.
+                    _scheduled = [False]
+                    try:
+                        self._stop_processes()
+                        def _update_ui():
+                            if self._closing:
+                                self._pot_exit_handling = False
+                                return
+                            # ── [UI 탭 전환 버그 수정] 팟플레이어 종료 즉시 탭 전환 ──
+                            # 기존: state_queue 드레인 타이밍에 의존 → _stop_processes가
+                            #   state_queue를 먼저 비우면 pot_ok=False 상태가 소실되어
+                            #   탭 전환이 영구적으로 발생하지 않는 경쟁조건 존재.
+                            # 수정: _update_ui에서 _pot_was_ok를 직접 확인해 즉시 호출.
+                            #   _refresh의 omed/main 블록과의 중복 전환은 이 시점에
+                            #   _pot_was_ok=False로 설정함으로써 방지한다.
+                            if getattr(self, "_pot_was_ok", False) and hasattr(self, "_switch_tab_fn"):
+                                self._switch_tab_fn("history")
+                            self._pot_was_ok = False   # 즉시 미감지 상태로 고정
 
-                        # ── [연결됨 → 미감지] 전환: 상태 표기 즉시 갱신 ──────────
-                        # 요구사항:
-                        #   pot_lbl  → "미감지" (ACCENT2)
-                        #   aud_lbl  → "대기 중" (TEXT_DIM)
-                        #   proc_lbl → "대기 중" (TEXT_DIM)
-                        self._pot_dot.config(fg=self.ACCENT2)
-                        self._pot_lbl.config(text="미감지", fg=self.ACCENT2)
-                        self._aud_dot.config(fg=self.TEXT_DIM)
-                        self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
-                        self._proc_dot.config(fg=self.TEXT_DIM)
-                        self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
-                        self._start_btn.config(
-                            text="⏳ 대기 중...",
-                            bg=self.BG3, fg=self.TEXT_DIM,
-                            activebackground=self.BORDER,
-                            state="disabled"
-                        )
-                        self._badge.config(text="  대기 중  ", fg=self.TEXT, bg=self.BG3)
-                        # 싱크 일시 중단 상태: oped 모니터 유지 + 팟플 재연결 대기.
-                        # 팟플레이어 재감지 시 _wait_for_potplayer → _start_processes 로
-                        # 싱크가 자동으로 재개된다.
-                        self._start_oped_monitor()
-                        # ── [반복 실행 오류·재연결 수정] 중복 대기 스레드 방지 ──
-                        # _waiting_for_pot 플래그가 세워져 있으면 이미 대기 중인
-                        # 스레드가 존재하므로 새 스레드를 추가로 생성하지 않는다.
-                        if not getattr(self, "_waiting_for_pot", False):
-                            threading.Thread(
-                                target=self._wait_for_potplayer, daemon=True).start()
-                        self._pot_exit_handling = False
-                    self.root.after(0, _update_ui)
-                threading.Thread(
-                    target=_handle_pot_exit, daemon=True,
-                    name="pot-exit-handler").start()
+                            # ── [연결됨 → 미감지] 전환: 상태 표기 즉시 갱신 ──────────
+                            # 요구사항:
+                            #   pot_lbl  → "미감지" (ACCENT2)
+                            #   aud_lbl  → "대기 중" (TEXT_DIM)
+                            #   proc_lbl → "대기 중" (TEXT_DIM)
+                            self._pot_dot.config(fg=self.ACCENT2)
+                            self._pot_lbl.config(text="미감지", fg=self.ACCENT2)
+                            self._aud_dot.config(fg=self.TEXT_DIM)
+                            self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+                            self._proc_dot.config(fg=self.TEXT_DIM)
+                            self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+                            self._start_btn.config(
+                                text="⏳ 대기 중...",
+                                bg=self.BG3, fg=self.TEXT_DIM,
+                                activebackground=self.BORDER,
+                                state="disabled"
+                            )
+                            self._badge.config(text="  대기 중  ", fg=self.TEXT, bg=self.BG3)
+                            # 싱크 일시 중단 상태: oped 모니터 유지 + 팟플 재연결 대기.
+                            # 팟플레이어 재감지 시 _wait_for_potplayer → _start_processes 로
+                            # 싱크가 자동으로 재개된다.
+                            self._start_oped_monitor()
+                            # ── [반복 실행 오류·재연결 수정] 중복 대기 스레드 방지 ──
+                            # _waiting_for_pot 플래그가 세워져 있으면 이미 대기 중인
+                            # 스레드가 존재하므로 새 스레드를 추가로 생성하지 않는다.
+                            if not getattr(self, "_waiting_for_pot", False):
+                                threading.Thread(
+                                    target=self._wait_for_potplayer, daemon=True).start()
+                            self._pot_exit_handling = False
+                        self.root.after(0, _update_ui)
+                        _scheduled[0] = True
+                    except Exception:
+                        pass
+                    finally:
+                        if not _scheduled[0]:
+                            # _stop_processes() 예외 발생 → _update_ui가 스케줄되지
+                            # 않은 비정상 경로. 플래그를 즉시 해제하고 재연결 대기
+                            # 스레드를 보장해 싱크 재개 경로가 완전히 막히지 않도록 한다.
+                            def _emergency_reset():
+                                if self._closing:
+                                    return
+                                self._pot_exit_handling = False
+                                if not getattr(self, "_waiting_for_pot", False):
+                                    threading.Thread(
+                                        target=self._wait_for_potplayer,
+                                        daemon=True).start()
+                            try:
+                                self.root.after(0, _emergency_reset)
+                            except Exception:
+                                self._pot_exit_handling = False
 
         _WS_TRIM_INTERVAL = 600
         if (not self._running

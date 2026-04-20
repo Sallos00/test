@@ -75,14 +75,28 @@ class PopupMixin:
                 daemon=True).start()
 
     def _wait_for_potplayer(self):
-        while True:
-            hwnd = find_potplayer_hwnd()
-            if hwnd:
-                self._toast("🎬 Auto Sync",
-                            "팟플레이어가 감지되었습니다.\n싱크 보정을 시작합니다.")
-                self.root.after(0, self._start_processes)
-                return
-            time.sleep(0.5)
+        # ── [반복 실행 오류·재연결 수정] 중복 대기 스레드 방지 ──────────────
+        # _handle_pot_exit 와 _toggle 양쪽에서 동시에 스레드가 생성될 수 있다.
+        # 두 번째 스레드가 pot 감지 후 _start_processes를 재호출하면
+        # 이미 살아있는 세션의 파이프를 강제 해제하는 문제가 발생한다.
+        # _waiting_for_pot 플래그로 동시에 단 하나의 대기 스레드만 허용한다.
+        if getattr(self, "_waiting_for_pot", False):
+            return
+        self._waiting_for_pot = True
+        try:
+            while not self._closing:
+                # [재연결 수정] 이미 실행 중이면 대기 불필요 — 조용히 종료
+                if self._running:
+                    return
+                hwnd = find_potplayer_hwnd()
+                if hwnd:
+                    self._toast("🎬 Auto Sync",
+                                "팟플레이어가 감지되었습니다.\n싱크 보정을 시작합니다.")
+                    self.root.after(0, self._start_processes)
+                    return
+                time.sleep(0.5)
+        finally:
+            self._waiting_for_pot = False
 
     def _monitor_for_popup(self, wait_for_exit=False):
         """싱크 OFF 상태에서 팟플레이어 재생 감지 시 시작 팝업 표시."""

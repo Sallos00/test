@@ -112,7 +112,7 @@ class ProcessMixin:
         _lip_r, _lip_w = _mp.Pipe(duplex=False)
         self._lip_queue        = _lip_r
         self._lip_queue_writer = _lip_w
-        self._audio_queue = _queue.Queue(maxsize=0)  # [수정] 30→0(무제한): maxsize=30+drain=10으로 오디오 96.5% 손실 → 교차상관 피크 랜덤화 원인
+        self._audio_queue = _queue.Queue(maxsize=600)  # [수정] 0(무제한)→600: 무제한이면 zombie T2 또는 순간 GC 지연 시 메모리 무한증가. 600=약 6초치(@94pkt/s), queue_put이 Full 시 오래된 항목 자동 제거
 
         from processes import proc_lip_capture, proc_audio_capture, proc_analyzer  # lazy import
 

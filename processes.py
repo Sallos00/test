@@ -67,13 +67,25 @@ def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
         qp_now_val = qpc_now()
         raw  = capture_window(hwnd) if hwnd else None
 
-        if stream_anchor is not None and stream_anchor[0] > 0:
+        # [Bug B 수정] 앵커 미확립 시 절대 QPC를 t_hw로 사용하지 않고 대기.
+        # 기존: stream_anchor[0]==0 이면 t_hw = qpc_now/freq (시스템 부팅 후 경과초, ~3600s+)
+        #   → 앵커 확립 후 t_hw ≈ 0초와 섞여 lpb에 두 기준이 공존.
+        #   trim 로직(latest_lip - oldest_lip > window)은 latest < oldest 일 때 음수가 되어
+        #   절대 제거 조건 미충족 → stale 항목이 maxlen(475개)에 의해 밀려날 때까지
+        #   drain 속도(≈3.3개/초) 기준 최대 144초간 lpb 오염 지속.
+        #   이 기간 resample_aligned가 항상 None → 버퍼 영구 수집 고착.
+        # 수정: 앵커가 없으면 t_hw를 계산만 하고 lip_queue에는 쓰지 않는다.
+        #   P1은 얼굴 탐지·ROI 처리를 계속 수행(워밍업)하되 타임스탬프 오염 없음.
+        _anchor_ready = (stream_anchor is not None and stream_anchor[0] > 0)
+
+        if _anchor_ready:
             qp_origin = stream_anchor[0]
             sr_anc    = stream_anchor[1]
             freq_anc  = stream_anchor[2]
             t_hw = (qp_now_val - qp_origin) / freq_anc
         else:
-            t_hw = qp_now_val / _freq
+            # 앵커 미확립: t_hw 계산 스킵, 이 프레임은 lip_queue에 적재하지 않음
+            t_hw = None
 
         now = time.time()
         if now - last_diag_time >= 30.0:
@@ -141,7 +153,10 @@ def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
                 motion = float(small.var(axis=0).mean()) / (255.0 ** 2)
                 del small
             del lip_roi
-            queue_put(lip_queue, (t_hw, motion))
+            # [Bug B 수정] 앵커 확립 후에만 lip_queue에 적재.
+            # t_hw is None이면 stream_anchor 미확립 상태이므로 이 프레임은 버림.
+            if t_hw is not None:
+                queue_put(lip_queue, (t_hw, motion))
 
         del gray  # 그레이스케일 프레임 즉시 해제
 
@@ -244,26 +259,20 @@ def proc_analyzer(lip_queue, audio_queue,
         드레인해 lpb / aub 버퍼에 적재한다.
         lip_queue가 Pipe Connection이면 poll()+recv(), 아니면 get_nowait() 사용.
 
-        [수정 1] 드레인 한도를 ANALYSIS_INTERVAL × CAPTURE_FPS 이상으로 확대.
-        이전 상한(10개)은 3초 루프에서 15fps × 3s = 45개 생성 대비 지나치게 보수적이어서
-        lpb/aub 충전 속도가 크게 지연됨. deque maxlen(_MAX_BUF)으로 메모리 상한이
-        이미 보장되므로 드레인 한도를 늘려도 메모리 급증 위험 없음.
-
-        [수정 2] 립/오디오 타임스탬프 기준 불일치 감지 → lpb 강제 초기화.
-        stream_anchor 미확립 구간에 P1이 t_hw = qpc_now/freq (절대 QPC 시간, 수천 초)를
-        lpb에 적재하고, 앵커 확립 후에는 t_hw ≈ 0초로 전환된다. 두 기준이 섞이면
-        resample_aligned가 항상 None을 반환해 버퍼가 영구 수집 상태에 머묾.
+        [수정] 한 번의 drain_queues() 호출에서 처리하는 항목 수를 제한한다.
+        큐 전체를 한 번에 소비하면 대량 적체 시 lpb/aub가 순간적으로 폭증하여
+        메모리가 급격히 증가한다. 루프당 최대 처리 개수를 제한해 이를 방지한다.
         """
-        # [수정 1] 루프 1회당 최대 처리 개수 상한 확대
-        # lip: 이전 10 → CAPTURE_FPS(15fps) × ANALYSIS_INTERVAL(3s) = 45 이상
-        # audio: 이전 10 → audio_queue maxsize(30) 보다 크게 설정해 밀린 패킷 즉시 소비
-        _LIP_DRAIN_LIMIT   = 50   # 이전: 10
-        _AUDIO_DRAIN_LIMIT = 50   # 이전: 10
+        # [수정] 루프 1회당 최대 처리 개수 상한
+        # lip_queue: 영상 FPS 기준(30fps × 약 0.3초 여유) → 최대 10개
+        # audio_queue: 오디오 패킷 밀도 고려 → 최대 10개
+        _LIP_DRAIN_LIMIT   = 10
+        _AUDIO_DRAIN_LIMIT = 10
 
         # ── lip_queue 드레인 ──────────────────────────────────────────────────
         _lip_is_pipe = hasattr(lip_queue, 'poll') and not hasattr(lip_queue, 'get_nowait')
-        _lip_count = 0
-        while _lip_count < _LIP_DRAIN_LIMIT:
+        _lip_count = 0  # [수정] 처리 개수 카운터
+        while _lip_count < _LIP_DRAIN_LIMIT:  # [수정] 상한 초과 시 중단
             try:
                 if _lip_is_pipe:
                     if not lip_queue.poll():
@@ -278,7 +287,7 @@ def proc_analyzer(lip_queue, audio_queue,
                     add_log(f"👁 {item[1]}")
                 else:
                     lpb.append(item)
-                _lip_count += 1
+                _lip_count += 1  # [수정] 성공 처리 시에만 카운트
             except (EOFError, OSError):
                 # Pipe writer 쪽이 닫혔음 — P1 종료 신호, 조용히 종료
                 break
@@ -286,8 +295,8 @@ def proc_analyzer(lip_queue, audio_queue,
                 break
 
         # ── audio_queue 드레인 ───────────────────────────────────────────────
-        _aud_count = 0
-        while _aud_count < _AUDIO_DRAIN_LIMIT:
+        _aud_count = 0  # [수정] 처리 개수 카운터
+        while _aud_count < _AUDIO_DRAIN_LIMIT:  # [수정] 상한 초과 시 중단
             try:
                 item = audio_queue.get_nowait()
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
@@ -297,43 +306,33 @@ def proc_analyzer(lip_queue, audio_queue,
                     log_lines.append(f"🔊 {item[1]}")
                 else:
                     aub.append(item)
-                _aud_count += 1
+                _aud_count += 1  # [수정] 성공 처리 시에만 카운트
             except Exception:
                 break
 
-        # BUF_SEC 기준으로 트리밍 (오래된 샘플 제거)
+        # ── 타임스탬프 기준 통일 트리밍 ──────────────────────────────────────
+        # Bug B 안전망: 앵커 확립 후 t_hw가 역전(구: 3600s → 신: 0s)된 경우
+        # latest_lip < oldest_lip 이 되어 기존 트림(latest - oldest > window)이
+        # 음수가 되어 절대 작동하지 않음. 역전이 감지되면 lpb를 통째로 초기화.
         _trim_win = max(BUF_SEC, MUSIC_WINDOW_SEC)
         if lpb:
             latest_lip = lpb[-1][0]
-            while lpb and latest_lip - lpb[0][0] > _trim_win:
-                lpb.popleft()
+            oldest_lip = lpb[0][0]
+            if latest_lip < oldest_lip:
+                # 역전 감지 → Bug B 잔재. lpb 전체 초기화.
+                add_log(
+                    f"⚠ [버퍼] lpb 타임스탬프 역전 감지 "
+                    f"(oldest={oldest_lip:.1f}s > latest={latest_lip:.1f}s) "
+                    f"→ lpb 초기화 (앵커 전 절대 QPC 항목 잔재)"
+                )
+                lpb.clear()
+            else:
+                while lpb and latest_lip - lpb[0][0] > _trim_win:
+                    lpb.popleft()
         if aub:
             latest_aud = aub[-1][0]
             while aub and latest_aud - aub[0][0] > _trim_win:
                 aub.popleft()
-
-        # ── [수정 2] 립/오디오 타임스탬프 기준 불일치 감지 → lpb 강제 초기화 ──
-        # 원인: stream_anchor 미확립 구간(T2 시작 전) lpb에 t_hw = qpc_now/freq
-        #   (절대 QPC 시간, 시스템 부팅 후 경과 초, 수천~수만 초)가 적재됨.
-        #   audio_capture.py의 _make_stream_converter 수정으로 오디오 타임스탬프는
-        #   항상 qp_origin 기준 ~0초부터 시작. 두 기준이 섞이면:
-        #     resample_aligned: t_start = max(lip_ts[0]=3600, aud_ts[0]=0) = 3600
-        #                       t_end   = min(lip_ts[-1]=3601, aud_ts[-1]=5) = 5
-        #                       t_end - t_start = -3595 < 1.0 → None 반환
-        #   → 버퍼가 영구적으로 STATUS_COLLECTING에 고착됨.
-        # 감지 조건: lpb의 가장 오래된 항목이 최신 오디오보다 100초 이상 큰 경우.
-        # 안전성: 두 신호 모두 절대 QPC 시간(qp=0 폴백)을 쓰는 경우
-        #   oldest_lip ≈ newest_aud이므로 오탐 없음.
-        if lpb and aub:
-            _oldest_lip = lpb[0][0]
-            _newest_aud = aub[-1][0]
-            if _oldest_lip - _newest_aud > 100:
-                add_log(
-                    f"⚠ [버퍼] 타임스탬프 기준 불일치 감지 "
-                    f"(oldest_lip={_oldest_lip:.1f}s, newest_aud={_newest_aud:.1f}s, "
-                    f"diff={_oldest_lip - _newest_aud:.1f}s) → lpb 초기화"
-                )
-                lpb.clear()
 
     def resample_aligned(lip_buf, aud_buf, fps):
 

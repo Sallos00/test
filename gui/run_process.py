@@ -221,6 +221,7 @@ class ProcessMixin:
                 w.join(timeout=2)
                 if w.is_alive():
                     w.terminate()
+                    w.join(timeout=1)   # terminate 후 join → 좀비 프로세스 방지
             else:
                 w.join(timeout=_THREAD_JOIN_TIMEOUT)
 
@@ -252,6 +253,10 @@ class ProcessMixin:
         self._lip_queue_writer = None
         self._audio_queue      = None
         self._main_log_queue   = None
+        # 공유 메모리(_MpArray) 및 공유 리스트 참조 해제
+        self._stream_anchor = None
+        self._shared_pos    = None
+        self._shared_dur    = None
 
     def _reset(self):
         if self._running:

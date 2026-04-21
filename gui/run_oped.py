@@ -135,6 +135,19 @@ class OpedMonitorMixin:
         self._om_threads              = []
         self._oped_monitor_running    = False
         self._om_log_seen_count       = 0
+        # 스레드 종료 후 잔여 큐 드레인 + 참조 해제
+        # (기존에 None 처리가 누락되어 Queue 내 오디오 데이터가 GC 전까지 잔류)
+        from mem_utils import full_cleanup
+        _lq = getattr(self, '_om_lip_queue',   None)
+        _aq = getattr(self, '_om_audio_queue',  None)
+        if _lq is not None or _aq is not None:
+            full_cleanup(queues=[q for q in (_lq, _aq) if q is not None])
+        self._om_lip_queue            = None
+        self._om_audio_queue          = None
+        # 공유 메모리(_MpArray) 및 공유 위치 리스트 참조 해제
+        self._om_stream_anchor        = None
+        self._om_shared_pos           = None
+        self._om_shared_dur           = None
 
     # ── OP/ED 스킵 팝업 ──────────────────────────────────────────────────────
     def _show_oped_skip_popup(self, prompt_info: dict, use_om_queue: bool = False):

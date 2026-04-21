@@ -74,7 +74,8 @@ jobs:
             gui\run_refresh.py ^
             gui\auth.py ^
             gui\record_open.py ^
-            gui\record_backend.py
+            gui\record_backend.py ^
+            gui\_record_impl.py
         shell: cmd
 
       # main.py 는 PyInstaller 진입점 — 난독화 없이 복사

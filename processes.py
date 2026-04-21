@@ -67,25 +67,20 @@ def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
         qp_now_val = qpc_now()
         raw  = capture_window(hwnd) if hwnd else None
 
-        # [Bug B 수정] 앵커 미확립 시 절대 QPC를 t_hw로 사용하지 않고 대기.
-        # 기존: stream_anchor[0]==0 이면 t_hw = qpc_now/freq (시스템 부팅 후 경과초, ~3600s+)
-        #   → 앵커 확립 후 t_hw ≈ 0초와 섞여 lpb에 두 기준이 공존.
-        #   trim 로직(latest_lip - oldest_lip > window)은 latest < oldest 일 때 음수가 되어
-        #   절대 제거 조건 미충족 → stale 항목이 maxlen(475개)에 의해 밀려날 때까지
-        #   drain 속도(≈3.3개/초) 기준 최대 144초간 lpb 오염 지속.
-        #   이 기간 resample_aligned가 항상 None → 버퍼 영구 수집 고착.
-        # 수정: 앵커가 없으면 t_hw를 계산만 하고 lip_queue에는 쓰지 않는다.
-        #   P1은 얼굴 탐지·ROI 처리를 계속 수행(워밍업)하되 타임스탬프 오염 없음.
-        _anchor_ready = (stream_anchor is not None and stream_anchor[0] > 0)
-
-        if _anchor_ready:
+        # [Bug B 수정] 앵커 미확립 시 절대 QPC(~3600s)를 t_hw로 사용 금지.
+        # 이전: 앵커 없으면 t_hw = qpc_now/_freq (시스템 부팅 후 경과초, 수천 초)
+        #   → 앵커 확립 후 t_hw~0s 값과 Pipe에서 공존.
+        #   trim(latest-oldest>window)은 역전(음수)이라 절대 미작동
+        #   → drain=10개/3s 기준 최대 94초 오염 지속, 교차상관 피크 랜덤화.
+        # 수정: 앵커 없으면 t_hw=None → lip_queue에 적재 안 함.
+        #   P1은 캡처·얼굴탐지 워밍업 계속하되 타임스탬프 오염 없음.
+        if stream_anchor is not None and stream_anchor[0] > 0:
             qp_origin = stream_anchor[0]
             sr_anc    = stream_anchor[1]
             freq_anc  = stream_anchor[2]
             t_hw = (qp_now_val - qp_origin) / freq_anc
         else:
-            # 앵커 미확립: t_hw 계산 스킵, 이 프레임은 lip_queue에 적재하지 않음
-            t_hw = None
+            t_hw = None  # 앵커 미확립 → 이 프레임은 큐에 넣지 않음
 
         now = time.time()
         if now - last_diag_time >= 30.0:
@@ -153,8 +148,7 @@ def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
                 motion = float(small.var(axis=0).mean()) / (255.0 ** 2)
                 del small
             del lip_roi
-            # [Bug B 수정] 앵커 확립 후에만 lip_queue에 적재.
-            # t_hw is None이면 stream_anchor 미확립 상태이므로 이 프레임은 버림.
+            # [Bug B 수정] 앵커 확립 후(t_hw is not None)에만 Pipe에 전송
             if t_hw is not None:
                 queue_put(lip_queue, (t_hw, motion))
 
@@ -255,24 +249,20 @@ def proc_analyzer(lip_queue, audio_queue,
         return cv < MUSIC_MAX_CV and fill > MUSIC_MIN_FILL
 
     def drain_queues():
-        """lip_queue(Pipe Connection 또는 mp.Queue)와 audio_queue(queue.Queue)를
-        드레인해 lpb / aub 버퍼에 적재한다.
-        lip_queue가 Pipe Connection이면 poll()+recv(), 아니면 get_nowait() 사용.
+        """lip_queue(Pipe)와 audio_queue(threading.Queue)를 드레인해 lpb/aub에 적재.
 
-        [수정] 한 번의 drain_queues() 호출에서 처리하는 항목 수를 제한한다.
-        큐 전체를 한 번에 소비하면 대량 적체 시 lpb/aub가 순간적으로 폭증하여
-        메모리가 급격히 증가한다. 루프당 최대 처리 개수를 제한해 이를 방지한다.
+        [수정] 드레인 한도 제거 — 백업 구조와 동일하게 while True로 전부 소비.
+        이전 코드의 _LIP_DRAIN_LIMIT=10 / _AUDIO_DRAIN_LIMIT=10은 치명적 손실 유발:
+          - T2(audio_capture)는 ~94패킷/초 생산 → 3초 사이클당 282개
+          - drain=10이면 3초당 10개만 aub에 적재 → 96.5% 손실
+          - aub에 2.9초 간격 빈 구간 → np.interp 선형보간 왜곡
+          - 교차상관 피크 랜덤화 → 간헐적 동작(될 때도 있고 안 될 때도)
+        audio_queue maxsize=0(무제한, run_process.py 수정 후)이므로 메모리는
+        아래 trim 로직이 BUF_SEC 윈도우 내로 제한해 급증 없음.
         """
-        # [수정] 루프 1회당 최대 처리 개수 상한
-        # lip_queue: 영상 FPS 기준(30fps × 약 0.3초 여유) → 최대 10개
-        # audio_queue: 오디오 패킷 밀도 고려 → 최대 10개
-        _LIP_DRAIN_LIMIT   = 10
-        _AUDIO_DRAIN_LIMIT = 10
-
-        # ── lip_queue 드레인 ──────────────────────────────────────────────────
+        # ── lip_queue(Pipe) 드레인 — 무제한 ─────────────────────────────────
         _lip_is_pipe = hasattr(lip_queue, 'poll') and not hasattr(lip_queue, 'get_nowait')
-        _lip_count = 0  # [수정] 처리 개수 카운터
-        while _lip_count < _LIP_DRAIN_LIMIT:  # [수정] 상한 초과 시 중단
+        while True:
             try:
                 if _lip_is_pipe:
                     if not lip_queue.poll():
@@ -287,43 +277,34 @@ def proc_analyzer(lip_queue, audio_queue,
                     add_log(f"👁 {item[1]}")
                 else:
                     lpb.append(item)
-                _lip_count += 1  # [수정] 성공 처리 시에만 카운트
             except (EOFError, OSError):
-                # Pipe writer 쪽이 닫혔음 — P1 종료 신호, 조용히 종료
                 break
             except Exception:
                 break
 
-        # ── audio_queue 드레인 ───────────────────────────────────────────────
-        _aud_count = 0  # [수정] 처리 개수 카운터
-        while _aud_count < _AUDIO_DRAIN_LIMIT:  # [수정] 상한 초과 시 중단
+        # ── audio_queue(threading.Queue) 드레인 — 무제한 ────────────────────
+        while True:
             try:
                 item = audio_queue.get_nowait()
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":
-                    # [Bug 1 수정] item[1]은 make_send_log()에서 이미 타임스탬프가 붙은
-                    # full 메시지("[HH:MM:SS] msg")임. add_log()를 사용하면 타임스탬프가
-                    # 이중으로 붙으므로, log_lines에 직접 append하여 방지.
                     log_lines.append(f"🔊 {item[1]}")
                 else:
                     aub.append(item)
-                _aud_count += 1  # [수정] 성공 처리 시에만 카운트
             except Exception:
                 break
 
-        # ── 타임스탬프 기준 통일 트리밍 ──────────────────────────────────────
-        # Bug B 안전망: 앵커 확립 후 t_hw가 역전(구: 3600s → 신: 0s)된 경우
-        # latest_lip < oldest_lip 이 되어 기존 트림(latest - oldest > window)이
-        # 음수가 되어 절대 작동하지 않음. 역전이 감지되면 lpb를 통째로 초기화.
+        # ── 타임스탬프 윈도우 트리밍 ─────────────────────────────────────────
+        # [추가] 역전 감지: Bug B 잔재로 lpb[-1] < lpb[0]인 경우(앵커 전 절대
+        # QPC 항목이 남은 경우) trim 조건이 음수가 돼 절대 미작동.
+        # 역전이 감지되면 lpb 전체 초기화.
         _trim_win = max(BUF_SEC, MUSIC_WINDOW_SEC)
         if lpb:
             latest_lip = lpb[-1][0]
             oldest_lip = lpb[0][0]
             if latest_lip < oldest_lip:
-                # 역전 감지 → Bug B 잔재. lpb 전체 초기화.
                 add_log(
-                    f"⚠ [버퍼] lpb 타임스탬프 역전 감지 "
-                    f"(oldest={oldest_lip:.1f}s > latest={latest_lip:.1f}s) "
-                    f"→ lpb 초기화 (앵커 전 절대 QPC 항목 잔재)"
+                    f"⚠ [버퍼] lpb 타임스탬프 역전 "
+                    f"(oldest={oldest_lip:.1f}s > latest={latest_lip:.1f}s) → 초기화"
                 )
                 lpb.clear()
             else:

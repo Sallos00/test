@@ -267,9 +267,30 @@ class RefreshMixin:
             except Exception:
                 break
 
-        for title, msg in main_toasts:
-            threading.Thread(target=self._toast, args=(title, msg),
-                             daemon=True).start()
+        # ── [메모리 누수 수정] 토스트 전용 워커 스레드 ───────────────────────
+        # 기존: 알림마다 threading.Thread 신규 생성 → 스레드 스택 누적 +
+        #   winotify가 사용하는 WinRT DLL(CoreUIComponents, CoreMessaging 등)을
+        #   스레드마다 반복 로드해 Commit 메모리 계단식 증가.
+        # 수정: Queue 기반 단일 워커 스레드 재사용 → 스레드 생성 비용 0,
+        #   WinRT DLL은 최초 1회만 로드.
+        if main_toasts:
+            import queue as _tq
+            if not hasattr(self, '_toast_q'):
+                self._toast_q = _tq.Queue()
+                def _toast_worker():
+                    while not getattr(self, '_closing', False):
+                        try:
+                            _title, _msg = self._toast_q.get(timeout=1.0)
+                            self._toast(_title, _msg)
+                        except Exception:
+                            pass
+                threading.Thread(target=_toast_worker,
+                                 daemon=True, name='toast-worker').start()
+            for title, msg in main_toasts:
+                try:
+                    self._toast_q.put_nowait((title, msg))
+                except Exception:
+                    pass
 
         for p in main_prompts:
             self._show_oped_skip_popup(p)

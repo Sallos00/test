@@ -2,9 +2,9 @@
 audio_capture.py -- Windows WASAPI ProcessLoopback 캡처 진입점
 
 audio_queue에 (t_stream, rms, vad) 튜플을 전송한다.
-  t_stream : qp_origin 기준 경과시간(초) — 립 캡처와 공통 기준점
-             [버그 수정] 기존 dp_origin/sr(절대 재생 위치) 오프셋 제거.
-             _make_stream_converter 참조.
+  t_stream : 오디오 스트림 기준 위치(초) — 립 캡처와 공통 기준점
+             첫 패킷의 (qp_origin, dp_origin, sr)로 확립한 선형 관계로 변환
+             lip_capture도 qpc_now()를 동일 공식으로 변환해 기준 통일
   rms      : 원본 신호 RMS — OP/ED 음악 감지에 사용
   vad      : 음성 감지 이진값 (0.0 / 1.0) — 싱크 보정에 사용
              ZCR + RMS 조합으로 BGM과 대사를 구분
@@ -98,31 +98,26 @@ def _compute_vad(arr, sr: int) -> float:
 
 # ── 스트림 기준 타임스탬프 변환 ───────────────────────────────────────────────
 # 오디오의 qp(DAC 출력 QPC틱)와 립의 qpc_now()는 같은 QPC 클럭.
-# 첫 패킷의 qp_origin을 기준점으로 설정하면:
+# 첫 패킷의 qp_origin을 기준으로 경과시간(초)을 계산:
 #   t_stream = (qp - qp_origin) / freq
-# 립도 동일 공식으로 변환하면 두 신호가 완전히 같은 기준축(0초~)을 갖는다.
-# [버그 수정] 기존 공식의 dp_origin/sr (절대 재생 위치 오프셋) 제거.
-#   dp_origin은 stream_anchor에 저장되지 않아 proc_lip_capture가 보정 불가능하며,
-#   영상이 재생 중인 경우 타임스탬프가 수십~수백 초 차이가 나
-#   resample_aligned가 항상 None을 반환하는 원인이 됐음.
+#
+# [Bug A 수정] 기존 공식의 dp_origin/sr 오프셋 제거.
+#   dp_origin = WASAPI 렌더 스트림의 절대 샘플 위치 (재생 시작부터의 누적 프레임 수).
+#   영상이 2분 재생 중이면 dp_origin/sr ≈ 120초.
+#   오디오 타임스탬프가 ~120초부터 시작되지만 stream_anchor에 dp_origin이 저장되지
+#   않아 proc_lip_capture는 이 오프셋을 알 수 없고 t_hw는 0초부터 시작됨.
+#   → resample_aligned: t_start=max(0, 120)=120, t_end=min(5, 125)=5 → 겹침 -115초
+#   → 항상 None 반환, 버퍼가 영구적으로 STATUS_COLLECTING에 고착됨.
+#   싱크 보정은 두 신호의 상대적 시간차만 필요하므로 절대 위치 오프셋 불필요.
 
 def _make_stream_converter(dp_origin: int, qp_origin: int, sr: int, freq: int):
-    """QPC 틱 → 스트림 경과시간(초) 변환 함수를 반환.
+    """QPC 틱 → qp_origin 기준 경과시간(초) 변환 함수를 반환.
 
-    [버그 수정] dp_offset(= dp_origin / sr) 제거.
-    기존 공식: t_stream = (qp - qp_origin) / freq + dp_origin / sr
-      문제: dp_origin은 캡처 시작 시 렌더 스트림의 절대 재생 위치(프레임 수)이며
-            영상이 2분 재생 중이라면 dp_origin/sr ≈ 120초.
-            오디오 타임스탬프가 ~120초부터 시작되는 반면,
-            proc_lip_capture는 stream_anchor에 dp_origin을 저장하지 않아
-            t_hw = (qpc_now - qp_origin) / freq_anc 로 ~0초부터 시작.
-            두 신호가 절대 겹치지 않아 resample_aligned가 항상 None을 반환하고
-            버퍼가 영구적으로 STATUS_COLLECTING에 머묾.
-    수정 공식: t_stream = (qp - qp_origin) / freq
-      두 신호 모두 qp_origin 기준 경과시간(0초~)으로 통일.
-      싱크 보정은 두 신호 간 상대 시간차만 필요하므로 절대 위치 불필요.
+    [Bug A 수정] dp_origin/sr 오프셋 제거.
+    dp_origin은 하위 호환을 위해 인자로 유지하되 사용하지 않음.
+    두 신호 모두 qp_origin 기준 경과시간(0초~)으로 통일.
     """
-    # dp_origin은 이 수정으로 미사용이 되지만, 서명은 하위 호환을 위해 유지
+    # dp_origin: 미사용 (하위 호환 서명 유지)
     def convert(qp: int) -> float:
         return (qp - qp_origin) / freq
     return convert
@@ -254,10 +249,14 @@ def _run_capture_impl(pid, audio_queue, stop_flag, send_log, stream_anchor):
                     # 첫 유효 패킷에서 스트림 기준점 확립
                     if to_stream_t is None and qp > 0:
                         to_stream_t = _make_stream_converter(dp, qp, sr, freq)
-                        # 공유 앵커에 기준점 저장 (lip_capture가 읽어감)
-                        stream_anchor[0] = qp   # qp_origin
-                        stream_anchor[1] = sr    # sample rate
-                        stream_anchor[2] = freq  # qpc_freq
+                        # [Bug C 수정] stream_anchor 쓰기 순서: [1],[2] 먼저, [0] 마지막.
+                        # P1은 stream_anchor[0] > 0 을 감지해 앵커 사용으로 전환하므로
+                        # [0]을 마지막에 쓰면 P1이 [1],[2]를 읽을 때 항상 올바른 값이 보장됨.
+                        # 기존: [0]=qp 먼저 쓴 후 [1],[2] 쓰는 사이에 P1이 [2]=1.0(기본값)
+                        #        으로 읽으면 t_hw = raw QPC ticks(수백만) 극단값 발생.
+                        stream_anchor[1] = sr    # sample rate  (먼저 기록)
+                        stream_anchor[2] = freq  # qpc_freq     (먼저 기록)
+                        stream_anchor[0] = qp    # qp_origin    (마지막 — 트리거)
                         send_log(f"⚓ 스트림 기준점 확립: qp_origin={qp} sr={sr}")
                     if to_stream_t is None:
                         to_stream_t = lambda q: qpc_now() / freq
@@ -335,9 +334,10 @@ def _run_global_loopback_session(audio_queue, stop_flag, send_log, stream_anchor
                     if num_frames > 0:
                         if to_stream_t is None and qp > 0:
                             to_stream_t = _make_stream_converter(dp, qp, sr, freq)
-                            stream_anchor[0] = qp
+                            # [Bug C 수정] ProcessLoopback과 동일: [1],[2] 먼저, [0] 마지막
                             stream_anchor[1] = sr
                             stream_anchor[2] = freq
+                            stream_anchor[0] = qp    # 트리거 — 마지막에 쓰기
                             send_log(f"⚓ 스트림 기준점 확립 (GlobalLoopback): qp_origin={qp}")
                         if to_stream_t is None:
                             to_stream_t = lambda q: qpc_now() / freq

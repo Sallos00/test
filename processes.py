@@ -251,18 +251,29 @@ def proc_analyzer(lip_queue, audio_queue,
     def drain_queues():
         """lip_queue(Pipe)와 audio_queue(threading.Queue)를 드레인해 lpb/aub에 적재.
 
-        [수정] 드레인 한도 제거 — 백업 구조와 동일하게 while True로 전부 소비.
-        이전 코드의 _LIP_DRAIN_LIMIT=10 / _AUDIO_DRAIN_LIMIT=10은 치명적 손실 유발:
-          - T2(audio_capture)는 ~94패킷/초 생산 → 3초 사이클당 282개
-          - drain=10이면 3초당 10개만 aub에 적재 → 96.5% 손실
-          - aub에 2.9초 간격 빈 구간 → np.interp 선형보간 왜곡
-          - 교차상관 피크 랜덤화 → 간헐적 동작(될 때도 있고 안 될 때도)
-        audio_queue maxsize=0(무제한, run_process.py 수정 후)이므로 메모리는
-        아래 trim 로직이 BUF_SEC 윈도우 내로 제한해 급증 없음.
+        [drain 상한 설정]
+        이전 수정(while True 무제한)은 threading.Queue 특성상 직렬화 비용 없이
+        순식간에 대량 처리가 가능해 비정상 상황(zombie T2, queue 폭발)에서
+        Python heap에 수천 개 객체가 한번에 올라와 GC 압박 → 메모리 스파이크.
+
+        mp.Queue(백업)와 달리 threading.Queue는 inter-process 직렬화 비용이 없어
+        자연적인 속도 제한이 없으므로 명시적 상한 필요.
+
+        상한 계산:
+          - 오디오: 94pkt/s × 3s(INTERVAL) × 2(여유) = 564
+          - 립:     15fps  × 3s(INTERVAL) × 3(여유) = 135
+          → 정상 사이클에서는 항상 빈 큐가 될 때 break로 먼저 종료됨.
+            상한은 비정상 상황(queue 폭발)에 대한 메모리 안전장치.
         """
-        # ── lip_queue(Pipe) 드레인 — 무제한 ─────────────────────────────────
+        # ── 드레인 상한 ───────────────────────────────────────────────────────
+        # 정상: 3초 사이클당 립=45개, 오디오=282개 → 상한 전에 큐가 비워짐
+        # 비정상(폭발 상황): 상한에서 멈춰 GC 압박/메모리 스파이크 방지
+        _LIP_DRAIN_LIMIT   = 135   # 15fps × 3s × 3배 여유
+        _AUDIO_DRAIN_LIMIT = 564   # 94pkt/s × 3s × 2배 여유
+
+        # ── lip_queue(Pipe) 드레인 ───────────────────────────────────────────
         _lip_is_pipe = hasattr(lip_queue, 'poll') and not hasattr(lip_queue, 'get_nowait')
-        while True:
+        for _ in range(_LIP_DRAIN_LIMIT):
             try:
                 if _lip_is_pipe:
                     if not lip_queue.poll():
@@ -282,8 +293,8 @@ def proc_analyzer(lip_queue, audio_queue,
             except Exception:
                 break
 
-        # ── audio_queue(threading.Queue) 드레인 — 무제한 ────────────────────
-        while True:
+        # ── audio_queue(threading.Queue) 드레인 ─────────────────────────────
+        for _ in range(_AUDIO_DRAIN_LIMIT):
             try:
                 item = audio_queue.get_nowait()
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "LOG":

@@ -112,10 +112,12 @@ def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
             dw = max(1, int(gray.shape[1] * DETECT_SCALE))
             dh = max(1, int(gray.shape[0] * DETECT_SCALE))
             gray_small = cv2.resize(gray, (dw, dh), interpolation=cv2.INTER_LINEAR)
+            gray_eq    = cv2.equalizeHist(gray_small)
             faces = cascade.detectMultiScale(
-                cv2.equalizeHist(gray_small),
+                gray_eq,
                 scaleFactor=1.1, minNeighbors=10, minSize=(30, 30),
             )
+            del gray_small, gray_eq  # 탐지 직후 즉시 해제 (캡처 해상도 50% 배열 누적 방지)
             if len(faces):
                 # 좌표를 원본 해상도로 역변환
                 inv = 1.0 / DETECT_SCALE

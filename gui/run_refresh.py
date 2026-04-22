@@ -141,10 +141,11 @@ class RefreshMixin:
                             except Exception:
                                 self._pot_exit_handling = False
 
-        # Working Set 트림: 싱크 실행 중·미실행 모두 10분 주기로 수행.
-        # 기존: not self._running 조건으로 싱크 실행 중에는 절대 미수행 → 메모리 증가.
+        # Working Set 트림: 싱크 실행 중·미실행 모두 2분 주기로 수행.
+        # [메모리 수정] 기존 10분(600s) → 2분(120s)으로 단축.
+        # OpenBLAS 스레드 풀 스택 등 page-in된 페이지를 더 빠르게 page-out시킴.
         # GC는 full_cleanup/_flush_and_gc에서 별도로 처리하므로 여기서는 WS trim만.
-        _WS_TRIM_INTERVAL = 600
+        _WS_TRIM_INTERVAL = 120
         if _now - getattr(self, '_ws_trim_t', 0) >= _WS_TRIM_INTERVAL:
             self._ws_trim_t = _now
             from mem_utils import trim_working_set

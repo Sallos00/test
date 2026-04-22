@@ -141,9 +141,11 @@ class RefreshMixin:
                             except Exception:
                                 self._pot_exit_handling = False
 
+        # Working Set 트림: 싱크 실행 중·미실행 모두 10분 주기로 수행.
+        # 기존: not self._running 조건으로 싱크 실행 중에는 절대 미수행 → 메모리 증가.
+        # GC는 full_cleanup/_flush_and_gc에서 별도로 처리하므로 여기서는 WS trim만.
         _WS_TRIM_INTERVAL = 600
-        if (not self._running
-                and _now - getattr(self, '_ws_trim_t', 0) >= _WS_TRIM_INTERVAL):
+        if _now - getattr(self, '_ws_trim_t', 0) >= _WS_TRIM_INTERVAL:
             self._ws_trim_t = _now
             from mem_utils import trim_working_set
             trim_working_set()

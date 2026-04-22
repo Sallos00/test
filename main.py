@@ -4,6 +4,19 @@ main.py -- AutoSinc 진입점
 import sys
 import os
 
+# ── [메모리 수정] OpenBLAS / OMP 스레드 풀 크기 제한 ──────────────────────────
+# scipy.signal.correlate 최초 호출 시 OpenBLAS가 스레드 풀을 초기화한다.
+# 기본값(논리 코어 수)이면 코어당 32MB 스택을 VirtualAlloc으로 커밋 →
+#   11코어 환경 기준 numpy용·scipy용 각각 약 352MB, 합계 704MB가 Working Set에 올라옴.
+# numpy와 scipy는 별도 OpenBLAS 인스턴스를 사용하므로 두 배로 발생한다.
+# 이 앱의 correlate 입력은 수십~수백 샘플이어서 스레드 병렬화 이득이 없으므로
+# 스레드 수를 1로 제한해 스레드 풀 자체를 만들지 않도록 한다.
+# ※ numpy/scipy import 이전에 반드시 설정해야 한다.
+for _env_key in ("OPENBLAS_NUM_THREADS", "OPENBLAS64_NUM_THREADS",
+                 "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                 "BLIS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_env_key, "1")
+
 if getattr(sys, "frozen", False):
     _base = sys._MEIPASS
 else:

@@ -44,15 +44,24 @@ def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
     _hwnd_cache_t      = 0.0    # hwnd 캐시 갱신 시각 (1초마다 재조회)
     _cached_hwnd       = None   # P1 로컬 hwnd 캐시
 
-    def _estimate_lip_y_ratio(face_gray):  # 얼굴 하위 50~92%에서 가장 어두운 행 → 입술 위치
+    def _estimate_lip_y_ratio(face_gray):
+        """얼굴 하위 55~82% 구간에서 가장 어두운 행 → 입술 위치 추정.
+
+        기존 50~92% 범위는 아래 문제를 유발:
+        - 50~60%: 눈/쌍꺼풀 그림자까지 포함 → 잘못된 위치 반환 가능
+        - 82~92%: 턱 라인/목 그림자 → 실제 입술보다 낮은 위치 반환
+
+        lbpcascade_animeface 바운딩박스 기준 입술은 대략 65~80% 위치에 분포.
+        55~82% 범위로 좁혀 눈·턱 그림자 영향을 최소화한다.
+        """
         h            = face_gray.shape[0]
-        search_start = int(h * 0.50)
-        search_end   = int(h * 0.92)
+        search_start = int(h * 0.55)
+        search_end   = int(h * 0.82)
         if search_end <= search_start:
             return 0.70
         row_means = face_gray[search_start:search_end].mean(axis=1)
         darkest   = int(np.argmin(row_means))
-        return float(np.clip((search_start + darkest) / h - 0.05, 0.50, 0.85))
+        return float(np.clip((search_start + darkest) / h - 0.02, 0.55, 0.80))
 
     while not stop_flag.is_set():
         t0   = time.perf_counter()
@@ -64,8 +73,13 @@ def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
             _hwnd_cache_t = _t_now
         hwnd = _cached_hwnd
 
-        qp_now_val = qpc_now()
+        # [Fix] capture_window 실행 후 QPC를 측정해야 립 타임스탬프가 정확.
+        # capture_window(PrintWindow)는 10~50ms 소요되므로, 캡처 전에 측정하면
+        # 립 타임스탬프가 조기에 찍혀 "립이 오디오보다 앞서 발생"으로 오인됨.
+        # → 교차상관에서 lag>0(오디오가 앞섬) 판정이 지속되어 오디오 딜레이가
+        #   보정할수록 계속 증가하는 피드백 루프 발생. 캡처 완료 후 측정으로 수정.
         raw  = capture_window(hwnd) if hwnd else None
+        qp_now_val = qpc_now()
 
         # [Bug B 수정] 앵커 미확립 시 절대 QPC(~3600s)를 t_hw로 사용 금지.
         # 이전: 앵커 없으면 t_hw = qpc_now/_freq (시스템 부팅 후 경과초, 수천 초)
@@ -183,9 +197,12 @@ def proc_analyzer(lip_queue, audio_queue,
     OPED_COOLDOWN_SEC = 90       # OP/ED 감지 후 재감지 억제 시간
     MUSIC_WINDOW_SEC  = 15.0     # 음악 감지 RMS 슬라이딩 윈도우
     MUSIC_MIN_RMS     = 0.002    # 이 이하는 무음으로 판정
-    MUSIC_MAX_CV      = 0.8      # 변동계수 상한 (이 이하면 안정적인 음악)
-    MUSIC_MIN_FILL    = 0.70     # RMS > 평균×0.5 비율 하한
-    MUSIC_CONFIRM     = 2        # 연속 감지 횟수 기준
+    MUSIC_MAX_CV      = 0.65     # 변동계수 상한 (0.8→0.65 강화: 나레이션+BGM 오탐 방지)
+    MUSIC_MIN_FILL    = 0.75     # RMS > 평균×0.5 비율 하한 (0.70→0.75 강화)
+    MUSIC_CONFIRM     = 5        # 연속 감지 횟수 기준 (2→5: 약 15초 필요)
+    MUSIC_MIN_CONT_SEC = 15.0    # OP/ED 확정을 위한 최소 연속 음악 감지 시간(초)
+    # 줄거리 요약·예고편은 BGM+나레이션 조합이지만 지속 시간이 짧거나 RMS 변동이 크다.
+    # CONFIRM 횟수(×INTERVAL)와 최소 지속 시간을 함께 검사해 오탐률을 낮춘다.
 
     EMA_ALPHA          = 0.5      # EMA 계수 (높을수록 빠른 반응)
     OFFSET_BUF_SIZE    = 3        # 평균 낼 연속 측정 횟수
@@ -212,6 +229,7 @@ def proc_analyzer(lip_queue, audio_queue,
     oped_confirm  = {"오프닝": 0,     "엔딩": 0}
     oped_last_t   = {"오프닝": 0.0,   "엔딩": 0.0}
     oped_prompted = {"오프닝": False,  "엔딩": False}
+    oped_music_start_t = {"오프닝": 0.0, "엔딩": 0.0}  # 연속 음악 감지 시작 시각
     last_cd_log   = 0.0   # 쿨다운 로그 스로틀
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
@@ -463,6 +481,8 @@ def proc_analyzer(lip_queue, audio_queue,
         oped_confirm  = {"오프닝": 0,     "엔딩": 0}
         oped_last_t   = {"오프닝": 0.0,   "엔딩": 0.0}
         oped_prompted = {"오프닝": False,  "엔딩": False}
+        oped_music_start_t["오프닝"] = 0.0
+        oped_music_start_t["엔딩"]   = 0.0
         pending_prompt[0] = None
         _last_oped_zone[0] = None  # [Bug 2 수정] 초기화 시 zone 정보도 클리어
 
@@ -493,8 +513,21 @@ def proc_analyzer(lip_queue, audio_queue,
     # ── [버그4 수정] 쿨다운 중 상태를 추적해 루프를 올바르게 제어 ─────────
     in_cooldown = False   # 보정/정상 판정 후 쿨다운 진행 중 플래그
 
+    # 메모리 누수 방지: 주기적 GC — 보정/정상 판정 시 _flush_and_gc가 호출되지만
+    # 장시간 수집 중 상태(STATUS_COLLECTING, STATUS_LOW_CONF 등)에서는
+    # 순환 참조 객체가 누적될 수 있음. 120사이클(~6분)마다 한 번 gc.collect() 수행.
+    _gc_cycle_count = 0
+    _GC_PERIOD = 120
+
     while not stop_flag.is_set():
         t0 = time.perf_counter()
+
+        # 주기적 GC: 장시간 대기/수집 구간에서 순환 참조 객체 누적 방지
+        _gc_cycle_count += 1
+        if _gc_cycle_count >= _GC_PERIOD:
+            _gc_cycle_count = 0
+            import gc as _gc
+            _gc.collect()
 
         while True:
             try:
@@ -531,6 +564,7 @@ def proc_analyzer(lip_queue, audio_queue,
                 zone = _last_oped_zone[0] or "오프닝"
                 _last_oped_zone[0] = None
                 oped_confirm[zone]  = 0
+                oped_music_start_t[zone] = 0.0
                 oped_last_t[zone]   = time.time()
                 oped_prompted[zone] = False
                 pending_prompt[0]   = None
@@ -540,6 +574,7 @@ def proc_analyzer(lip_queue, audio_queue,
                 zone = _last_oped_zone[0] or "오프닝"
                 _last_oped_zone[0] = None
                 oped_confirm[zone]  = 0
+                oped_music_start_t[zone] = 0.0
                 oped_last_t[zone]   = time.time()
                 oped_prompted[zone] = False
                 pending_prompt[0]   = None
@@ -657,12 +692,22 @@ def proc_analyzer(lip_queue, audio_queue,
                                     f"music={music} confirm={oped_confirm[zone]}/{MUSIC_CONFIRM}")
 
                 if music:
+                    now_music = time.time()
+                    # 연속 감지 시작 시각 기록 (처음 감지되는 시점)
+                    if oped_confirm[zone] == 0:
+                        oped_music_start_t[zone] = now_music
                     oped_confirm[zone] += 1
-                    add_log(f"🎵 {zone} 음악 감지 ({oped_confirm[zone]}/{MUSIC_CONFIRM}회)")
-                    if oped_confirm[zone] >= MUSIC_CONFIRM:
+                    cont_sec = now_music - oped_music_start_t[zone]
+                    add_log(f"🎵 {zone} 음악 감지 ({oped_confirm[zone]}/{MUSIC_CONFIRM}회, "
+                            f"지속={cont_sec:.0f}s/{MUSIC_MIN_CONT_SEC:.0f}s)")
+                    # CONFIRM 횟수 + 최소 연속 지속 시간 모두 충족해야 OP/ED 확정.
+                    # 줄거리 요약·예고편은 통상 15초 미만이므로 오탐 방지.
+                    if (oped_confirm[zone] >= MUSIC_CONFIRM
+                            and cont_sec >= MUSIC_MIN_CONT_SEC):
                         if OAS:
                             if execute_skip():
                                 oped_confirm[zone] = 0
+                                oped_music_start_t[zone] = 0.0
                                 oped_last_t[zone]  = time.time()
                                 add_log(f"⏭ {zone} 자동스킵 완료 → 쿨다운 {OPED_COOLDOWN_SEC}초")
                         elif not oped_prompted[zone]:
@@ -672,6 +717,9 @@ def proc_analyzer(lip_queue, audio_queue,
                             add_log(f"🎵 {zone} 팝업 전송")
                 elif oped_confirm[zone] > 0:
                     oped_confirm[zone] -= 1
+                    # 음악 감지가 끊기면 연속 시작 시각도 초기화
+                    if oped_confirm[zone] == 0:
+                        oped_music_start_t[zone] = 0.0
 
             elif in_zone and not cooled:
                 now_cd = time.time()

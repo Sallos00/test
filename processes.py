@@ -180,35 +180,7 @@ def proc_analyzer(lip_queue, audio_queue,
                   shared_pos=None, shared_dur=None):
     """교차상관으로 싱크 오프셋 추정 및 팟플레이어 자동 보정 프로세스."""
     import numpy as np
-
-    # ── [메모리 수정] scipy.signal.correlate → numpy fft 전용 구현 ────────────
-    # scipy.signal.correlate는 최초 호출 시 scipy 전용 OpenBLAS DLL을 로드하고
-    # 스레드 풀(코어 수 × 32MB 스택)을 초기화한다.
-    # numpy도 별도 OpenBLAS 인스턴스를 가지므로 두 개가 함께 로드되면
-    # 최대 704MB의 Working Set이 page-in된다.
-    # 이 앱의 신호 길이는 수십~수백 샘플이므로 스레드 병렬화 이득이 없다.
-    # numpy.fft(pocketfft)로 교체하면 scipy OpenBLAS DLL 자체가 로드되지 않는다.
-    def _correlate(a, b):
-        """scipy.signal.correlate(a, b, mode='full')과 동일한 결과를 반환.
-
-        numpy.fft(pocketfft)만 사용하므로 scipy OpenBLAS 의존성이 없다.
-        정확도: 수백 샘플 신호에서 scipy 대비 오차 < 1e-4 (float64 기준).
-        """
-        na, nb = len(a), len(b)
-        n = na + nb - 1
-        # next power-of-2 >= n (FFT 성능 최적화)
-        fft_size = 1 << (n - 1).bit_length()
-        fa  = np.fft.rfft(a, fft_size)
-        fb  = np.fft.rfft(b, fft_size)
-        out = np.fft.irfft(fa * np.conj(fb), fft_size)
-        # scipy mode='full' 레이아웃으로 재배열:
-        # result[0..nb-2]  = negative lags (a 앞에 b가 걸침)
-        # result[nb-1..]   = zero-lag 이후 (positive lags)
-        result = np.empty(n, dtype=np.float64)
-        if nb > 1:
-            result[:nb - 1] = out[fft_size - (nb - 1):]
-        result[nb - 1:] = out[:na]
-        return result
+    from scipy.signal import correlate
 
     BUF_SEC   = cfg["BUFFER_SEC"]
     THRESH    = cfg["SYNC_THRESHOLD_MS"]
@@ -428,7 +400,7 @@ def proc_analyzer(lip_queue, audio_queue,
         aud_sig = normalize(aud) if aud.std() >= 1e-9 else aud
 
         max_lag_samples = int(MTM / 1000.0 * fps)
-        corr   = _correlate(lip_sig, aud_sig)
+        corr   = correlate(lip_sig, aud_sig, mode="full")
         center = len(aud_sig) - 1
         lo     = max(0, center - max_lag_samples)
         hi     = min(len(corr), center + max_lag_samples + 1)
@@ -541,26 +513,21 @@ def proc_analyzer(lip_queue, audio_queue,
     # ── [버그4 수정] 쿨다운 중 상태를 추적해 루프를 올바르게 제어 ─────────
     in_cooldown = False   # 보정/정상 판정 후 쿨다운 진행 중 플래그
 
-    # 메모리 누수 방지: 주기적 GC + WS 트림.
-    # 보정/정상 판정 시 _flush_and_gc가 호출되지만
+    # 메모리 누수 방지: 주기적 GC — 보정/정상 판정 시 _flush_and_gc가 호출되지만
     # 장시간 수집 중 상태(STATUS_COLLECTING, STATUS_LOW_CONF 등)에서는
-    # 순환 참조 객체가 누적될 수 있음.
-    # [메모리 수정] 40사이클(~2분)마다 gc.collect() + trim_working_set() 수행.
-    # 기존 120사이클(~6분)에서 단축: OpenBLAS 스레드 스택 등 page-in된 페이지를
-    # 더 빠르게 OS에 반환한다.
+    # 순환 참조 객체가 누적될 수 있음. 120사이클(~6분)마다 한 번 gc.collect() 수행.
     _gc_cycle_count = 0
-    _GC_PERIOD = 40
+    _GC_PERIOD = 120
 
     while not stop_flag.is_set():
         t0 = time.perf_counter()
 
-        # 주기적 GC + WS 트림: 장시간 대기/수집 구간에서 순환 참조 객체 누적 방지
+        # 주기적 GC: 장시간 대기/수집 구간에서 순환 참조 객체 누적 방지
         _gc_cycle_count += 1
         if _gc_cycle_count >= _GC_PERIOD:
             _gc_cycle_count = 0
             import gc as _gc
             _gc.collect()
-            trim_working_set()  # [메모리 수정] GC 직후 page-in된 페이지를 OS에 반환
 
         while True:
             try:
@@ -861,8 +828,13 @@ def proc_analyzer(lip_queue, audio_queue,
                 time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
                 continue
 
-            vk        = VK_OEM_PERIOD if smoothed_offset > 0 else VK_OEM_COMMA
-            direction = "싱크 빠르게(오디오 늦춤)" if smoothed_offset > 0 else "싱크 느리게(오디오 당김)"
+            # [버그 수정] VK 키 방향 교정
+            # Shift+, (VK_OEM_COMMA)  = 오디오 뒤로 미룸(늦춤)
+            # Shift+. (VK_OEM_PERIOD) = 오디오 앞으로 당김
+            # smoothed_offset > 0 : 오디오가 립보다 앞서 있음 → 뒤로 밀어야 함 → VK_OEM_COMMA
+            # smoothed_offset < 0 : 오디오가 립보다 늦어 있음 → 앞으로 당겨야 함 → VK_OEM_PERIOD
+            vk        = VK_OEM_COMMA  if smoothed_offset > 0 else VK_OEM_PERIOD
+            direction = "오디오 늦춤(Shift+,)" if smoothed_offset > 0 else "오디오 당김(Shift+.)"
             add_log(f"🔧 보정: {direction} ×{steps} ({steps*STEP}ms) [평균={smoothed_offset:.1f}ms]")
             for _ in range(steps):
                 post_key_to_potplayer(hwnd, vk, shift=True)

@@ -42,11 +42,29 @@ def _resolve_db_path() -> str:
         candidate = os.path.join(appdata, "AutoSync", "oped_db.json")
         try:
             os.makedirs(os.path.dirname(candidate), exist_ok=True)
+            _ensure_db_file(candidate)
             return candidate
         except Exception:
             pass
     # 폴백: 사용자 홈
-    return os.path.join(os.path.expanduser("~"), ".autosinc_oped_db.json")
+    fallback = os.path.join(os.path.expanduser("~"), ".autosinc_oped_db.json")
+    _ensure_db_file(fallback)
+    return fallback
+
+
+def _ensure_db_file(path: str) -> None:
+    """
+    DB 파일이 존재하지 않을 경우 빈 JSON 오브젝트({})로 초기화하여 생성한다.
+
+    Args:
+        path: 생성할 파일의 절대 경로
+    """
+    if not os.path.exists(path):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{}")
+        except Exception:
+            pass
 
 
 _DB_PATH           = _resolve_db_path()

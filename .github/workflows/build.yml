@@ -55,7 +55,11 @@ jobs:
             mem_utils.py ^
             processes.py ^
             win32_utils.py ^
-            auth.py
+            auth.py ^
+            db_manager.py ^
+            video_hash.py ^
+            similarity.py ^
+            series_key.py
         shell: cmd
 
       - name: 난독화 (gui 패키지)
@@ -100,6 +104,10 @@ jobs:
           --hidden-import="processes"
           --hidden-import="win32_utils"
           --hidden-import="auth"
+          --hidden-import="db_manager"
+          --hidden-import="video_hash"
+          --hidden-import="similarity"
+          --hidden-import="series_key"
           --hidden-import="gui"
           --hidden-import="gui.base"
           --hidden-import="gui.ui_layout"

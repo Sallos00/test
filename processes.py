@@ -17,6 +17,14 @@ from log_utils import (make_add_log, STATUS_OK, STATUS_CORRECTED, STATUS_COLLECT
                        STATUS_NO_SIGNAL, STATUS_LOW_CONF, STATUS_COOLDOWN,
                        STATUS_UNDETECTED, STATUS_CEILING, STATUS_NO_POT, STATUS_BUFFERING)
 from mem_utils import full_cleanup, full_cleanup_and_release, trim_working_set
+# ── [영상 해시 학습] 신규 모듈 ─────────────────────────────────────────────────
+from video_hash  import generate_video_hash
+from similarity  import compare_video_hash
+from db_manager  import load_db, save_db, get_series, prune_series
+from series_key  import make_path_key, classify_segment as _classify_segment
+
+# 영상 해시 유사도 임계값 (이 이상이면 동일 OP/ED 판정)
+_HASH_SIM_THRESHOLD = 0.85
 
 def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
     """팟플레이어 화면 캡처 → 입술 개구 신호 추출 프로세스."""
@@ -230,6 +238,11 @@ def proc_analyzer(lip_queue, audio_queue,
     oped_last_t   = {"오프닝": 0.0,   "엔딩": 0.0}
     oped_prompted = {"오프닝": False,  "엔딩": False}
     oped_music_start_t = {"오프닝": 0.0, "엔딩": 0.0}  # 연속 음악 감지 시작 시각
+    # ── [영상 해시 학습] 해시 상태 추적 ──────────────────────────────────────
+    # oped_hash_done : 현재 감지 이벤트에서 해시 생성·DB 갱신 완료 여부
+    # oped_hash_mc   : DB 조회 결과 match_count (0=미조회, 1=1화, 2+=확정)
+    oped_hash_done = {"오프닝": False, "엔딩": False}
+    oped_hash_mc   = {"오프닝": 0,     "엔딩": 0}
     last_cd_log   = 0.0   # 쿨다운 로그 스로틀
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
@@ -485,6 +498,11 @@ def proc_analyzer(lip_queue, audio_queue,
         oped_music_start_t["엔딩"]   = 0.0
         pending_prompt[0] = None
         _last_oped_zone[0] = None  # [Bug 2 수정] 초기화 시 zone 정보도 클리어
+        # ── [영상 해시 학습] 해시 상태도 초기화 ──────────────────────────────
+        oped_hash_done["오프닝"] = False
+        oped_hash_done["엔딩"]   = False
+        oped_hash_mc["오프닝"]   = 0
+        oped_hash_mc["엔딩"]     = 0
 
     def _flush_and_gc(label: str):
         """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC + Working Set 트림.
@@ -568,6 +586,9 @@ def proc_analyzer(lip_queue, audio_queue,
                 oped_last_t[zone]   = time.time()
                 oped_prompted[zone] = False
                 pending_prompt[0]   = None
+                # ── [영상 해시 학습] 스킵 완료 시 해시 상태 초기화
+                oped_hash_done[zone] = False
+                oped_hash_mc[zone]   = 0
                 add_log(f"⏭ {zone} 스킵 완료 → 쿨다운 {OPED_COOLDOWN_SEC}초")
             elif cmd == "oped_no_skip":
                 # [Bug 2 수정] oped_skip과 동일하게 _last_oped_zone으로 zone 추적
@@ -578,6 +599,9 @@ def proc_analyzer(lip_queue, audio_queue,
                 oped_last_t[zone]   = time.time()
                 oped_prompted[zone] = False
                 pending_prompt[0]   = None
+                # ── [영상 해시 학습] 스킵 건너뜀 시 해시 상태 초기화
+                oped_hash_done[zone] = False
+                oped_hash_mc[zone]   = 0
                 add_log(f"✖ {zone} 스킵 건너뜀 → 쿨다운 {OPED_COOLDOWN_SEC}초")
             elif cmd == "oped_reset":
                 reset_oped()
@@ -700,26 +724,114 @@ def proc_analyzer(lip_queue, audio_queue,
                     cont_sec = now_music - oped_music_start_t[zone]
                     add_log(f"🎵 {zone} 음악 감지 ({oped_confirm[zone]}/{MUSIC_CONFIRM}회, "
                             f"지속={cont_sec:.0f}s/{MUSIC_MIN_CONT_SEC:.0f}s)")
-                    # CONFIRM 횟수 + 최소 연속 지속 시간 모두 충족해야 OP/ED 확정.
+                    # CONFIRM 횟수 + 최소 연속 지속 시간 모두 충족해야 OP/ED 후보 확정.
                     # 줄거리 요약·예고편은 통상 15초 미만이므로 오탐 방지.
                     if (oped_confirm[zone] >= MUSIC_CONFIRM
                             and cont_sec >= MUSIC_MIN_CONT_SEC):
-                        if OAS:
-                            if execute_skip():
-                                oped_confirm[zone] = 0
-                                oped_music_start_t[zone] = 0.0
-                                oped_last_t[zone]  = time.time()
-                                add_log(f"⏭ {zone} 자동스킵 완료 → 쿨다운 {OPED_COOLDOWN_SEC}초")
-                        elif not oped_prompted[zone]:
-                            oped_prompt           = {"zone": zone, "skip_sec": OSS}
-                            oped_prompted[zone]   = True
-                            _last_oped_zone[0]    = zone  # [Bug 2 수정] 팝업 전송 zone 기억
-                            add_log(f"🎵 {zone} 팝업 전송")
+                        # ── [영상 해시 학습] 1단계: 오디오 후보 탐지 완료 ──────────────
+                        # 2단계(시간 기반 안정성)는 MUSIC_CONFIRM×INTERVAL(≥15초)로 이미 통과.
+                        # 3단계: 영상 해시 생성 → DB 매칭 → match_count 기반 확정.
+                        if not oped_hash_done[zone]:
+                            oped_hash_done[zone] = True
+                            try:
+                                # 현재 재생 구간 정보
+                                _seg_end_ms   = pos
+                                _seg_start_ms = max(0, int(pos - cont_sec * 1000))
+                                _path_key     = make_path_key(prev_title)
+
+                                add_log(f"🧩 [{zone}] 영상 해시 생성 중 "
+                                        f"({_seg_start_ms//1000}s~{_seg_end_ms//1000}s, "
+                                        f"key='{_path_key}')")
+
+                                _vhash = generate_video_hash(
+                                    prev_title,   # 창 제목 → series_key 용, 실제 파일이면 OpenCV 사용
+                                    _seg_start_ms,
+                                    _seg_end_ms,
+                                    hwnd,          # 폴백: 창 캡처
+                                )
+
+                                if _vhash:
+                                    _db     = load_db()
+                                    _series = get_series(_db, _path_key)
+                                    _matched = False
+
+                                    # 기존 항목과 유사도 비교
+                                    for _item in _series[zone]:
+                                        _sim = compare_video_hash(
+                                            _vhash,
+                                            _item.get("video_hash", [])
+                                        )
+                                        if _sim >= _HASH_SIM_THRESHOLD:
+                                            _item["match_count"] = \
+                                                _item.get("match_count", 1) + 1
+                                            oped_hash_mc[zone] = _item["match_count"]
+                                            _matched = True
+                                            add_log(
+                                                f"✅ [{zone}] 해시 매칭 "
+                                                f"sim={_sim:.3f} → "
+                                                f"match_count={oped_hash_mc[zone]}"
+                                            )
+                                            break
+
+                                    if not _matched:
+                                        # 신규 항목 추가 (1화 첫 감지)
+                                        _series[zone].append({
+                                            "video_hash":  _vhash,
+                                            "match_count": 1,
+                                        })
+                                        oped_hash_mc[zone] = 1
+                                        prune_series(_series, zone)
+                                        add_log(f"🆕 [{zone}] 해시 신규 등록 "
+                                                f"(match_count=1)")
+
+                                    save_db(_db)
+                                    del _db, _series, _vhash
+                                else:
+                                    # 해시 생성 실패 → 오디오만으로 1화 취급
+                                    oped_hash_mc[zone] = 1
+                                    add_log(f"⚠ [{zone}] 해시 생성 실패 → 1화 취급")
+
+                            except Exception as _he:
+                                # 해시 처리 오류는 무음 실패하지 않도록 로그 기록
+                                oped_hash_mc[zone] = 1
+                                add_log(f"⚠ [{zone}] 해시 처리 오류: {_he}")
+
+                        # ── 스킵 실행 조건 결정 ─────────────────────────────────────
+                        _mc = oped_hash_mc[zone]
+
+                        if _mc >= 2:
+                            # ━━ match_count ≥ 2 : OP/ED 확정 → 기존 스킵 로직 실행 ━━
+                            if OAS:
+                                if execute_skip():
+                                    oped_confirm[zone] = 0
+                                    oped_music_start_t[zone] = 0.0
+                                    oped_hash_done[zone] = False
+                                    oped_hash_mc[zone]   = 0
+                                    oped_last_t[zone]  = time.time()
+                                    add_log(f"⏭ {zone} 자동스킵 완료 "
+                                            f"(match={_mc}) → 쿨다운 {OPED_COOLDOWN_SEC}초")
+                            elif not oped_prompted[zone]:
+                                oped_prompt         = {"zone": zone, "skip_sec": OSS}
+                                oped_prompted[zone] = True
+                                _last_oped_zone[0]  = zone
+                                add_log(f"🎵 {zone} 팝업 전송 (확정, match={_mc})")
+
+                        elif _mc == 1 and not oped_prompted[zone]:
+                            # ━━ match_count == 1 : 1화 확률 기반 팝업 ━━
+                            # 자동스킵은 하지 않고 팝업으로 사용자 확인 유도
+                            oped_prompt         = {"zone": zone, "skip_sec": OSS}
+                            oped_prompted[zone] = True
+                            _last_oped_zone[0]  = zone
+                            add_log(f"🎵 {zone} 팝업 전송 (1화 확률 기반, match=1)")
                 elif oped_confirm[zone] > 0:
                     oped_confirm[zone] -= 1
                     # 음악 감지가 끊기면 연속 시작 시각도 초기화
                     if oped_confirm[zone] == 0:
                         oped_music_start_t[zone] = 0.0
+                        # ── [영상 해시 학습] 음악 감지 초기화 시 해시 상태도 리셋
+                        # (다음 감지 이벤트에서 해시를 새로 생성하기 위함)
+                        oped_hash_done[zone] = False
+                        oped_hash_mc[zone]   = 0
 
             elif in_zone and not cooled:
                 now_cd = time.time()

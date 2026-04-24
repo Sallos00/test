@@ -31,6 +31,7 @@ import threading
 import tkinter as tk
 
 from win32_utils import CFG
+import db_manager   # 앱 시작 시 oped_db.json 파일 초기화 (없으면 자동 생성)
 from gui.base        import LipSyncGUIBase
 from gui.ui_layout   import LipSyncGUILayout
 from gui.ui_logic    import LipSyncGUILogic

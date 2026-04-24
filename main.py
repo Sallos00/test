@@ -31,7 +31,20 @@ import threading
 import tkinter as tk
 
 from win32_utils import CFG
-import db_manager   # 앱 시작 시 oped_db.json 파일 초기화 (없으면 자동 생성)
+
+# ── oped_db.json 초기화: 앱 시작 시 파일이 없으면 빈 JSON으로 생성 ──────────
+try:
+    _appdata = os.environ.get("APPDATA", "")
+    if _appdata:
+        _db_dir  = os.path.join(_appdata, "AutoSync")
+        _db_path = os.path.join(_db_dir, "oped_db.json")
+        os.makedirs(_db_dir, exist_ok=True)
+        if not os.path.exists(_db_path):
+            with open(_db_path, "w", encoding="utf-8") as _f:
+                _f.write("{}")
+except Exception:
+    pass
+
 from gui.base        import LipSyncGUIBase
 from gui.ui_layout   import LipSyncGUILayout
 from gui.ui_logic    import LipSyncGUILogic

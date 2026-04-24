@@ -748,7 +748,9 @@ def proc_analyzer(lip_queue, audio_queue,
                     now_music = time.time()
                     # 연속 감지 시작 시각 기록 (처음 감지되는 시점)
                     if oped_confirm[zone] == 0:
-                        oped_music_start_t[zone] = now_music
+                        # [Bug1 fix] INTERVAL 1회분을 선행 차감해
+                        # 5번째 감지 시점에 cont_sec == MUSIC_MIN_CONT_SEC가 되도록 맞춤
+                        oped_music_start_t[zone] = now_music - INTERVAL
                     oped_confirm[zone] += 1
                     cont_sec = now_music - oped_music_start_t[zone]
                     add_log(f"🎵 {zone} 음악 감지 ({oped_confirm[zone]}/{MUSIC_CONFIRM}회, "

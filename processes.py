@@ -264,8 +264,9 @@ def proc_analyzer(lip_queue, audio_queue,
     # ── [영상 해시 학습] 해시 상태 추적 ──────────────────────────────────────
     # oped_hash_done : 현재 감지 이벤트에서 해시 생성·DB 갱신 완료 여부
     # oped_hash_mc   : DB 조회 결과 match_count (0=미조회, 1=1화, 2+=확정)
-    oped_hash_done = {"오프닝": False, "엔딩": False}
-    oped_hash_mc   = {"오프닝": 0,     "엔딩": 0}
+    oped_hash_done  = {"오프닝": False, "엔딩": False}
+    oped_hash_mc    = {"오프닝": 0,     "엔딩": 0}
+    oped_hash_retry = {"오프닝": 0,     "엔딩": 0}  # 음악 감지 재시도 횟수 (최대 2)
     last_cd_log   = 0.0   # 쿨다운 로그 스로틀
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
@@ -526,6 +527,8 @@ def proc_analyzer(lip_queue, audio_queue,
         oped_hash_done["엔딩"]   = False
         oped_hash_mc["오프닝"]   = 0
         oped_hash_mc["엔딩"]     = 0
+        oped_hash_retry["오프닝"] = 0
+        oped_hash_retry["엔딩"]   = 0
 
     def _flush_and_gc(label: str):
         """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC + Working Set 트림.
@@ -586,6 +589,7 @@ def proc_analyzer(lip_queue, audio_queue,
                     _no_pot_cleanup_t = 0.0   # 미감지 쿨다운 초기화
                     _flush_and_gc("수동 초기화")
                     reset_sync()
+                    reset_oped()
                     in_cooldown = False
                     add_log("↺ 싱크 초기화")
                 else:
@@ -612,6 +616,7 @@ def proc_analyzer(lip_queue, audio_queue,
                 # ── [영상 해시 학습] 스킵 완료 시 해시 상태 초기화
                 oped_hash_done[zone] = False
                 oped_hash_mc[zone]   = 0
+                oped_hash_retry[zone] = 0
                 add_log(f"⏭ {zone} 스킵 완료 → 쿨다운 {OPED_COOLDOWN_SEC}초")
             elif cmd == "oped_no_skip":
                 # [Bug 2 수정] oped_skip과 동일하게 _last_oped_zone으로 zone 추적
@@ -625,6 +630,7 @@ def proc_analyzer(lip_queue, audio_queue,
                 # ── [영상 해시 학습] 스킵 건너뜀 시 해시 상태 초기화
                 oped_hash_done[zone] = False
                 oped_hash_mc[zone]   = 0
+                oped_hash_retry[zone] = 0
                 add_log(f"✖ {zone} 스킵 건너뜀 → 쿨다운 {OPED_COOLDOWN_SEC}초")
             elif cmd == "oped_reset":
                 reset_oped()
@@ -815,6 +821,22 @@ def proc_analyzer(lip_queue, audio_queue,
                                             add_log(f"🆕 [{zone}] 해시 신규 등록 "
                                                     f"(match_count=1)")
 
+                                            if oped_hash_retry[zone] < 2:
+                                                oped_hash_retry[zone] += 1
+                                                oped_hash_done[zone]     = False
+                                                oped_hash_mc[zone]       = 0
+                                                oped_confirm[zone]       = 0
+                                                oped_music_start_t[zone] = 0.0
+                                                add_log(
+                                                    f"🔄 [{zone}] 신규 해시 등록 → 음악 감지 재시도 "
+                                                    f"({oped_hash_retry[zone]}/2)"
+                                                )
+                                            else:
+                                                add_log(
+                                                    f"🆕 [{zone}] 재시도 2회 소진 → 스킵/팝업 진행 "
+                                                    f"(match=1)"
+                                                )
+
                                         _save_db(_db)
                                         del _db, _series, _vhash
                                     else:
@@ -827,8 +849,10 @@ def proc_analyzer(lip_queue, audio_queue,
 
                         # ── 스킵 실행 조건 결정 ─────────────────────────────────────
                         _mc = oped_hash_mc[zone]
-
-                        if OAS:
+                        if _mc == 0:
+                            # 재시도 복귀 중 — 스킵/팝업 없이 음악 감지로 돌아감
+                            pass
+                        elif OAS:
                             # ━━ 자동스킵 모드: _mc 관계없이 항상 스킵 시도 ━━
                             # _mc는 학습 신뢰도를 나타내지만, OAS=True면 오디오
                             # 확정(MUSIC_CONFIRM + 연속 시간)만으로 충분히 신뢰.

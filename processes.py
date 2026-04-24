@@ -828,30 +828,35 @@ def proc_analyzer(lip_queue, audio_queue,
                         # ── 스킵 실행 조건 결정 ─────────────────────────────────────
                         _mc = oped_hash_mc[zone]
 
-                        if _mc >= 2:
-                            # ━━ match_count ≥ 2 : OP/ED 확정 → 기존 스킵 로직 실행 ━━
-                            if OAS:
-                                if execute_skip():
-                                    oped_confirm[zone] = 0
-                                    oped_music_start_t[zone] = 0.0
-                                    oped_hash_done[zone] = False
-                                    oped_hash_mc[zone]   = 0
-                                    oped_last_t[zone]  = time.time()
-                                    add_log(f"⏭ {zone} 자동스킵 완료 "
-                                            f"(match={_mc}) → 쿨다운 {OPED_COOLDOWN_SEC}초")
+                        if OAS:
+                            # ━━ 자동스킵 모드: _mc 관계없이 항상 스킵 시도 ━━
+                            # _mc는 학습 신뢰도를 나타내지만, OAS=True면 오디오
+                            # 확정(MUSIC_CONFIRM + 연속 시간)만으로 충분히 신뢰.
+                            # _mc=1(1화)이어도 사용자가 자동스킵을 선택했으므로 스킵.
+                            if execute_skip():
+                                oped_confirm[zone]       = 0
+                                oped_music_start_t[zone] = 0.0
+                                oped_hash_done[zone]     = False
+                                oped_hash_mc[zone]       = 0
+                                oped_last_t[zone]        = time.time()
+                                add_log(f"⏭ {zone} 자동스킵 완료 "
+                                        f"(match={_mc}) → 쿨다운 {OPED_COOLDOWN_SEC}초")
                             elif not oped_prompted[zone]:
+                                # execute_skip() 실패(hwnd 없음 등) → 팝업 폴백
                                 oped_prompt         = {"zone": zone, "skip_sec": OSS}
                                 oped_prompted[zone] = True
                                 _last_oped_zone[0]  = zone
-                                add_log(f"🎵 {zone} 팝업 전송 (확정, match={_mc})")
-
-                        elif _mc == 1 and not oped_prompted[zone]:
-                            # ━━ match_count == 1 : 1화 확률 기반 팝업 ━━
-                            # 자동스킵은 하지 않고 팝업으로 사용자 확인 유도
-                            oped_prompt         = {"zone": zone, "skip_sec": OSS}
-                            oped_prompted[zone] = True
-                            _last_oped_zone[0]  = zone
-                            add_log(f"🎵 {zone} 팝업 전송 (1화 확률 기반, match=1)")
+                                add_log(f"⚠ {zone} 자동스킵 실패 → 팝업 폴백 (match={_mc})")
+                        else:
+                            # ━━ 수동 모드: _mc 기반으로 팝업 표시 ━━
+                            if not oped_prompted[zone]:
+                                oped_prompt         = {"zone": zone, "skip_sec": OSS}
+                                oped_prompted[zone] = True
+                                _last_oped_zone[0]  = zone
+                                if _mc >= 2:
+                                    add_log(f"🎵 {zone} 팝업 전송 (확정, match={_mc})")
+                                else:
+                                    add_log(f"🎵 {zone} 팝업 전송 (1화 확률 기반, match={_mc})")
                 elif oped_confirm[zone] > 0:
                     oped_confirm[zone] -= 1
                     # 음악 감지가 끊기면 연속 시작 시각도 초기화

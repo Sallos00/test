@@ -182,7 +182,7 @@ class OpedMonitorMixin:
 
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True)
-        popup.attributes("-topmost", False)
+        popup.attributes("-topmost", True)
         popup.configure(bg=self.BORDER)
         popup.geometry(f"{pw}x{ph}+{px}+{py}")
         popup.update_idletasks()

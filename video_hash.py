@@ -71,7 +71,8 @@ def generate_video_hash(video_path: str,
     if not frames:
         return None
 
-    # 각 프레임 → pHash, 다수결 집계
+    # 프레임별 pHash를 개별 보존 (집계하지 않음)
+    # → 비교 시 sliding alignment로 구간 shift에 강인하게 대응
     hashes = []
     for frame in frames:
         try:
@@ -81,7 +82,7 @@ def generate_video_hash(video_path: str,
         except Exception:
             pass
 
-    return _aggregate(hashes) if hashes else None
+    return hashes if hashes else None
 
 
 # ── 프레임 추출 ───────────────────────────────────────────────────────────────

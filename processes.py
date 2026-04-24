@@ -717,7 +717,7 @@ def proc_analyzer(lip_queue, audio_queue,
             in_ed   = pos > (dur - OPED_ZONE_MS) and pos > dur // 2
             in_zone = in_op or in_ed
             zone    = "오프닝" if in_op else "엔딩"
-            cooled  = (time.time() - oped_last_t[zone]) > OPED_COOLDOWN_SEC
+            cooled  = (time.time() - oped_last_t[zone]) > OPED_COOLDOWN_SEC if in_zone else False
 
             if in_zone and cooled:
                 music = is_music_playing()

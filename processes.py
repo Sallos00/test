@@ -17,14 +17,37 @@ from log_utils import (make_add_log, STATUS_OK, STATUS_CORRECTED, STATUS_COLLECT
                        STATUS_NO_SIGNAL, STATUS_LOW_CONF, STATUS_COOLDOWN,
                        STATUS_UNDETECTED, STATUS_CEILING, STATUS_NO_POT, STATUS_BUFFERING)
 from mem_utils import full_cleanup, full_cleanup_and_release, trim_working_set
-# ── [영상 해시 학습] 신규 모듈 ─────────────────────────────────────────────────
-from video_hash  import generate_video_hash
-from similarity  import compare_video_hash
-from db_manager  import load_db, save_db, get_series, prune_series
-from series_key  import make_path_key, classify_segment as _classify_segment
 
-# 영상 해시 유사도 임계값 (이 이상이면 동일 OP/ED 판정)
-_HASH_SIM_THRESHOLD = 0.85
+# ── [영상 해시 학습] 신규 모듈 — 모듈 로드 실패가 T3를 죽이지 않도록 안전하게 import ──
+# top-level import 대신 함수 내부 lazy import를 사용한다.
+# 이유: processes.py는 run_process.py에서 lazy import(`from processes import ...`)되는데,
+#   이 시점에 상단 import가 실행되므로 신규 모듈 중 하나라도 실패하면
+#   proc_analyzer 함수를 가져오지 못해 T3 스레드가 시작조차 못하고 종료된다.
+# 해결: 실제로 사용하는 proc_analyzer 함수 내부에서 lazy import → import 실패 시
+#   해당 호출만 건너뛰고 스레드는 계속 실행된다.
+_HASH_SIM_THRESHOLD = 0.85   # 영상 해시 유사도 임계값 (이 이상이면 동일 OP/ED 판정)
+
+
+def _import_hash_modules():
+    """
+    영상 해시 관련 모듈을 안전하게 lazy import.
+
+    Returns:
+        (generate_video_hash, compare_video_hash,
+         load_db, save_db, get_series, prune_series,
+         make_path_key)
+        import 실패 시 None 튜플 반환.
+    """
+    try:
+        from video_hash import generate_video_hash
+        from similarity import compare_video_hash
+        from db_manager import load_db, save_db, get_series, prune_series
+        from series_key import make_path_key
+        return (generate_video_hash, compare_video_hash,
+                load_db, save_db, get_series, prune_series,
+                make_path_key)
+    except Exception as _ie:
+        return (None,) * 7
 
 def proc_lip_capture(lip_queue, stop_flag, cfg: dict, stream_anchor=None):
     """팟플레이어 화면 캡처 → 입술 개구 신호 추출 프로세스."""
@@ -734,65 +757,71 @@ def proc_analyzer(lip_queue, audio_queue,
                         if not oped_hash_done[zone]:
                             oped_hash_done[zone] = True
                             try:
-                                # 현재 재생 구간 정보
-                                _seg_end_ms   = pos
-                                _seg_start_ms = max(0, int(pos - cont_sec * 1000))
-                                _path_key     = make_path_key(prev_title)
+                                # ── lazy import: 실패해도 T3 스레드는 계속 실행 ──
+                                (_gen_hash, _cmp_hash,
+                                 _load_db, _save_db, _get_series, _prune,
+                                 _mk_key) = _import_hash_modules()
 
-                                add_log(f"🧩 [{zone}] 영상 해시 생성 중 "
-                                        f"({_seg_start_ms//1000}s~{_seg_end_ms//1000}s, "
-                                        f"key='{_path_key}')")
-
-                                _vhash = generate_video_hash(
-                                    prev_title,   # 창 제목 → series_key 용, 실제 파일이면 OpenCV 사용
-                                    _seg_start_ms,
-                                    _seg_end_ms,
-                                    hwnd,          # 폴백: 창 캡처
-                                )
-
-                                if _vhash:
-                                    _db     = load_db()
-                                    _series = get_series(_db, _path_key)
-                                    _matched = False
-
-                                    # 기존 항목과 유사도 비교
-                                    for _item in _series[zone]:
-                                        _sim = compare_video_hash(
-                                            _vhash,
-                                            _item.get("video_hash", [])
-                                        )
-                                        if _sim >= _HASH_SIM_THRESHOLD:
-                                            _item["match_count"] = \
-                                                _item.get("match_count", 1) + 1
-                                            oped_hash_mc[zone] = _item["match_count"]
-                                            _matched = True
-                                            add_log(
-                                                f"✅ [{zone}] 해시 매칭 "
-                                                f"sim={_sim:.3f} → "
-                                                f"match_count={oped_hash_mc[zone]}"
-                                            )
-                                            break
-
-                                    if not _matched:
-                                        # 신규 항목 추가 (1화 첫 감지)
-                                        _series[zone].append({
-                                            "video_hash":  _vhash,
-                                            "match_count": 1,
-                                        })
-                                        oped_hash_mc[zone] = 1
-                                        prune_series(_series, zone)
-                                        add_log(f"🆕 [{zone}] 해시 신규 등록 "
-                                                f"(match_count=1)")
-
-                                    save_db(_db)
-                                    del _db, _series, _vhash
-                                else:
-                                    # 해시 생성 실패 → 오디오만으로 1화 취급
+                                if _gen_hash is None:
+                                    # 모듈 import 실패 → 1화 취급, 팝업만 표시
                                     oped_hash_mc[zone] = 1
-                                    add_log(f"⚠ [{zone}] 해시 생성 실패 → 1화 취급")
+                                    add_log(f"⚠ [{zone}] 해시 모듈 import 실패 → 1화 취급")
+                                else:
+                                    # 현재 재생 구간 정보
+                                    _seg_end_ms   = pos
+                                    _seg_start_ms = max(0, int(pos - cont_sec * 1000))
+                                    _path_key     = _mk_key(prev_title)
+
+                                    add_log(f"🧩 [{zone}] 영상 해시 생성 중 "
+                                            f"({_seg_start_ms//1000}s~{_seg_end_ms//1000}s, "
+                                            f"key='{_path_key}')")
+
+                                    _vhash = _gen_hash(
+                                        prev_title,   # 창 제목 → 실제 파일 경로 탐색 후 폴백: 창 캡처
+                                        _seg_start_ms,
+                                        _seg_end_ms,
+                                        hwnd,
+                                    )
+
+                                    if _vhash:
+                                        _db     = _load_db()
+                                        _series = _get_series(_db, _path_key)
+                                        _matched = False
+
+                                        for _item in _series[zone]:
+                                            _sim = _cmp_hash(
+                                                _vhash,
+                                                _item.get("video_hash", [])
+                                            )
+                                            if _sim >= _HASH_SIM_THRESHOLD:
+                                                _item["match_count"] = \
+                                                    _item.get("match_count", 1) + 1
+                                                oped_hash_mc[zone] = _item["match_count"]
+                                                _matched = True
+                                                add_log(
+                                                    f"✅ [{zone}] 해시 매칭 "
+                                                    f"sim={_sim:.3f} → "
+                                                    f"match_count={oped_hash_mc[zone]}"
+                                                )
+                                                break
+
+                                        if not _matched:
+                                            _series[zone].append({
+                                                "video_hash":  _vhash,
+                                                "match_count": 1,
+                                            })
+                                            oped_hash_mc[zone] = 1
+                                            _prune(_series, zone)
+                                            add_log(f"🆕 [{zone}] 해시 신규 등록 "
+                                                    f"(match_count=1)")
+
+                                        _save_db(_db)
+                                        del _db, _series, _vhash
+                                    else:
+                                        oped_hash_mc[zone] = 1
+                                        add_log(f"⚠ [{zone}] 해시 생성 실패 → 1화 취급")
 
                             except Exception as _he:
-                                # 해시 처리 오류는 무음 실패하지 않도록 로그 기록
                                 oped_hash_mc[zone] = 1
                                 add_log(f"⚠ [{zone}] 해시 처리 오류: {_he}")
 

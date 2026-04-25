@@ -25,7 +25,9 @@ from mem_utils import full_cleanup, full_cleanup_and_release, trim_working_set
 #   proc_analyzer 함수를 가져오지 못해 T3 스레드가 시작조차 못하고 종료된다.
 # 해결: 실제로 사용하는 proc_analyzer 함수 내부에서 lazy import → import 실패 시
 #   해당 호출만 건너뛰고 스레드는 계속 실행된다.
-_HASH_SIM_THRESHOLD = 0.85   # 영상 해시 유사도 임계값 (이 이상이면 동일 OP/ED 판정)
+_HASH_SIM_THRESHOLD  = 0.85  # 영상 해시 유사도 임계값 (이 이상이면 동일 OP/ED 판정)
+_MAX_CANDIDATES      = 10   # 후보(미확정) 최대 보관 수
+_MAX_CONFIRMED       = 3    # 확정후보 최대 보관 수
 
 
 def _import_hash_modules():
@@ -224,8 +226,8 @@ def proc_analyzer(lip_queue, audio_queue,
     # ── [버그2&3 수정] 세대 ID — _refresh()에서 좀비 스레드 아이템 필터링에 사용 ──
     _GENERATION = cfg.get("_generation", 0)
 
-    OPED_ZONE_MS      = 90_000   # OP/ED 탐지 구간: 재생 위치 앞뒤 90초 이내
-    OPED_COOLDOWN_SEC = 90       # OP/ED 감지 후 재감지 억제 시간
+    OPED_ZONE_MS      = 180_000  # OP/ED 탐지 구간: 재생 위치 앞뒤 180초(3분) 이내
+    OPED_COOLDOWN_SEC = 180      # OP/ED 감지 후 재감지 억제 시간 (싱크·녹화 작업은 별도)
     MUSIC_WINDOW_SEC  = 15.0     # 음악 감지 RMS 슬라이딩 윈도우
     MUSIC_MIN_RMS     = 0.002    # 이 이하는 무음으로 판정
     MUSIC_MAX_CV      = 0.65     # 변동계수 상한 (0.8→0.65 강화: 나레이션+BGM 오탐 방지)
@@ -266,7 +268,7 @@ def proc_analyzer(lip_queue, audio_queue,
     # oped_hash_mc   : DB 조회 결과 match_count (0=미조회, 1=1화, 2+=확정)
     oped_hash_done  = {"오프닝": False, "엔딩": False}
     oped_hash_mc    = {"오프닝": 0,     "엔딩": 0}
-    oped_hash_retry = {"오프닝": 0,     "엔딩": 0}  # 음악 감지 재시도 횟수 (최대 2)
+    oped_hash_retry = {"오프닝": 0,     "엔딩": 0}  # 음악 감지 재시도 횟수 (최대 5)
     last_cd_log   = 0.0   # 쿨다운 로그 스로틀
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
@@ -808,53 +810,92 @@ def proc_analyzer(lip_queue, audio_queue,
                                     if _vhash:
                                         _db     = _load_db()
                                         _series = _get_series(_db, _path_key)
-                                        _matched = False
 
-                                        for _item in _series[zone]:
+                                        # ── 확정후보 / 후보 분리 (하위 호환: confirmed 키 없으면 확정후보 취급) ──
+                                        _confirmed_items = [
+                                            i for i in _series[zone]
+                                            if i.get("confirmed", True)
+                                        ]
+                                        _candidate_items = [
+                                            i for i in _series[zone]
+                                            if not i.get("confirmed", True)
+                                        ]
+
+                                        # ── Step 1: 확정후보 전체와 비교 (best sim) ──
+                                        _best_item, _best_sim = None, 0.0
+                                        for _item in _confirmed_items:
                                             _sim = _cmp_hash(
                                                 _vhash,
                                                 _item.get("video_hash", [])
                                             )
-                                            if _sim >= _HASH_SIM_THRESHOLD:
-                                                _item["match_count"] = \
-                                                    _item.get("match_count", 1) + 1
-                                                oped_hash_mc[zone] = _item["match_count"]
-                                                _matched = True
-                                                add_log(
-                                                    f"✅ [{zone}] 해시 매칭 "
-                                                    f"sim={_sim:.3f} → "
-                                                    f"match_count={oped_hash_mc[zone]}"
+                                            if _sim > _best_sim:
+                                                _best_sim, _best_item = _sim, _item
+
+                                        if _best_sim >= _HASH_SIM_THRESHOLD:
+                                            # 확정후보 매칭 → match_count 즉시 갱신
+                                            _best_item["match_count"] = _best_item.get("match_count", 1) + 1
+                                            oped_hash_mc[zone] = _best_item["match_count"]
+                                            _save_db(_db)
+                                            add_log(
+                                                f"✅ [{zone}] 확정후보 매칭 "
+                                                f"sim={_best_sim:.3f} → "
+                                                f"match_count={oped_hash_mc[zone]}"
+                                            )
+                                        else:
+                                            # ── Step 2: 후보 전체와 비교 (best sim) ──
+                                            _best_cand, _best_csim = None, 0.0
+                                            for _item in _candidate_items:
+                                                _sim = _cmp_hash(
+                                                    _vhash,
+                                                    _item.get("video_hash", [])
                                                 )
-                                                break
+                                                if _sim > _best_csim:
+                                                    _best_csim, _best_cand = _sim, _item
 
-                                        if not _matched:
-                                            _series[zone].append({
-                                                "video_hash":  _vhash,
-                                                "match_count": 1,
-                                            })
-                                            oped_hash_mc[zone] = 1
-                                            _prune(_series, zone)
-                                            add_log(f"🆕 [{zone}] 해시 신규 등록 "
-                                                    f"(match_count=1)")
-
-                                            if oped_hash_retry[zone] < 2:
-                                                oped_hash_retry[zone] += 1
-                                                oped_hash_done[zone]     = False
-                                                oped_hash_mc[zone]       = 0
-                                                oped_confirm[zone]       = 0
-                                                oped_music_start_t[zone] = 0.0
+                                            if _best_csim >= _HASH_SIM_THRESHOLD:
+                                                # 후보 매칭 → 확정후보로 즉시 승격
+                                                # 스킵·팝업 여부와 무관하게 매칭 시점에 확정
+                                                _best_cand["confirmed"]   = True
+                                                _best_cand["match_count"] = 1
+                                                oped_hash_mc[zone] = 1
+                                                _save_db(_db)
                                                 add_log(
-                                                    f"🔄 [{zone}] 신규 해시 등록 → 음악 감지 재시도 "
-                                                    f"({oped_hash_retry[zone]}/2)"
+                                                    f"⬆ [{zone}] 후보 → 확정후보 승격 "
+                                                    f"sim={_best_csim:.3f}"
                                                 )
                                             else:
-                                                add_log(
-                                                    f"🆕 [{zone}] 재시도 2회 소진 → 스킵/팝업 진행 "
-                                                    f"(match=1)"
-                                                )
+                                                # ── Step 3: 미매칭 → 신규 후보 등록 ──
+                                                _series[zone].append({
+                                                    "video_hash":  _vhash,
+                                                    "match_count": 0,
+                                                    "confirmed":   False,
+                                                })
+                                                oped_hash_mc[zone] = 0
+                                                _prune(_series, zone)
+                                                _save_db(_db)
+                                                add_log(f"🆕 [{zone}] 신규 후보 등록")
 
-                                        _save_db(_db)
-                                        del _db, _series, _vhash
+                                                if oped_hash_retry[zone] < 5:
+                                                    oped_hash_retry[zone] += 1
+                                                    oped_hash_done[zone]     = False
+                                                    oped_hash_mc[zone]       = 0
+                                                    oped_confirm[zone]       = 0
+                                                    oped_music_start_t[zone] = 0.0
+                                                    add_log(
+                                                        f"🔄 [{zone}] 신규 후보 등록 → 음악 감지 재시도 "
+                                                        f"({oped_hash_retry[zone]}/5)"
+                                                    )
+                                                else:
+                                                    # 재시도 5회 소진 → 일반 후보 상태 유지
+                                                    # (이미 위에서 confirmed=False로 등록·저장 완료)
+                                                    # oped_hash_mc=1로 스킵/팝업 진행
+                                                    oped_hash_mc[zone] = 1
+                                                    add_log(
+                                                        f"🔄 [{zone}] 재시도 5회 소진 "
+                                                        f"→ 일반 후보 유지, 스킵/팝업 진행"
+                                                    )
+
+                                        del _db, _series
                                     else:
                                         oped_hash_mc[zone] = 1
                                         add_log(f"⚠ [{zone}] 해시 생성 실패 → 1화 취급")
@@ -928,10 +969,10 @@ def proc_analyzer(lip_queue, audio_queue,
             in_cooldown = False
             add_log("🔄 쿨다운 종료 → 버퍼 수집 재개")
 
-        # ── [싱크 제한 구간] 앞뒤 90초에서는 싱크 보정 실행 금지 ─────────────
-        # OP/ED 감지 구간(OPED_ZONE_MS = 90초)과 동일한 범위를 적용한다.
-        #   - 0 ~ 90초 :               오프닝 감지 구간 → 싱크 보정 금지
-        #   - (영상 길이 - 90초) ~ 끝 : 엔딩 감지 구간  → 싱크 보정 금지
+        # ── [싱크 제한 구간] 앞뒤 180초에서는 싱크 보정 실행 금지 ─────────────
+        # OP/ED 감지 구간(OPED_ZONE_MS = 180초)과 동일한 범위를 적용한다.
+        #   - 0 ~ 180초 :               오프닝 감지 구간 → 싱크 보정 금지
+        #   - (영상 길이 - 180초) ~ 끝 : 엔딩 감지 구간  → 싱크 보정 금지
         # 이 구간에서 싱크 보정이 실행되면 OP/ED 감지·스킵 로직과 충돌하므로
         # 보정 사이클 전체를 건너뛴다. offset_buf를 클리어해 제한 구간 내
         # 잔류 측정값이 구간 종료 후 첫 보정에 영향을 주지 않도록 한다.

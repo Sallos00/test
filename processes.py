@@ -269,6 +269,8 @@ def proc_analyzer(lip_queue, audio_queue,
     oped_hash_done  = {"오프닝": False, "엔딩": False}
     oped_hash_mc    = {"오프닝": 0,     "엔딩": 0}
     oped_hash_retry = {"오프닝": 0,     "엔딩": 0}  # 음악 감지 재시도 횟수 (최대 5)
+    # retry 5회 소진 시 스킵 거리를 (1/6)*OSS로 줄이기 위한 플래그
+    _oped_short_skip = {"오프닝": False, "엔딩": False}
     last_cd_log   = 0.0   # 쿨다운 로그 스로틀
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
@@ -485,7 +487,8 @@ def proc_analyzer(lip_queue, audio_queue,
             _generation=_GENERATION,
         ))
 
-    def execute_skip() -> bool:
+    def execute_skip(skip_sec: int = None) -> bool:
+        _sec = skip_sec if skip_sec is not None else OSS
         hwnd = find_potplayer_hwnd()
         if not hwnd:
             add_log("⚠ 스킵 실패: 팟플레이어 미감지")
@@ -496,15 +499,15 @@ def proc_analyzer(lip_queue, audio_queue,
             if dur <= 0:
                 add_log("⚠ 스킵 실패: 전체 길이 미확인")
                 return False
-            new_pos = min(pos + OSS * 1000, dur - 2000)
-            # ── [충돌 방지] 스킵 목적지가 엔딩 감지 구간(뒤 90초)에 걸리면
+            new_pos = min(pos + _sec * 1000, dur - 2000)
+            # ── [충돌 방지] 스킵 목적지가 엔딩 감지 구간(뒤 180초)에 걸리면
             # 엔딩 구간 시작 직전으로 목적지를 제한해 이중 감지 충돌 방지
             if dur > OPED_ZONE_MS * 2 and new_pos > dur - OPED_ZONE_MS:
                 new_pos = dur - OPED_ZONE_MS - 1000   # 1초 여유
                 add_log("⚠ 스킵 목적지가 엔딩 구간 → 엔딩 직전으로 제한")
             _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, int(new_pos))
             fmt = lambda ms: f"{ms//1000//60}:{ms//1000%60:02d}"
-            add_log(f"⏭ 스킵 ({OSS}초): {fmt(pos)} → {fmt(new_pos)}")
+            add_log(f"⏭ 스킵 ({_sec}초): {fmt(pos)} → {fmt(new_pos)}")
             return True
         except Exception as e:
             add_log(f"⚠ 스킵 실패: {e}")
@@ -536,6 +539,8 @@ def proc_analyzer(lip_queue, audio_queue,
         oped_hash_mc["엔딩"]     = 0
         oped_hash_retry["오프닝"] = 0
         oped_hash_retry["엔딩"]   = 0
+        _oped_short_skip["오프닝"] = False
+        _oped_short_skip["엔딩"]   = False
 
     def _flush_and_gc(label: str):
         """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC + Working Set 트림.
@@ -624,6 +629,7 @@ def proc_analyzer(lip_queue, audio_queue,
                 oped_hash_done[zone] = False
                 oped_hash_mc[zone]   = 0
                 oped_hash_retry[zone] = 0
+                _oped_short_skip[zone] = False
                 add_log(f"⏭ {zone} 스킵 완료 → 쿨다운 {OPED_COOLDOWN_SEC}초")
             elif cmd == "oped_no_skip":
                 # [Bug 2 수정] oped_skip과 동일하게 _last_oped_zone으로 zone 추적
@@ -638,6 +644,7 @@ def proc_analyzer(lip_queue, audio_queue,
                 oped_hash_done[zone] = False
                 oped_hash_mc[zone]   = 0
                 oped_hash_retry[zone] = 0
+                _oped_short_skip[zone] = False
                 add_log(f"✖ {zone} 스킵 건너뜀 → 쿨다운 {OPED_COOLDOWN_SEC}초")
             elif cmd == "oped_reset":
                 reset_oped()
@@ -908,10 +915,12 @@ def proc_analyzer(lip_queue, audio_queue,
                                                     # 재시도 5회 소진 → 일반 후보 상태 유지
                                                     # (이미 위에서 confirmed=False로 등록·저장 완료)
                                                     # oped_hash_mc=1로 스킵/팝업 진행
+                                                    # 스킵 거리는 (1/6)*OSS 적용
                                                     oped_hash_mc[zone] = 1
+                                                    _oped_short_skip[zone] = True
                                                     add_log(
                                                         f"🔄 [{zone}] 재시도 5회 소진 "
-                                                        f"→ 일반 후보 유지, 스킵/팝업 진행"
+                                                        f"→ 일반 후보 유지, 스킵({int(OSS/6)}초)/팝업 진행"
                                                     )
 
                                         del _db, _series
@@ -925,6 +934,8 @@ def proc_analyzer(lip_queue, audio_queue,
 
                         # ── 스킵 실행 조건 결정 ─────────────────────────────────────
                         _mc = oped_hash_mc[zone]
+                        # retry 5회 소진이면 (1/6)*OSS, 그 외엔 OSS
+                        _skip_sec = int(OSS / 6) if _oped_short_skip[zone] else OSS
                         if _mc == 0:
                             # 재시도 복귀 중 — 스킵/팝업 없이 음악 감지로 돌아감
                             pass
@@ -933,30 +944,31 @@ def proc_analyzer(lip_queue, audio_queue,
                             # _mc는 학습 신뢰도를 나타내지만, OAS=True면 오디오
                             # 확정(MUSIC_CONFIRM + 연속 시간)만으로 충분히 신뢰.
                             # _mc=1(1화)이어도 사용자가 자동스킵을 선택했으므로 스킵.
-                            if execute_skip():
+                            if execute_skip(_skip_sec):
                                 oped_confirm[zone]       = 0
                                 oped_music_start_t[zone] = 0.0
                                 oped_hash_done[zone]     = False
                                 oped_hash_mc[zone]       = 0
                                 oped_last_t[zone]        = time.time()
+                                _oped_short_skip[zone]   = False
                                 add_log(f"⏭ {zone} 자동스킵 완료 "
-                                        f"(match={_mc}) → 쿨다운 {OPED_COOLDOWN_SEC}초")
+                                        f"(match={_mc}, sec={_skip_sec}) → 쿨다운 {OPED_COOLDOWN_SEC}초")
                             elif not oped_prompted[zone]:
                                 # execute_skip() 실패(hwnd 없음 등) → 팝업 폴백
-                                oped_prompt         = {"zone": zone, "skip_sec": OSS}
+                                oped_prompt         = {"zone": zone, "skip_sec": _skip_sec}
                                 oped_prompted[zone] = True
                                 _last_oped_zone[0]  = zone
                                 add_log(f"⚠ {zone} 자동스킵 실패 → 팝업 폴백 (match={_mc})")
                         else:
                             # ━━ 수동 모드: _mc 기반으로 팝업 표시 ━━
                             if not oped_prompted[zone]:
-                                oped_prompt         = {"zone": zone, "skip_sec": OSS}
+                                oped_prompt         = {"zone": zone, "skip_sec": _skip_sec}
                                 oped_prompted[zone] = True
                                 _last_oped_zone[0]  = zone
                                 if _mc >= 2:
-                                    add_log(f"🎵 {zone} 팝업 전송 (확정, match={_mc})")
+                                    add_log(f"🎵 {zone} 팝업 전송 (확정, match={_mc}, sec={_skip_sec})")
                                 else:
-                                    add_log(f"🎵 {zone} 팝업 전송 (1화 확률 기반, match={_mc})")
+                                    add_log(f"🎵 {zone} 팝업 전송 (1화 확률 기반, match={_mc}, sec={_skip_sec})")
                 elif oped_confirm[zone] > 0:
                     oped_confirm[zone] -= 1
                     # 음악 감지가 끊기면 연속 시작 시각도 초기화

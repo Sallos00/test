@@ -133,8 +133,12 @@ def get_series(db: dict, path_key: str) -> dict:
 
 def prune_series(series: dict, zone: str) -> None:
     """
-    항목 수가 _MAX_ITEMS_PER_ZONE 초과 시
-    match_count 오름차순으로 하위 항목 제거 (인기 항목 보존).
+    후보(candidate)와 확정후보(confirmed)를 각각 개별 상한으로 정리.
+
+    - 확정후보(confirmed=True 또는 confirmed 키 없는 기존 항목): 최대 3개
+      match_count 높은 순 보존.
+    - 후보(confirmed=False): 최대 5개
+      최근 추가된 순 보존 (리스트 뒤쪽 = 최신).
 
     Args:
         series : get_series() 반환 dict (in-place 수정)
@@ -143,7 +147,20 @@ def prune_series(series: dict, zone: str) -> None:
     items = series.get(zone)
     if not isinstance(items, list):
         return
-    if len(items) <= _MAX_ITEMS_PER_ZONE:
-        return
-    items.sort(key=lambda x: x.get("match_count", 1), reverse=True)
-    series[zone] = items[:_MAX_ITEMS_PER_ZONE]
+
+    _MAX_CONFIRMED  = 3
+    _MAX_CANDIDATES = 10
+
+    confirmed  = [i for i in items if     i.get("confirmed", True)]
+    candidates = [i for i in items if not i.get("confirmed", True)]
+
+    # 확정후보: match_count 높은 순 상위 3개 유지
+    if len(confirmed) > _MAX_CONFIRMED:
+        confirmed.sort(key=lambda x: x.get("match_count", 1), reverse=True)
+        confirmed = confirmed[:_MAX_CONFIRMED]
+
+    # 후보: 최신 5개 유지 (오래된 것부터 제거)
+    if len(candidates) > _MAX_CANDIDATES:
+        candidates = candidates[-_MAX_CANDIDATES:]
+
+    series[zone] = confirmed + candidates

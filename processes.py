@@ -807,6 +807,17 @@ def proc_analyzer(lip_queue, audio_queue,
                                         hwnd,
                                     )
 
+                                    # ── [진단] 해시 생성 결과 로그 ──────────────────
+                                    if _vhash:
+                                        _is_file = os.path.isfile(prev_title)
+                                        add_log(
+                                            f"🔬 [{zone}] 해시 생성 완료: "
+                                            f"{'파일' if _is_file else '창캡처'} 기반, "
+                                            f"프레임={len(_vhash)}개"
+                                        )
+                                    else:
+                                        add_log(f"🔬 [{zone}] 해시 생성 실패 (프레임 없음)")
+
                                     if _vhash:
                                         _db     = _load_db()
                                         _series = _get_series(_db, _path_key)
@@ -828,6 +839,10 @@ def proc_analyzer(lip_queue, audio_queue,
                                                 _vhash,
                                                 _item.get("video_hash", [])
                                             )
+                                            add_log(
+                                                f"🔬 [{zone}] 확정후보 비교: "
+                                                f"sim={_sim:.3f} (기준={_HASH_SIM_THRESHOLD})"
+                                            )
                                             if _sim > _best_sim:
                                                 _best_sim, _best_item = _sim, _item
 
@@ -848,6 +863,10 @@ def proc_analyzer(lip_queue, audio_queue,
                                                 _sim = _cmp_hash(
                                                     _vhash,
                                                     _item.get("video_hash", [])
+                                                )
+                                                add_log(
+                                                    f"🔬 [{zone}] 후보 비교: "
+                                                    f"sim={_sim:.3f} (기준={_HASH_SIM_THRESHOLD})"
                                                 )
                                                 if _sim > _best_csim:
                                                     _best_csim, _best_cand = _sim, _item

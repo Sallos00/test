@@ -495,6 +495,11 @@ def proc_analyzer(lip_queue, audio_queue,
                 add_log("⚠ 스킵 실패: 전체 길이 미확인")
                 return False
             new_pos = min(pos + OSS * 1000, dur - 2000)
+            # ── [충돌 방지] 스킵 목적지가 엔딩 감지 구간(뒤 90초)에 걸리면
+            # 엔딩 구간 시작 직전으로 목적지를 제한해 이중 감지 충돌 방지
+            if dur > OPED_ZONE_MS * 2 and new_pos > dur - OPED_ZONE_MS:
+                new_pos = dur - OPED_ZONE_MS - 1000   # 1초 여유
+                add_log("⚠ 스킵 목적지가 엔딩 구간 → 엔딩 직전으로 제한")
             _user32.SendMessageW(hwnd, WM_USER, POT_SET_CURRENT_TIME, int(new_pos))
             fmt = lambda ms: f"{ms//1000//60}:{ms//1000%60:02d}"
             add_log(f"⏭ 스킵 ({OSS}초): {fmt(pos)} → {fmt(new_pos)}")
@@ -725,7 +730,16 @@ def proc_analyzer(lip_queue, audio_queue,
             zone    = "오프닝" if in_op else "엔딩"
             cooled  = (time.time() - oped_last_t[zone]) > OPED_COOLDOWN_SEC if in_zone else False
 
-            if in_zone and cooled:
+            # ── [중복 실행 방지] 이미 팝업 전송·스킵 처리 중인 구간은 감지 재진입 차단 ──
+            # oped_prompted[zone]=True이고 pending_prompt 또는 _last_oped_zone이
+            # 같은 zone을 가리키는 경우, 사용자 응답 처리가 완료되기 전에 동일한
+            # 이벤트가 중복으로 발생하지 않도록 감지 루프 자체를 건너뛴다.
+            _already_pending = (
+                oped_prompted[zone]
+                and (pending_prompt[0] is not None or _last_oped_zone[0] == zone)
+            )
+
+            if in_zone and cooled and not _already_pending:
                 music = is_music_playing()
 
                 # RMS 진단 로그 (30초 스로틀)
@@ -913,6 +927,27 @@ def proc_analyzer(lip_queue, audio_queue,
             # 쿨다운 종료 → 다음 사이클부터 정상 수집 재개
             in_cooldown = False
             add_log("🔄 쿨다운 종료 → 버퍼 수집 재개")
+
+        # ── [싱크 제한 구간] 앞뒤 90초에서는 싱크 보정 실행 금지 ─────────────
+        # OP/ED 감지 구간(OPED_ZONE_MS = 90초)과 동일한 범위를 적용한다.
+        #   - 0 ~ 90초 :               오프닝 감지 구간 → 싱크 보정 금지
+        #   - (영상 길이 - 90초) ~ 끝 : 엔딩 감지 구간  → 싱크 보정 금지
+        # 이 구간에서 싱크 보정이 실행되면 OP/ED 감지·스킵 로직과 충돌하므로
+        # 보정 사이클 전체를 건너뛴다. offset_buf를 클리어해 제한 구간 내
+        # 잔류 측정값이 구간 종료 후 첫 보정에 영향을 주지 않도록 한다.
+        # oped_prompt는 이미 이번 사이클에서 생성되었을 수 있으므로 push_state에
+        # 그대로 전달해 GUI 팝업/스킵 동작이 정상적으로 진행되도록 보장한다.
+        _sync_restricted = (
+            pos >= 0 and dur > 0
+            and (pos < OPED_ZONE_MS or pos > dur - OPED_ZONE_MS)
+        )
+        if _sync_restricted:
+            if offset_buf:
+                offset_buf.clear()
+            push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,
+                       lip_n, aud_n, notify, oped_prompt)
+            time.sleep(max(0, INTERVAL - (time.perf_counter() - t0)))
+            continue
 
         if aud_n < 10 or (lip_n < 10 and not has_prompt):
             push_state(STATUS_COLLECTING, 0, total_correction_ms, log_lines, pot_ok,

@@ -26,8 +26,8 @@ from mem_utils import full_cleanup, full_cleanup_and_release, trim_working_set
 # 해결: 실제로 사용하는 proc_analyzer 함수 내부에서 lazy import → import 실패 시
 #   해당 호출만 건너뛰고 스레드는 계속 실행된다.
 _HASH_SIM_THRESHOLD  = 0.85  # 영상 해시 유사도 임계값 (이 이상이면 동일 OP/ED 판정)
-_MAX_CANDIDATES      = 10   # 후보(미확정) 최대 보관 수
-_MAX_CONFIRMED       = 3    # 확정후보 최대 보관 수
+_MAX_CANDIDATES      = 17   # 후보(미확정) 최대 보관 수
+_MAX_CONFIRMED       = 5    # 확정후보 최대 보관 수
 
 
 def _import_hash_modules():
@@ -232,8 +232,8 @@ def proc_analyzer(lip_queue, audio_queue,
     MUSIC_MIN_RMS     = 0.002    # 이 이하는 무음으로 판정
     MUSIC_MAX_CV      = 0.65     # 변동계수 상한 (0.8→0.65 강화: 나레이션+BGM 오탐 방지)
     MUSIC_MIN_FILL    = 0.75     # RMS > 평균×0.5 비율 하한 (0.70→0.75 강화)
-    MUSIC_CONFIRM     = 5        # 연속 감지 횟수 기준 (2→5: 약 15초 필요)
-    MUSIC_MIN_CONT_SEC = 15.0    # OP/ED 확정을 위한 최소 연속 음악 감지 시간(초)
+    MUSIC_CONFIRM     = 3        # 연속 감지 횟수 기준 (3회 × INTERVAL(3s) = 9초 필요)
+    MUSIC_MIN_CONT_SEC = 9.0    # OP/ED 확정을 위한 최소 연속 음악 감지 시간(초)
     # 줄거리 요약·예고편은 BGM+나레이션 조합이지만 지속 시간이 짧거나 RMS 변동이 크다.
     # CONFIRM 횟수(×INTERVAL)와 최소 지속 시간을 함께 검사해 오탐률을 낮춘다.
 
@@ -268,8 +268,8 @@ def proc_analyzer(lip_queue, audio_queue,
     # oped_hash_mc   : DB 조회 결과 match_count (0=미조회, 1=1화, 2+=확정)
     oped_hash_done  = {"오프닝": False, "엔딩": False}
     oped_hash_mc    = {"오프닝": 0,     "엔딩": 0}
-    oped_hash_retry = {"오프닝": 0,     "엔딩": 0}  # 음악 감지 재시도 횟수 (최대 5)
-    # retry 5회 소진 시 스킵 거리를 (1/6)*OSS로 줄이기 위한 플래그
+    oped_hash_retry = {"오프닝": 0,     "엔딩": 0}  # 음악 감지 재시도 횟수 (최대 8)
+    # retry 8회 소진 시 스킵 거리를 (1/5)*OSS로 줄이기 위한 플래그
     _oped_short_skip = {"오프닝": False, "엔딩": False}
     last_cd_log   = 0.0   # 쿨다운 로그 스로틀
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
@@ -772,7 +772,7 @@ def proc_analyzer(lip_queue, audio_queue,
                     # 연속 감지 시작 시각 기록 (처음 감지되는 시점)
                     if oped_confirm[zone] == 0:
                         # [Bug1 fix] INTERVAL 1회분을 선행 차감해
-                        # 5번째 감지 시점에 cont_sec == MUSIC_MIN_CONT_SEC가 되도록 맞춤
+                        # 3번째 감지 시점에 cont_sec == MUSIC_MIN_CONT_SEC가 되도록 맞춤
                         oped_music_start_t[zone] = now_music - INTERVAL
                     oped_confirm[zone] += 1
                     cont_sec = now_music - oped_music_start_t[zone]
@@ -901,7 +901,7 @@ def proc_analyzer(lip_queue, audio_queue,
                                                 _save_db(_db)
                                                 add_log(f"🆕 [{zone}] 신규 후보 등록")
 
-                                                if oped_hash_retry[zone] < 5:
+                                                if oped_hash_retry[zone] < 8:
                                                     oped_hash_retry[zone] += 1
                                                     oped_hash_done[zone]     = False
                                                     oped_hash_mc[zone]       = 0
@@ -909,18 +909,18 @@ def proc_analyzer(lip_queue, audio_queue,
                                                     oped_music_start_t[zone] = 0.0
                                                     add_log(
                                                         f"🔄 [{zone}] 신규 후보 등록 → 음악 감지 재시도 "
-                                                        f"({oped_hash_retry[zone]}/5)"
+                                                        f"({oped_hash_retry[zone]}/8)"
                                                     )
                                                 else:
                                                     # 재시도 5회 소진 → 일반 후보 상태 유지
                                                     # (이미 위에서 confirmed=False로 등록·저장 완료)
                                                     # oped_hash_mc=1로 스킵/팝업 진행
-                                                    # 스킵 거리는 (1/6)*OSS 적용
+                                                    # 스킵 거리는 (1/5)*OSS 적용
                                                     oped_hash_mc[zone] = 1
                                                     _oped_short_skip[zone] = True
                                                     add_log(
-                                                        f"🔄 [{zone}] 재시도 5회 소진 "
-                                                        f"→ 일반 후보 유지, 스킵({int(OSS/6)}초)/팝업 진행"
+                                                        f"🔄 [{zone}] 재시도 8회 소진 "
+                                                        f"→ 일반 후보 유지, 스킵({int(OSS/5)}초)/팝업 진행"
                                                     )
 
                                         del _db, _series
@@ -934,8 +934,8 @@ def proc_analyzer(lip_queue, audio_queue,
 
                         # ── 스킵 실행 조건 결정 ─────────────────────────────────────
                         _mc = oped_hash_mc[zone]
-                        # retry 5회 소진이면 (1/6)*OSS, 그 외엔 OSS
-                        _skip_sec = int(OSS / 6) if _oped_short_skip[zone] else OSS
+                        # retry 8회 소진이면 (1/5)*OSS, 그 외엔 OSS
+                        _skip_sec = int(OSS / 5) if _oped_short_skip[zone] else OSS
                         if _mc == 0:
                             # 재시도 복귀 중 — 스킵/팝업 없이 음악 감지로 돌아감
                             pass

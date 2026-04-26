@@ -148,8 +148,8 @@ def prune_series(series: dict, zone: str) -> None:
     if not isinstance(items, list):
         return
 
-    _MAX_CONFIRMED  = 3
-    _MAX_CANDIDATES = 10
+    _MAX_CONFIRMED  = 5
+    _MAX_CANDIDATES = 17
 
     confirmed  = [i for i in items if     i.get("confirmed", True)]
     candidates = [i for i in items if not i.get("confirmed", True)]

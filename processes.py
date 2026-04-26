@@ -26,8 +26,8 @@ from mem_utils import full_cleanup, full_cleanup_and_release, trim_working_set
 # 해결: 실제로 사용하는 proc_analyzer 함수 내부에서 lazy import → import 실패 시
 #   해당 호출만 건너뛰고 스레드는 계속 실행된다.
 _HASH_SIM_THRESHOLD  = 0.85  # 영상 해시 유사도 임계값 (이 이상이면 동일 OP/ED 판정)
-_MAX_CANDIDATES      = 17   # 후보(미확정) 최대 보관 수
-_MAX_CONFIRMED       = 5    # 확정후보 최대 보관 수
+_MAX_CANDIDATES      = 20   # 후보(미확정) 최대 보관 수
+_MAX_CONFIRMED       = 10    # 확정후보 최대 보관 수
 
 
 def _import_hash_modules():

@@ -26,8 +26,8 @@ from mem_utils import full_cleanup, full_cleanup_and_release, trim_working_set
 # 해결: 실제로 사용하는 proc_analyzer 함수 내부에서 lazy import → import 실패 시
 #   해당 호출만 건너뛰고 스레드는 계속 실행된다.
 _HASH_SIM_THRESHOLD  = 0.85  # 영상 해시 유사도 임계값 (이 이상이면 동일 OP/ED 판정)
-_MAX_CANDIDATES      = 20   # 후보(미확정) 최대 보관 수
-_MAX_CONFIRMED       = 10    # 확정후보 최대 보관 수
+_MAX_CANDIDATES      = 17   # 후보(미확정) 최대 보관 수
+_MAX_CONFIRMED       = 5    # 확정후보 최대 보관 수
 
 
 def _import_hash_modules():
@@ -271,6 +271,12 @@ def proc_analyzer(lip_queue, audio_queue,
     oped_hash_retry = {"오프닝": 0,     "엔딩": 0}  # 음악 감지 재시도 횟수 (최대 8)
     # retry 8회 소진 시 스킵 거리를 (1/5)*OSS로 줄이기 위한 플래그
     _oped_short_skip = {"오프닝": False, "엔딩": False}
+    # ── [T4 해시 프리페치] ───────────────────────────────────────────────────
+    # oped_confirm==1 시점에 T4를 띄워 캡처를 미리 시작.
+    # T4는 _hash_prefetch에만 쓰고 T3 상태변수는 절대 건드리지 않는다.
+    # oped_confirm==3 확정 시 _hash_prefetch 결과를 수거해 즉시 비교/저장.
+    _hash_prefetch  = {"오프닝": None, "엔딩": None}  # (vhash, path_key) 완료 결과
+    _hash_t4        = {"오프닝": None, "엔딩": None}  # T4 Thread 객체
     last_cd_log   = 0.0   # 쿨다운 로그 스로틀
     last_rms_log  = 0.0   # RMS 진단 로그 스로틀
     pending_prompt = [None]
@@ -541,6 +547,10 @@ def proc_analyzer(lip_queue, audio_queue,
         oped_hash_retry["엔딩"]   = 0
         _oped_short_skip["오프닝"] = False
         _oped_short_skip["엔딩"]   = False
+        # ── [T4 해시 프리페치] 초기화 시 결과 폐기 ──────────────────────────
+        for _z in ("오프닝", "엔딩"):
+            _hash_prefetch[_z] = None
+            _hash_t4[_z]       = None
 
     def _flush_and_gc(label: str):
         """보정·정상 판정 후 샘플 버퍼·큐 드레인 + GC + Working Set 트림.
@@ -778,43 +788,79 @@ def proc_analyzer(lip_queue, audio_queue,
                     cont_sec = now_music - oped_music_start_t[zone]
                     add_log(f"🎵 {zone} 음악 감지 ({oped_confirm[zone]}/{MUSIC_CONFIRM}회, "
                             f"지속={cont_sec:.0f}s/{MUSIC_MIN_CONT_SEC:.0f}s)")
+
+                    # ── [T4 프리페치] 1회차 감지 시점에 캡처 미리 시작 ──────────────
+                    # 3회 확정(+6초)까지 남은 시간 동안 T4가 캡처(3.75초)를 끝내두어
+                    # 확정 시점에 추가 대기 없이 즉시 비교/저장 가능.
+                    # T4는 _hash_prefetch에만 쓰고 T3 상태변수를 절대 건드리지 않는다.
+                    if oped_confirm[zone] == 1 and _hash_t4[zone] is None:
+                        try:
+                            (_gen_hash_pre, _cmp_hash_pre,
+                             _load_db_pre, _save_db_pre, _get_series_pre, _prune_pre,
+                             _mk_key_pre) = _import_hash_modules()
+                            if _gen_hash_pre is not None:
+                                _pre_end   = pos
+                                _pre_start = max(0, int(pos - cont_sec * 1000))
+                                _pre_key   = _mk_key_pre(prev_title)
+                                _hash_prefetch[zone] = None
+
+                                def _t4_worker(z=zone, pt=prev_title,
+                                               s=_pre_start, e=_pre_end,
+                                               hw=hwnd, gh=_gen_hash_pre,
+                                               pk=_pre_key):
+                                    # T4: _hash_prefetch에만 쓴다
+                                    try:
+                                        _hash_prefetch[z] = (gh(pt, s, e, hw), pk)
+                                    except Exception:
+                                        _hash_prefetch[z] = (None, pk)
+
+                                import threading as _threading
+                                _t4 = _threading.Thread(
+                                    target=_t4_worker, daemon=True, name=f"T4_{zone}"
+                                )
+                                _hash_t4[zone] = _t4
+                                _t4.start()
+                                add_log(f"🧩 [{zone}] T4 프리페치 시작 "
+                                        f"({_pre_start//1000}s~{_pre_end//1000}s)")
+                        except Exception as _pe:
+                            add_log(f"⚠ [{zone}] T4 프리페치 시작 실패: {_pe}")
+
                     # CONFIRM 횟수 + 최소 연속 지속 시간 모두 충족해야 OP/ED 후보 확정.
-                    # 줄거리 요약·예고편은 통상 15초 미만이므로 오탐 방지.
                     if (oped_confirm[zone] >= MUSIC_CONFIRM
                             and cont_sec >= MUSIC_MIN_CONT_SEC):
-                        # ── [영상 해시 학습] 1단계: 오디오 후보 탐지 완료 ──────────────
-                        # 2단계(시간 기반 안정성)는 MUSIC_CONFIRM×INTERVAL(≥15초)로 이미 통과.
-                        # 3단계: 영상 해시 생성 → DB 매칭 → match_count 기반 확정.
                         if not oped_hash_done[zone]:
                             oped_hash_done[zone] = True
                             try:
-                                # ── lazy import: 실패해도 T3 스레드는 계속 실행 ──
                                 (_gen_hash, _cmp_hash,
                                  _load_db, _save_db, _get_series, _prune,
                                  _mk_key) = _import_hash_modules()
 
                                 if _gen_hash is None:
-                                    # 모듈 import 실패 → 1화 취급, 팝업만 표시
                                     oped_hash_mc[zone] = 1
                                     add_log(f"⚠ [{zone}] 해시 모듈 import 실패 → 1화 취급")
                                 else:
-                                    # 현재 재생 구간 정보
-                                    _seg_end_ms   = pos
-                                    _seg_start_ms = max(0, int(pos - cont_sec * 1000))
-                                    _path_key     = _mk_key(prev_title)
+                                    # ── T4 결과 수거 ──────────────────────────────
+                                    _t4 = _hash_t4[zone]
+                                    if _t4 is not None and _t4.is_alive():
+                                        add_log(f"⏳ [{zone}] T4 캡처 대기 중...")
+                                        _t4.join(timeout=2.0)
+                                    _hash_t4[zone] = None
 
-                                    add_log(f"🧩 [{zone}] 영상 해시 생성 중 "
-                                            f"({_seg_start_ms//1000}s~{_seg_end_ms//1000}s, "
-                                            f"key='{_path_key}')")
+                                    _pre = _hash_prefetch[zone]
+                                    _hash_prefetch[zone] = None
 
-                                    _vhash = _gen_hash(
-                                        prev_title,   # 창 제목 → 실제 파일 경로 탐색 후 폴백: 창 캡처
-                                        _seg_start_ms,
-                                        _seg_end_ms,
-                                        hwnd,
-                                    )
+                                    if _pre is not None:
+                                        _vhash, _path_key = _pre
+                                    else:
+                                        # T4 미실행·실패 → 동기 폴백
+                                        add_log(f"⚠ [{zone}] T4 결과 없음 → 동기 생성")
+                                        _path_key = _mk_key(prev_title)
+                                        _vhash = _gen_hash(
+                                            prev_title,
+                                            max(0, int(pos - cont_sec * 1000)),
+                                            pos, hwnd
+                                        )
 
-                                    # ── [진단] 해시 생성 결과 로그 ──────────────────
                                     if _vhash:
                                         _is_file = os.path.isfile(prev_title)
                                         add_log(
@@ -829,7 +875,6 @@ def proc_analyzer(lip_queue, audio_queue,
                                         _db     = _load_db()
                                         _series = _get_series(_db, _path_key)
 
-                                        # ── 확정후보 / 후보 분리 (하위 호환: confirmed 키 없으면 확정후보 취급) ──
                                         _confirmed_items = [
                                             i for i in _series[zone]
                                             if i.get("confirmed", True)
@@ -839,7 +884,7 @@ def proc_analyzer(lip_queue, audio_queue,
                                             if not i.get("confirmed", True)
                                         ]
 
-                                        # ── Step 1: 확정후보 전체와 비교 (best sim) ──
+                                        # Step 1: 확정후보 전체와 비교 (best sim)
                                         _best_item, _best_sim = None, 0.0
                                         for _item in _confirmed_items:
                                             _sim = _cmp_hash(
@@ -854,7 +899,6 @@ def proc_analyzer(lip_queue, audio_queue,
                                                 _best_sim, _best_item = _sim, _item
 
                                         if _best_sim >= _HASH_SIM_THRESHOLD:
-                                            # 확정후보 매칭 → match_count 즉시 갱신
                                             _best_item["match_count"] = _best_item.get("match_count", 1) + 1
                                             oped_hash_mc[zone] = _best_item["match_count"]
                                             _save_db(_db)
@@ -864,7 +908,7 @@ def proc_analyzer(lip_queue, audio_queue,
                                                 f"match_count={oped_hash_mc[zone]}"
                                             )
                                         else:
-                                            # ── Step 2: 후보 전체와 비교 (best sim) ──
+                                            # Step 2: 후보 전체와 비교 (best sim)
                                             _best_cand, _best_csim = None, 0.0
                                             for _item in _candidate_items:
                                                 _sim = _cmp_hash(
@@ -879,8 +923,6 @@ def proc_analyzer(lip_queue, audio_queue,
                                                     _best_csim, _best_cand = _sim, _item
 
                                             if _best_csim >= _HASH_SIM_THRESHOLD:
-                                                # 후보 매칭 → 확정후보로 즉시 승격
-                                                # 스킵·팝업 여부와 무관하게 매칭 시점에 확정
                                                 _best_cand["confirmed"]   = True
                                                 _best_cand["match_count"] = 1
                                                 oped_hash_mc[zone] = 1
@@ -890,7 +932,7 @@ def proc_analyzer(lip_queue, audio_queue,
                                                     f"sim={_best_csim:.3f}"
                                                 )
                                             else:
-                                                # ── Step 3: 미매칭 → 신규 후보 등록 ──
+                                                # Step 3: 미매칭 → 신규 후보 등록
                                                 _series[zone].append({
                                                     "video_hash":  _vhash,
                                                     "match_count": 0,
@@ -907,15 +949,14 @@ def proc_analyzer(lip_queue, audio_queue,
                                                     oped_hash_mc[zone]       = 0
                                                     oped_confirm[zone]       = 0
                                                     oped_music_start_t[zone] = 0.0
+                                                    # 재시도 시 T4 결과도 초기화
+                                                    _hash_prefetch[zone] = None
+                                                    _hash_t4[zone]       = None
                                                     add_log(
                                                         f"🔄 [{zone}] 신규 후보 등록 → 음악 감지 재시도 "
                                                         f"({oped_hash_retry[zone]}/8)"
                                                     )
                                                 else:
-                                                    # 재시도 5회 소진 → 일반 후보 상태 유지
-                                                    # (이미 위에서 confirmed=False로 등록·저장 완료)
-                                                    # oped_hash_mc=1로 스킵/팝업 진행
-                                                    # 스킵 거리는 (1/5)*OSS 적용
                                                     oped_hash_mc[zone] = 1
                                                     _oped_short_skip[zone] = True
                                                     add_log(

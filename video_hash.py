@@ -32,7 +32,7 @@ _DCT_SIZE   = 32   # DCT 입력 이미지 크기 (32×32)
 _HASH_SIZE  = 8    # DCT 저주파 계수 크기 (8×8 = 64비트)
 
 # 창 캡처 파라미터
-_WIN_CAPTURE_COUNT    = 5     # 창 캡처 프레임 수
+_WIN_CAPTURE_COUNT    = 15    # 창 캡처 프레임 수
 _WIN_CAPTURE_INTERVAL = 0.25  # 프레임 간 간격 (초)
 
 # 파일 기반 파라미터

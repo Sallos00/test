@@ -23,6 +23,14 @@ from gui.ui_logic import _extract_potplayer_title
 class PopupMixin:
 
     def _toggle(self):
+        # [수정] 링크 재생 모드 중에는 싱크 보정 시작 불가
+        if getattr(self, "_link_play_mode", False):
+            import collections, time as _t
+            if not hasattr(self, "_log_lines"):
+                self._log_lines = collections.deque(maxlen=100)
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] ⚠ 링크 재생 모드 중 — 싱크 보정 비활성화")
+            return
         if not self._running:
             self._stop_oped_monitor()   # 싱크 시작 전 모니터 중지
             try:

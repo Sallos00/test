@@ -48,44 +48,64 @@ jobs:
       - name: Cython 컴파일 폴더 준비
         shell: pwsh
         run: |
+          Write-Host "빌드 폴더 생성..."
           New-Item -ItemType Directory -Force -Path build_cython | Out-Null
-          Write-Host "✓ 컴파일 폴더 생성 완료"
+          Write-Host "✓ 폴더 생성 완료"
 
       - name: Python 파일을 .pyx로 변환
         shell: pwsh
         run: |
-          Write-Host "Python 파일을 Cython 형식으로 변환..."
+          Write-Host "Python 파일을 Cython 형식(.pyx)으로 변환..."
           $files = @(
             "app_icon.py","audio_com.py","audio_capture.py",
             "log_utils.py","mem_utils.py","processes.py",
             "win32_utils.py","auth.py","db_manager.py",
-            "video_hash.py","similarity.py","series_key.py","main.py"
+            "video_hash.py","similarity.py","series_key.py"
           )
+          
           foreach ($f in $files) {
-            Copy-Item $f "build_cython\$($f -replace '\.py$', '.pyx')"
-            Write-Host "  ✓ $f → $($f -replace '\.py$', '.pyx')"
+            $pyx_file = "build_cython/$($f -replace '\.py$', '.pyx')"
+            Copy-Item $f $pyx_file
+            Write-Host "  ✓ $f"
           }
-          Copy-Item gui build_cython\gui -Recurse
-          Write-Host "✓ gui 패키지 복사 완료"
+          
+          # GUI 패키지 복사
+          if (Test-Path "gui") {
+            Copy-Item gui build_cython\gui -Recurse -Force
+            Write-Host "  ✓ gui 패키지"
+          }
+          
+          # main.py는 PyInstaller 진입점이므로 변환하지 않음
+          Write-Host "  (main.py는 PyInstaller 진입점이므로 원본 사용)"
+          Write-Host "✓ 모든 파일 변환 완료"
 
-      - name: Cython 컴파일 (setup.py 사용)
+      - name: Cython 컴파일 실행
         shell: pwsh
         run: |
           Write-Host "Cython으로 Python 파일 컴파일 중..."
-          python setup_cython.py build_ext --inplace --build-temp build_cython
+          Write-Host "(이 과정은 3-5분 소요됩니다)"
+          
+          python setup_cython.py build_ext --inplace --build-temp build_cython\build
+          
           if ($LASTEXITCODE -ne 0) {
             Write-Host "ERROR: Cython 컴파일 실패"
+            Write-Host "build_cython 디렉토리 구조 확인:"
+            Get-ChildItem -Path build_cython -Recurse -Name | Select-Object -First 20
             exit $LASTEXITCODE
           }
           Write-Host "✓ Cython 컴파일 완료"
 
-      - name: 컴파일된 파일 정리
+      - name: 컴파일 결과 확인
         shell: pwsh
         run: |
-          Write-Host "컴파일 결과물 확인..."
-          Get-ChildItem -Path . -Filter "*.pyd" -Recurse | Format-Table FullName
-          Get-ChildItem -Path build_cython -Recurse | Where-Object {$_.Extension -in @('.pyd','.so')} | Format-Table FullName
-          Write-Host "✓ 정리 완료"
+          Write-Host "=== 컴파일 결과 확인 ==="
+          $pyd_count = (Get-ChildItem -Path . -Filter "*.pyd" -Recurse).Count
+          Write-Host "생성된 .pyd 파일: $pyd_count개"
+          
+          Write-Host ""
+          Write-Host "=== 빌드 구조 ==="
+          Get-ChildItem -Path build_cython -Recurse -Name | Select-Object -First 30
+          Write-Host "✓ 확인 완료"
 
       # ── PyInstaller로 EXE 빌드 ───────────────────────────────────────────
       - name: PyInstaller EXE 빌드

@@ -51,6 +51,10 @@ jobs:
       - name: 난독화 (루트)
         shell: pwsh
         run: |
+          # 런타임을 먼저 명시적으로 생성 (obfuscate 부산물에 의존하지 않음)
+          pyarmor runtime --output dist_obf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
           # PyArmor 7 trial 은 파일 여러 개를 한번에 넘기면 무시함 → 1파일씩 호출
           $files = @(
             "app_icon.py","audio_com.py","audio_capture.py",
@@ -58,11 +62,8 @@ jobs:
             "win32_utils.py","auth.py","db_manager.py",
             "video_hash.py","similarity.py","series_key.py"
           )
-          # 첫 번째 파일: pytransform 런타임 생성
-          pyarmor obfuscate --output dist_obf $files[0]
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # 나머지 파일: 런타임 중복 생성 방지
-          foreach ($f in $files[1..($files.Length-1)]) {
+          # 모든 파일: --no-runtime (런타임은 위에서 이미 생성됨)
+          foreach ($f in $files) {
             pyarmor obfuscate --no-runtime --output dist_obf $f
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -70,25 +71,18 @@ jobs:
       - name: 난독화 (gui 패키지)
         run: pyarmor obfuscate --no-runtime --recursive --output dist_obf/gui gui/__init__.py
 
-      - name: pytransform 런타임 위치 정리
+      - name: pytransform 런타임 위치 확인
+        shell: pwsh
         run: |
-          # PyArmor 7 는 --output 과 무관하게 CWD 에 pytransform 을 만들기도 함
-          # → dist_obf/pytransform 에 없으면 루트에서 찾아 이동
           Write-Host "=== dist_obf 구조 ==="
           Get-ChildItem -Path dist_obf -Recurse -Name
 
-          if (Test-Path "dist_obf\pytransform") {
-            Write-Host "OK: dist_obf\pytransform 확인됨"
-          } elseif (Test-Path "pytransform") {
-            Write-Host "루트의 pytransform 을 dist_obf\ 로 이동"
-            Move-Item pytransform dist_obf\pytransform
-          } else {
-            Write-Host "ERROR: pytransform 을 찾을 수 없습니다"
+          if (-not (Test-Path "dist_obf\pytransform")) {
+            Write-Host "ERROR: dist_obf\pytransform 이 없습니다"
             Get-ChildItem -Path . -Recurse -Filter "_pytransform*" | Format-Table FullName
             exit 1
           }
-          Write-Host "=== 정리 후 dist_obf 구조 ==="
-          Get-ChildItem -Path dist_obf -Recurse -Name
+          Write-Host "OK: dist_obf\pytransform 확인됨"
 
       # main.py 는 PyInstaller 진입점 — 난독화 없이 복사
       - name: main.py 복사

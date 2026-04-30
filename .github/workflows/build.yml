@@ -45,48 +45,23 @@ jobs:
         run: python scripts/inject_url.py
 
       # ── 코드 난독화 ───────────────────────────────────────────────────────
+      - name: 난독화 출력 폴더 생성
+        run: New-Item -ItemType Directory -Force -Path dist_obf, dist_obf\gui | Out-Null
+
       - name: 난독화 (루트)
-        run: |
-          pyarmor obfuscate --output dist_obf ^
-            app_icon.py ^
-            audio_com.py ^
-            audio_capture.py ^
-            log_utils.py ^
-            mem_utils.py ^
-            processes.py ^
-            win32_utils.py ^
-            auth.py ^
-            db_manager.py ^
-            video_hash.py ^
-            similarity.py ^
-            series_key.py
-        shell: cmd
+        run: >
+          pyarmor obfuscate --output dist_obf
+          app_icon.py audio_com.py audio_capture.py
+          log_utils.py mem_utils.py processes.py
+          win32_utils.py auth.py db_manager.py
+          video_hash.py similarity.py series_key.py
 
       - name: 난독화 (gui 패키지)
-        run: |
-          pyarmor obfuscate --no-runtime --output dist_obf\gui ^
-            gui\__init__.py ^
-            gui\base.py ^
-            gui\ui_layout.py ^
-            gui\ui_logic.py ^
-            gui\ui_logic2.py ^
-            gui\ui_logic3.py ^
-            gui\run.py ^
-            gui\run_oped.py ^
-            gui\run_process.py ^
-            gui\run_popup.py ^
-            gui\run_notify.py ^
-            gui\run_refresh.py ^
-            gui\auth.py ^
-            gui\record_open.py ^
-            gui\record_backend.py ^
-            gui\_record_impl.py
-        shell: cmd
+        run: pyarmor obfuscate --no-runtime --recursive --output dist_obf/gui gui/__init__.py
 
       # main.py 는 PyInstaller 진입점 — 난독화 없이 복사
       - name: main.py 복사
-        run: copy main.py dist_obf\main.py
-        shell: cmd
+        run: Copy-Item main.py dist_obf\main.py
 
       - name: PyInstaller EXE 빌드
         run: >
@@ -124,6 +99,7 @@ jobs:
           --hidden-import="gui.run_refresh"
           --hidden-import="gui.record_open"
           --hidden-import="gui.record_backend"
+          --hidden-import="gui._record_impl"
           --hidden-import="cv2"
           --hidden-import="sounddevice"
           --hidden-import="scipy.signal"
@@ -157,6 +133,7 @@ jobs:
           --hidden-import="platform"
           --hidden-import="pytransform"
           --collect-data cv2
+          --paths "dist_obf"
           --add-data "lbpcascade_animeface.xml;."
           --add-data "app.ico;."
           --add-data "ffmpeg.exe;."

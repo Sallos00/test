@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller "pyarmor==8.5.12"
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller "pyarmor==7.7.4"
 
       - name: ffmpeg 다운로드 (번들용)
         run: |
@@ -45,9 +45,10 @@ jobs:
         run: python scripts/inject_url.py
 
       # ── 코드 난독화 ───────────────────────────────────────────────────────
+      # PyArmor 7: 파일 수 제한 없음 / 런타임 폴더명: pytransform
       - name: 난독화 (루트)
         run: |
-          pyarmor gen --output dist_obf ^
+          pyarmor obfuscate --src . --output dist_obf ^
             app_icon.py ^
             audio_com.py ^
             audio_capture.py ^
@@ -64,22 +65,22 @@ jobs:
 
       - name: 난독화 (gui 패키지)
         run: |
-          pyarmor gen --output dist_obf\gui ^
-            gui\__init__.py ^
-            gui\base.py ^
-            gui\ui_layout.py ^
-            gui\ui_logic.py ^
-            gui\ui_logic2.py ^
-            gui\run.py ^
-            gui\run_oped.py ^
-            gui\run_process.py ^
-            gui\run_popup.py ^
-            gui\run_notify.py ^
-            gui\run_refresh.py ^
-            gui\auth.py ^
-            gui\record_open.py ^
-            gui\record_backend.py ^
-            gui\_record_impl.py
+          pyarmor obfuscate --src gui --output dist_obf\gui --package-runtime 0 ^
+            __init__.py ^
+            base.py ^
+            ui_layout.py ^
+            ui_logic.py ^
+            ui_logic2.py ^
+            run.py ^
+            run_oped.py ^
+            run_process.py ^
+            run_popup.py ^
+            run_notify.py ^
+            run_refresh.py ^
+            auth.py ^
+            record_open.py ^
+            record_backend.py ^
+            _record_impl.py
         shell: cmd
 
       # main.py 는 PyInstaller 진입점 — 난독화 없이 복사
@@ -153,12 +154,12 @@ jobs:
           --hidden-import="uuid"
           --hidden-import="hashlib"
           --hidden-import="platform"
-          --hidden-import="pyarmor_runtime_000000"
+          --hidden-import="pytransform"
           --collect-data cv2
           --add-data "lbpcascade_animeface.xml;."
           --add-data "app.ico;."
           --add-data "ffmpeg.exe;."
-          --add-data "dist_obf/pyarmor_runtime_000000;pyarmor_runtime_000000"
+          --add-data "dist_obf/pytransform;pytransform"
           --add-data "dist_obf/gui;gui"
           dist_obf/main.py
 

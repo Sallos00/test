@@ -70,6 +70,7 @@ jobs:
             gui\ui_layout.py ^
             gui\ui_logic.py ^
             gui\ui_logic2.py ^
+            gui\ui_logic3.py ^
             gui\run.py ^
             gui\run_oped.py ^
             gui\run_process.py ^

@@ -49,12 +49,13 @@ from gui.base        import LipSyncGUIBase
 from gui.ui_layout   import LipSyncGUILayout
 from gui.ui_logic    import LipSyncGUILogic
 from gui.ui_logic2   import LipSyncGUILogic2
+from gui.ui_logic3   import LipSyncGUILogic3
 from gui.record_open import LipSyncGUIRecordOpen
 from gui.run         import LipSyncGUIRun
 from gui.auth        import LipSyncGUIAuth
 
 
-class LipSyncGUI(LipSyncGUIBase, LipSyncGUILayout, LipSyncGUILogic, LipSyncGUILogic2, LipSyncGUIRecordOpen,
+class LipSyncGUI(LipSyncGUIBase, LipSyncGUILayout, LipSyncGUILogic, LipSyncGUILogic2, LipSyncGUILogic3, LipSyncGUIRecordOpen,
                  LipSyncGUIRun, LipSyncGUIAuth):
     pass
 

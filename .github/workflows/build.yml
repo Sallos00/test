@@ -49,20 +49,12 @@ jobs:
         run: New-Item -ItemType Directory -Force -Path dist_obf, dist_obf\gui | Out-Null
         shell: pwsh
 
-      - name: PyArmor 초기화
+      - name: PyArmor 버전 확인
         shell: pwsh
         run: |
           Write-Host "PyArmor 버전 확인..."
           pyarmor --version
-          
-          Write-Host "PyArmor 초기화..."
-          pyarmor init --force
-          
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "⚠ 경고: PyArmor 초기화 실패했지만 계속 진행합니다"
-          } else {
-            Write-Host "✓ PyArmor 초기화 완료"
-          }
+          Write-Host "✓ PyArmor 준비 완료"
 
       - name: 난독화 (루트 - 첫 번째 파일 + 런타임)
         shell: pwsh
@@ -138,6 +130,13 @@ jobs:
             exit 1
           }
           Write-Host "✓ pytransform 런타임 확인됨"
+
+      # main.py 는 PyInstaller 진입점 — 난독화 제외
+      - name: main.py 복사
+        shell: pwsh
+        run: |
+          Copy-Item main.py dist_obf\main.py
+          Write-Host "✓ main.py 복사 완료"
 
       - name: PyInstaller EXE 빌드
         run: >

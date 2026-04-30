@@ -61,8 +61,6 @@ setup(
         language_level="3",
         compiler_directives={
             "always_allow_keywords": True,
-            "boundscheck": False,
-            "wraparound": False,
         },
         build_dir=os.path.join(BUILD_DIR, "build"),
     ),

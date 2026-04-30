@@ -28,6 +28,14 @@ class OpedMonitorMixin:
     # ── OP/ED 백그라운드 모니터 (싱크 OFF 상태에서도 동작) ───────────────────
     def _start_oped_monitor(self):
         """싱크 미실행 상태 전용 OP/ED 감지 스레드(T2+T3) 시작."""
+        # [수정] 링크 재생 모드 중에는 OP/ED 감지 비활성화
+        if getattr(self, "_link_play_mode", False):
+            import collections, time as _t
+            if not hasattr(self, "_log_lines"):
+                self._log_lines = collections.deque(maxlen=100)
+            self._log_lines.append(
+                f"[{_t.strftime('%H:%M:%S')}] ⚠ 링크 재생 모드 중 — OP/ED 감지 비활성화")
+            return
         if getattr(self, "_oped_monitor_running", False):
             return
         try:

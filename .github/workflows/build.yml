@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller "pyarmor==7.7.4"
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller pyarmor
 
       - name: ffmpeg 다운로드 (번들용)
         run: |
@@ -47,46 +47,84 @@ jobs:
       # ── 코드 난독화 ───────────────────────────────────────────────────────
       - name: 난독화 출력 폴더 생성
         run: New-Item -ItemType Directory -Force -Path dist_obf, dist_obf\gui | Out-Null
+        shell: pwsh
 
-      - name: 난독화 (루트)
+      - name: PyArmor 버전 확인
+        run: pyarmor --version
+
+      - name: 난독화 (루트 - 첫 번째 파일)
         shell: pwsh
         run: |
-          # 런타임을 먼저 명시적으로 생성 (obfuscate 부산물에 의존하지 않음)
-          pyarmor runtime --output dist_obf
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pyarmor obfuscate --output dist_obf app_icon.py
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: app_icon.py 난독화 실패"
+            exit $LASTEXITCODE
+          }
+          Write-Host "✓ app_icon.py 난독화 완료"
 
-          # PyArmor 7 trial 은 파일 여러 개를 한번에 넘기면 무시함 → 1파일씩 호출
+      - name: 난독화 (루트 - 나머지 파일)
+        shell: pwsh
+        run: |
           $files = @(
-            "app_icon.py","audio_com.py","audio_capture.py",
+            "audio_com.py","audio_capture.py",
             "log_utils.py","mem_utils.py","processes.py",
             "win32_utils.py","auth.py","db_manager.py",
             "video_hash.py","similarity.py","series_key.py"
           )
-          # 모든 파일: --no-runtime (런타임은 위에서 이미 생성됨)
           foreach ($f in $files) {
+            Write-Host "난독화 중: $f"
             pyarmor obfuscate --no-runtime --output dist_obf $f
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "ERROR: $f 난독화 실패"
+              exit $LASTEXITCODE
+            }
+            Write-Host "✓ $f 완료"
           }
+          Write-Host "✓ 모든 루트 파일 난독화 완료"
 
       - name: 난독화 (gui 패키지)
-        run: pyarmor obfuscate --no-runtime --recursive --output dist_obf/gui gui/__init__.py
-
-      - name: pytransform 런타임 위치 확인
         shell: pwsh
         run: |
-          Write-Host "=== dist_obf 구조 ==="
-          Get-ChildItem -Path dist_obf -Recurse -Name
+          Write-Host "gui 패키지 난독화 시작..."
+          pyarmor obfuscate --no-runtime --recursive --output dist_obf/gui gui/__init__.py
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: gui 패키지 난독화 실패"
+            exit $LASTEXITCODE
+          }
+          Write-Host "✓ gui 패키지 난독화 완료"
 
-          if (-not (Test-Path "dist_obf\pytransform")) {
-            Write-Host "ERROR: dist_obf\pytransform 이 없습니다"
-            Get-ChildItem -Path . -Recurse -Filter "_pytransform*" | Format-Table FullName
+      - name: pytransform 런타임 정리
+        shell: pwsh
+        run: |
+          Write-Host "=== dist_obf 구조 확인 ==="
+          Get-ChildItem -Path dist_obf -Recurse -Name | Select-Object -First 20
+          
+          if (Test-Path "dist_obf\pytransform") {
+            Write-Host "✓ OK: dist_obf\pytransform 확인됨"
+          } elseif (Test-Path "pytransform") {
+            Write-Host "루트의 pytransform을 dist_obf로 이동"
+            Move-Item pytransform dist_obf\pytransform -Force
+            Write-Host "✓ 이동 완료"
+          } else {
+            Write-Host "⚠ 경고: pytransform 런타임을 찾을 수 없습니다"
+            Write-Host "전체 디렉토리 검색..."
+            Get-ChildItem -Path . -Recurse -Filter "*pytransform*" -ErrorAction SilentlyContinue | Format-Table FullName
             exit 1
           }
-          Write-Host "OK: dist_obf\pytransform 확인됨"
 
-      # main.py 는 PyInstaller 진입점 — 난독화 없이 복사
+      # main.py 는 PyInstaller 진입점 — 난독화 제외
       - name: main.py 복사
-        run: Copy-Item main.py dist_obf\main.py
+        shell: pwsh
+        run: |
+          Copy-Item main.py dist_obf\main.py
+          Write-Host "✓ main.py 복사 완료"
+
+      - name: dist_obf 최종 구조 확인
+        shell: pwsh
+        run: |
+          Write-Host "=== dist_obf 최종 구조 ==="
+          Get-ChildItem -Path dist_obf -Recurse | Measure-Object | Select-Object Count
+          Get-ChildItem -Path dist_obf | Format-Table Name
 
       - name: PyInstaller EXE 빌드
         run: >

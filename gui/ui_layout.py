@@ -1,19 +1,9 @@
 """gui/ui_layout.py -- GUI 창/윈도우·탭·위젯 레이아웃 구성 메서드
 
-[수정 내용]
-  1. 메인 타이틀 "PotPlayer Surpporter" 로 변경
-  2. 서브타이틀("PotPlayer 자동 싱크 보정 | 멀티코어") 제거
-     → 해당 위치에 설정 버튼(⚙ 설정) 배치
-  3. 버전 레이블(v2.0) 제거
-     → 헤더 우측에 PIP 버튼 이동 / 로그 버튼(📋) 추가
-  4. 탭 구조 변경: 싱크 보정 / 링크 재생(NEW) / 녹화·캡처 / 시청 기록
-  5. _build_link_tab 메서드 추가 (링크 재생 탭 UI)
-
 포함 메서드:
   _tray_show, _tray_quit     — 트레이 아이콘 콜백
   _build_window              — 루트 윈도우 초기화
-  _build_ui                  — 메인 UI 레이아웃 전체 구성
-  _build_link_tab            — 링크 재생 탭 위젯 구성 (NEW)
+  _build_ui                  — 메인 UI 레이아웃 전체 구성 (헤더·탭바·카드·버튼)
   _build_history_tab         — 시청 기록 탭 위젯 구성
 """
 import os
@@ -38,7 +28,7 @@ class LipSyncGUILayout:
     def _build_window(self):
         r = self.root
         r.withdraw()
-        r.title("PotPlayer Surpporter")   # [수정] 타이틀 변경
+        r.title("Auto Sync")
         r.geometry(f"{self.W}x{self.H}")
         r.resizable(False, False)
         r.configure(bg=self.BG)
@@ -56,7 +46,6 @@ class LipSyncGUILayout:
         P  = max(10, round(18 * r))
         P2 = max(8,  round(14 * r))
         self._theme_widgets = []
-
         def reg(w, bg=None, fg=None, abg=None, afg=None, obg=None):
             self._theme_widgets.append((w, bg, fg, abg, afg, obg))
             return w
@@ -64,72 +53,60 @@ class LipSyncGUILayout:
         # ── 헤더 ──────────────────────────────────────────────────────────────
         hdr = reg(tk.Frame(self.root, bg=self.BG, pady=0), bg="BG")
         hdr.pack(fill="x", padx=P, ipady=P2)
-
         ic = round(32 * r)
-        self._icon_canvas = tk.Canvas(hdr, width=ic, height=ic, bg=self.BG,
-                                      highlightthickness=0)
+        self._icon_canvas = tk.Canvas(hdr, width=ic, height=ic, bg=self.BG, highlightthickness=0)
         self._icon_canvas.pack(side="left", anchor="center")
-        self._icon_canvas.create_oval(1, 1, ic-1, ic-1,
-                                      fill=self.BG3, outline=self.ACCENT, width=2)
-        self._icon_canvas.create_polygon(
-            round(12*r), round(8*r), round(12*r), round(24*r),
-            round(26*r), round(16*r), fill=self.ACCENT, outline="")
-
-        # [수정] tf 프레임: 타이틀 + 설정 버튼 (구 서브타이틀 제거)
+        self._icon_canvas.create_oval(1, 1, ic-1, ic-1, fill=self.BG3, outline=self.ACCENT, width=2)
+        self._icon_canvas.create_polygon(round(12*r), round(8*r), round(12*r), round(24*r), round(26*r), round(16*r), fill=self.ACCENT, outline="")
         tf = reg(tk.Frame(hdr, bg=self.BG), bg="BG")
         tf.pack(side="left", padx=10, anchor="center")
-        reg(tk.Label(tf, text="PotPlayer Surpporter",
-                     font=("Segoe UI", self.F_TITLE, "bold"),
-                     bg=self.BG, fg=self.TEXT),
-            bg="BG", fg="TEXT").pack(anchor="w")
-
-        # 설정 버튼 (구 서브타이틀 위치) — 클릭 시 설정 팝업 직접 오픈
-        self._settings_btn = reg(
-            tk.Button(tf, text="⚙ 설정",
-                      font=("Consolas", max(7, self.F_MONO_S), "bold"),
-                      bg=self.BG2, fg=self.TEXT_MID,
-                      activebackground=self.BG3, activeforeground=self.TEXT,
-                      relief="flat", cursor="hand2",
-                      padx=round(4*r), pady=1,
-                      command=self._open_settings),
-            bg="BG2", fg="TEXT_MID", abg="BG3")
-        self._settings_btn.pack(anchor="w", pady=(2, 0))
-
-        # [수정] rf 프레임: v2.0 제거 → PIP 버튼 + 로그 버튼
+        reg(tk.Label(tf, text="Auto Sync", font=("Segoe UI", self.F_TITLE, "bold"), bg=self.BG, fg=self.TEXT), bg="BG", fg="TEXT").pack(anchor="w")
+        reg(tk.Label(tf, text="PotPlayer Surpporter", font=("Segoe UI", max(7, self.F_TITLE-5)), bg=self.BG, fg=self.TEXT_MID), bg="BG", fg="TEXT_MID").pack(anchor="w")
         rf = reg(tk.Frame(hdr, bg=self.BG), bg="BG")
         rf.pack(side="right", anchor="center")
-
-        # PIP 버튼 (구 기어 버튼 위치)
+        gfg = self.ACCENT if self._darkmode_var.get() else self.TEXT
+        self._gear_btn = reg(tk.Button(rf, text="⚙", font=("Segoe UI", self.F_GEAR), bg=self.BG, fg=gfg, activebackground=self.BG2, activeforeground=gfg, relief="flat", cursor="hand2", bd=0, padx=2, pady=2, command=self._toggle_gear_menu), bg="BG", fg="GEAR_FG", abg="BG2", afg="GEAR_FG")
+        self._gear_btn.pack(anchor="e", padx=(0, 25), pady=(4, 0))
+        # PIP 버튼 — 설정버튼 아래에 배치
         self._pip_on = bool(self._load_setting("pip_on", False))
-        pip_text     = "⧉ PIP ON" if self._pip_on else "⧉ PIP"
-        pip_fg       = self.ACCENT3 if self._pip_on else self.TEXT_MID
+        pip_text   = "⧉ PIP ON" if self._pip_on else "⧉ PIP OFF"
+        pip_fg     = self.ACCENT3 if self._pip_on else self.TEXT_MID
+        pip_bg     = "#0e0e0e"
         self._pip_btn = reg(
-            tk.Button(rf, text=pip_text,
-                      font=("Consolas", max(7, round(8*r)), "bold"),
-                      bg="#0e0e0e", fg=pip_fg,
-                      activebackground=self.BG3, activeforeground=self.TEXT,
-                      relief="solid", cursor="hand2",
-                      padx=round(7*r), pady=round(3*r),
-                      bd=1, highlightthickness=0,
-                      command=self._pip_toggle),
-            bg="BG2", fg="TEXT_MID", abg="BG3")
-        self._pip_btn.pack(anchor="e")
+    tk.Button(rf, text=pip_text,
+              font=("Consolas", max(7, round(8*r)), "bold"),
+              bg=pip_bg, fg=pip_fg,
+              activebackground=self.BG3, activeforeground=self.TEXT,
+              relief="solid", cursor="hand2",
+              padx=round(7*r), pady=round(3*r),
+              bd=1, highlightthickness=0,
+              command=self._pip_toggle),
+    bg="BG", fg="TEXT_MID", abg="BG3")
 
-        # 로그 버튼 (📋) — 기어 드롭다운 대신 로그만 직접 오픈
-        self._gear_btn = reg(
-            tk.Button(rf, text="📋",
-                      font=("Segoe UI", self.F_GEAR),
-                      bg=self.BG, fg=self.TEXT_MID,
-                      activebackground=self.BG2, activeforeground=self.TEXT,
-                      relief="flat", cursor="hand2",
-                      bd=0, padx=2, pady=2,
-                      command=self._open_log_popup),
-            bg="BG", fg="TEXT_MID", abg="BG2")
-        self._gear_btn.pack(anchor="e", pady=(4, 0))
+        def _switch_tab(name):
+            self._tab_var.set(name)
+            for n, frame in self._tab_frames.items():
+                if n == name:
+                    frame.pack(fill="both", expand=True)
+                else:
+                    frame.pack_forget()
+            _update_tab_styles()
+
+        def _update_tab_styles():
+            cur = self._tab_var.get()
+            for name, btn in [("sync", self._tab_btn_sync), ("record", self._tab_btn_record), ("history", self._tab_btn_history)]:
+                if btn is None: continue
+                if name == cur:
+                    btn.config(bg=self.BG, fg=self.ACCENT, font=("Consolas", TAB_F, "bold"))
+                else:
+                    btn.config(bg=self.BG2, fg=self.TEXT_MID, font=("Consolas", TAB_F))
+
+        self._pip_btn.pack(anchor="e", pady=(2, 0))
+
 
         reg(tk.Frame(self.root, bg=self.BORDER, height=1), bg="BORDER").pack(fill="x")
 
-        # ── 탭 바 (4탭) ────────────────────────────────────────────────────────
+               # ── 탭 바 (4탭) ────────────────────────────────────────────────────────
         TAB_F = max(8, round(9 * r))
         tab_bar = reg(tk.Frame(self.root, bg=self.BG2), bg="BG2")
         tab_bar.pack(fill="x")

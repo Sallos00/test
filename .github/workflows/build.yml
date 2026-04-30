@@ -45,10 +45,10 @@ jobs:
         run: python scripts/inject_url.py
 
       # ── 코드 난독화 ───────────────────────────────────────────────────────
-      # PyArmor 7: 파일 수 제한 없음 / 런타임 폴더명: pytransform
+      # PyArmor 7: 파일 수 제한 없음 / 런타임 폴더: dist_obf/pytransform
       - name: 난독화 (루트)
         run: |
-          pyarmor obfuscate --src . --output dist_obf ^
+          pyarmor obfuscate --output dist_obf ^
             app_icon.py ^
             audio_com.py ^
             audio_capture.py ^
@@ -65,7 +65,8 @@ jobs:
 
       - name: 난독화 (gui 패키지)
         run: |
-          pyarmor obfuscate --src gui --output dist_obf\gui --package-runtime 0 ^
+          pushd gui
+          pyarmor obfuscate --output ..\dist_obf\gui --package-runtime 0 ^
             __init__.py ^
             base.py ^
             ui_layout.py ^
@@ -81,6 +82,7 @@ jobs:
             record_open.py ^
             record_backend.py ^
             _record_impl.py
+          popd
         shell: cmd
 
       # main.py 는 PyInstaller 진입점 — 난독화 없이 복사

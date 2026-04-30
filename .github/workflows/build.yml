@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller "pyarmor==8.5.12"
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller "pyarmor==7.7.4"
 
       - name: ffmpeg 다운로드 (번들용)
         run: |
@@ -47,7 +47,7 @@ jobs:
       # ── 코드 난독화 ───────────────────────────────────────────────────────
       - name: 난독화 (루트)
         run: |
-          pyarmor gen --output dist_obf ^
+          pyarmor obfuscate --output dist_obf ^
             app_icon.py ^
             audio_com.py ^
             audio_capture.py ^
@@ -64,7 +64,7 @@ jobs:
 
       - name: 난독화 (gui 패키지)
         run: |
-          pyarmor gen --output dist_obf\gui ^
+          pyarmor obfuscate --no-runtime --output dist_obf\gui ^
             gui\__init__.py ^
             gui\base.py ^
             gui\ui_layout.py ^
@@ -114,6 +114,7 @@ jobs:
           --hidden-import="gui.ui_layout"
           --hidden-import="gui.ui_logic"
           --hidden-import="gui.ui_logic2"
+          --hidden-import="gui.ui_logic3"
           --hidden-import="gui.auth"
           --hidden-import="gui.run"
           --hidden-import="gui.run_oped"
@@ -154,12 +155,12 @@ jobs:
           --hidden-import="uuid"
           --hidden-import="hashlib"
           --hidden-import="platform"
-          --hidden-import="pyarmor_runtime_000000"
+          --hidden-import="pytransform"
           --collect-data cv2
           --add-data "lbpcascade_animeface.xml;."
           --add-data "app.ico;."
           --add-data "ffmpeg.exe;."
-          --add-data "dist_obf/pyarmor_runtime_000000;pyarmor_runtime_000000"
+          --add-data "dist_obf/pytransform;pytransform"
           --add-data "dist_obf/gui;gui"
           dist_obf/main.py
 

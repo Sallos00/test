@@ -1,36 +1,70 @@
 """
-gui/record_open.py -- 녹화/캡처 팝업 열기 믹스인
+gui/record_open.py -- 녹화/캡처 탭 믹스인
 
-변경사항:
-  [기능1] 녹화 중에는 구간 녹화 체크박스 및 시간 입력칸 비활성화
-  [기능2] 오버레이는 팟플레이어 위에만 (record_backend._show_overlay 개선)
-  [기능3] OBS 방식 — 화면+오디오 동시 시작 후 ffmpeg 합산
+[수정 내용]
+  1. "자동 녹화" 체크박스 추가 (구간 녹화 체크박스 왼쪽에 배치)
+  2. 자동 녹화 동작 로직 구현
+       - 체크 ON + 녹화 시작 → 자동 녹화 모드 진입
+       - PotPlayer 영상 재생 감지 → 영상 길이 읽기 → 즉시 녹화 시작
+       - 종료 시간 도달 → 녹화 자동 종료 → 파일 저장
+       - 저장 완료 후 영상 제목 변화 감지 → 변경 시 루프
+  3. 자동 녹화 중 중복 실행 방지 (Lock 사용)
+  4. 영상 길이 읽기 실패 시 예외 처리 및 재시도
+  5. 모든 동작에 로그 출력 포함
+
+기존 기능 완전 보존:
+  - 구간 녹화 (start/end 시간 지정)
+  - 녹화 중 UI 잠금 (기능1)
+  - 오버레이 표시 (기능2)
+  - OBS 방식 화면+오디오 동시 시작 (기능3)
+  - 캡처 기능
+  - 팝업으로 열기 / 메인창 탭 내장 모두 지원
 """
-import os, threading
-from mem_utils import run_gc
+import os
+import threading
+import time as _time
+import collections
 import tkinter as tk
+from mem_utils import run_gc
 
 
 class LipSyncGUIRecordOpen:
 
-    # ── 공통 위젯 빌더 ────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # 공통 위젯 빌더
+    # ══════════════════════════════════════════════════════════════════════════
+
     def _build_record_widgets(self, container, r, vcmd_widget=None):
         """저장위치·녹화·캡처 위젯을 container에 구성하고 (state, stop_record) 반환."""
-        save_dir = getattr(self, "_record_save_dir", None) or self._load_setting("record_save_dir", "")
 
-        F_MONO  = max(8,  round(9  * r))
-        F_BTN   = max(8,  round(9  * r))
-        PAD     = round(14 * r)
-        PAD2    = round(18 * r)
-        PAD_V   = round(8  * r)
+        save_dir = (getattr(self, "_record_save_dir", None)
+                    or self._load_setting("record_save_dir", ""))
 
+        F_MONO = max(8,  round(9  * r))
+        F_BTN  = max(8,  round(9  * r))
+        PAD    = round(14 * r)
+        PAD2   = round(18 * r)
+        PAD_V  = round(8  * r)
+
+        # ── 상태 딕셔너리 ─────────────────────────────────────────────────────
         state = {
             "save_dir":   save_dir,
             "recording":  False,
             "screen_rec": None,
             "audio_rec":  None,
             "overlay":    None,
+            "out_path":   None,
+            # [NEW] 자동 녹화 상태
+            "auto_rec_active": False,
+            "auto_rec_lock":   threading.Lock(),
         }
+
+        # ── 로그 헬퍼 ─────────────────────────────────────────────────────────
+        def _log(msg: str):
+            if not hasattr(self, "_log_lines"):
+                self._log_lines = collections.deque(maxlen=100)
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] {msg}")
 
         # ── 저장 위치 ──────────────────────────────────────────────────────────
         dir_card = tk.Frame(container, bg=self.BG2, padx=PAD2, pady=PAD_V)
@@ -48,10 +82,16 @@ class LipSyncGUIRecordOpen:
                  disabledforeground="#111111",
                  readonlybackground="white",
                  insertbackground=self.ACCENT,
-                 relief="flat", bd=4, state="readonly").pack(side="left", fill="x", expand=True)
+                 relief="flat", bd=4, state="readonly").pack(
+            side="left", fill="x", expand=True)
 
-        btn_kw = dict(font=("Consolas", F_BTN, "bold"), relief="flat", cursor="hand2",
-                      padx=round(8*r), pady=round(3*r), activebackground=self.BORDER)
+        btn_kw = dict(font=("Consolas", F_BTN, "bold"), relief="flat",
+                      cursor="hand2", padx=round(8*r), pady=round(3*r),
+                      activebackground=self.BORDER)
+
+        # rec_btn / cap_btn 을 pick_dir 안에서 참조하므로 전방 선언
+        _rec_btn_ref = [None]
+        _cap_btn_ref = [None]
 
         def pick_dir():
             from tkinter import filedialog
@@ -77,8 +117,10 @@ class LipSyncGUIRecordOpen:
                     pass
                 s = "normal" if os.path.isdir(path) else "disabled"
                 self._record_save_dir = path
-                rec_btn.config(state=s)
-                cap_btn.config(state=s)
+                if _rec_btn_ref[0]:
+                    _rec_btn_ref[0].config(state=s)
+                if _cap_btn_ref[0]:
+                    _cap_btn_ref[0].config(state=s)
 
         def open_dir():
             d = state["save_dir"]
@@ -90,7 +132,8 @@ class LipSyncGUIRecordOpen:
         tk.Button(dir_row, text="🗂 열기", bg=self.BG3, fg=self.TEXT_MID,
                   command=open_dir, **btn_kw).pack(side="left", padx=(4, 0))
 
-        tk.Frame(container, bg=self.BORDER, height=1).pack(fill="x", padx=PAD, pady=(PAD_V, 0))
+        tk.Frame(container, bg=self.BORDER, height=1).pack(
+            fill="x", padx=PAD, pady=(PAD_V, 0))
 
         # ── 내부 탭 (녹화 / 캡처) ──────────────────────────────────────────────
         tab_btn_f   = tk.Frame(container, bg=self.BG)
@@ -123,20 +166,39 @@ class LipSyncGUIRecordOpen:
         tab_pages["record"]  = record_page
         tab_pages["capture"] = capture_page
 
-        # ── [기능1] 구간 녹화 위젯 (녹화 중 비활성화) ─────────────────────────
+        # ── 구간 녹화 + [NEW] 자동 녹화 체크박스 행 ───────────────────────────
+        reg_widget = vcmd_widget or container
+        vcmd = (reg_widget.register(
+            lambda s: all(c.isdigit() or c == ":" for c in s) or s == ""),
+                "%P")
+
+        chk_row = tk.Frame(record_page, bg=self.BG2)
+        chk_row.pack(anchor="w", pady=(0, round(4*r)))
+
+        # [NEW] 자동 녹화 체크박스 (구간 녹화 왼쪽)
+        auto_rec_var = tk.BooleanVar(value=False)
+        auto_rec_chk = tk.Checkbutton(
+            chk_row, text="자동 녹화", variable=auto_rec_var,
+            font=("Consolas", F_MONO),
+            bg=self.BG2, fg=self.ACCENT3,
+            selectcolor=self.BG3,
+            activebackground=self.BG2, activeforeground=self.ACCENT3,
+            relief="flat", cursor="hand2")
+        auto_rec_chk.pack(side="left", padx=(0, round(12*r)))
+
+        # 구간 녹화 체크박스
         range_var      = tk.BooleanVar(value=False)
         start_time_var = tk.StringVar(value="00:00")
         end_time_var   = tk.StringVar(value="00:00")
 
-        reg_widget = vcmd_widget or container
-        vcmd = (reg_widget.register(lambda s: all(c.isdigit() or c == ":" for c in s) or s == ""), "%P")
-
-        range_chk = tk.Checkbutton(record_page, text="구간 녹화", variable=range_var,
-                       font=("Consolas", F_MONO),
-                       bg=self.BG2, fg=self.TEXT, selectcolor=self.BG3,
-                       activebackground=self.BG2, activeforeground=self.TEXT,
-                       relief="flat", cursor="hand2")
-        range_chk.pack(anchor="w", pady=(0, round(4*r)))
+        range_chk = tk.Checkbutton(
+            chk_row, text="구간 녹화", variable=range_var,
+            font=("Consolas", F_MONO),
+            bg=self.BG2, fg=self.TEXT,
+            selectcolor=self.BG3,
+            activebackground=self.BG2, activeforeground=self.TEXT,
+            relief="flat", cursor="hand2")
+        range_chk.pack(side="left")
 
         range_row = tk.Frame(record_page, bg=self.BG2)
         range_row.pack(anchor="w", pady=(0, round(8*r)))
@@ -161,7 +223,6 @@ class LipSyncGUIRecordOpen:
                  bg=self.BG2, fg=self.TEXT_DIM).pack(side="left", padx=(6, 0))
 
         def on_range_toggle():
-            """구간 녹화 체크박스 토글 — 녹화 중에는 체크박스 자체가 disabled라 호출 안 됨."""
             on = range_var.get()
             st = "normal" if on else "disabled"
             start_entry.config(state=st)
@@ -171,16 +232,19 @@ class LipSyncGUIRecordOpen:
 
         def _lock_range_ui():
             range_chk.config(state="disabled")
+            auto_rec_chk.config(state="disabled")
             start_entry.config(state="disabled")
             end_entry.config(state="disabled")
 
         def _unlock_range_ui():
             range_chk.config(state="normal")
+            auto_rec_chk.config(state="normal")
             if range_var.get():
                 start_entry.config(state="normal")
                 end_entry.config(state="normal")
 
-        tk.Frame(record_page, bg=self.BORDER, height=1).pack(fill="x", pady=(round(4*r), round(8*r)))
+        tk.Frame(record_page, bg=self.BORDER, height=1).pack(
+            fill="x", pady=(round(4*r), round(8*r)))
 
         btn_state = "normal" if (save_dir and os.path.isdir(save_dir)) else "disabled"
         rec_btn = tk.Button(record_page, text="⏺ 녹화 시작",
@@ -191,16 +255,20 @@ class LipSyncGUIRecordOpen:
                             padx=round(12*r), pady=round(6*r),
                             state=btn_state)
         rec_btn.pack(fill="x")
+        _rec_btn_ref[0] = rec_btn
+
         rec_status = tk.Label(record_page, text="",
                               font=("Consolas", max(7, F_MONO-1)),
                               bg=self.BG2, fg=self.TEXT_DIM)
         rec_status.pack(anchor="w", pady=(round(4*r), 0))
 
-        # ── 캡처 탭 ───────────────────────────────────────────────────────────
+        # ── 캡처 탭 ────────────────────────────────────────────────────────────
         tk.Label(capture_page, text="팟플레이어 화면을 PNG로 캡처합니다.",
                  font=("Consolas", max(7, F_MONO-1)),
-                 bg=self.BG2, fg=self.TEXT_DIM).pack(anchor="w", pady=(0, round(8*r)))
-        tk.Frame(capture_page, bg=self.BORDER, height=1).pack(fill="x", pady=(0, round(8*r)))
+                 bg=self.BG2, fg=self.TEXT_DIM).pack(anchor="w",
+                                                      pady=(0, round(8*r)))
+        tk.Frame(capture_page, bg=self.BORDER, height=1).pack(
+            fill="x", pady=(0, round(8*r)))
         cap_btn = tk.Button(capture_page, text="📷 화면 캡처",
                             font=("Consolas", F_BTN, "bold"),
                             bg=self.BG3, fg=self.ACCENT,
@@ -209,6 +277,8 @@ class LipSyncGUIRecordOpen:
                             padx=round(12*r), pady=round(6*r),
                             state=btn_state)
         cap_btn.pack(fill="x")
+        _cap_btn_ref[0] = cap_btn
+
         cap_status = tk.Label(capture_page, text="",
                               font=("Consolas", max(7, F_MONO-1)),
                               bg=self.BG2, fg=self.TEXT_DIM)
@@ -237,30 +307,33 @@ class LipSyncGUIRecordOpen:
         def close_recording_overlay():
             ov = state.get("overlay")
             if ov:
-                try:
-                    ov.destroy()
-                except Exception:
-                    pass
+                try: ov.destroy()
+                except Exception: pass
                 state["overlay"] = None
 
-        # ── 녹화 정지 ──────────────────────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════════════════
+        # 녹화 정지 (기존 코드 보존)
+        # ══════════════════════════════════════════════════════════════════════
         def stop_record():
             if not state["recording"]:
                 return
             state["recording"] = False
             self._recording = False
-            # P3에 녹화 종료 알림 → 메모리 정리 재허용
-            for _q in (getattr(self, "cmd_queue", None), getattr(self, "_om_cmd_queue", None)):
+            for _q in (getattr(self, "cmd_queue", None),
+                       getattr(self, "_om_cmd_queue", None)):
                 if _q is not None:
                     try: _q.put_nowait("recording_stop")
                     except Exception: pass
             rec_btn.config(text="⏺ 녹화 시작", fg=self.ACCENT2)
             self.root.after(0, _unlock_range_ui)
             close_recording_overlay()
+            _log("⏹ 녹화 정지")
 
             def _save():
-                import time as _t, threading as _th
-                self.root.after(0, lambda: rec_status.config(text="💾 저장 중...", fg=self.TEXT_MID))
+                import threading as _th
+                self.root.after(0, lambda: rec_status.config(
+                    text="💾 저장 중...", fg=self.TEXT_MID))
+                out_path_saved = [None]
                 try:
                     video_result = [None]; video_exc = [None]
                     audio_result = [None, None, None]; audio_exc = [None]
@@ -286,36 +359,48 @@ class LipSyncGUIRecordOpen:
                     tmp_video = video_result[0]
                     audio_arr, audio_sr, audio_ch = audio_result
 
-                    # ── [QPC싱크] 오프셋 계산: QPC 기반 하드웨어 클럭 사용
                     _vid_t = getattr(state["screen_rec"], "_first_frame_qpc_sec", 0.0)
                     _aud_t = getattr(state["audio_rec"],  "_first_audio_qpc_sec", 0.0)
                     audio_offset_sec = (_aud_t - _vid_t) if (_vid_t and _aud_t) else 0.0
 
+                    import time as _t2
                     out = state.get("out_path") or os.path.join(
-                        ensure_subdir("Video"), f"record_{_t.strftime('%Y%m%d_%H%M%S')}.mp4")
-                    self.root.after(0, lambda: rec_status.config(text="⏳ 오디오 병합 중...", fg=self.TEXT_MID))
+                        ensure_subdir("Video"),
+                        f"record_{_t2.strftime('%Y%m%d_%H%M%S')}.mp4")
+                    out_path_saved[0] = out
+                    self.root.after(0, lambda: rec_status.config(
+                        text="⏳ 오디오 병합 중...", fg=self.TEXT_MID))
                     from gui.record_backend import _save_mp4
-                    _save_mp4(tmp_video, audio_arr, audio_sr, audio_ch, out, audio_offset_sec)
+                    _save_mp4(tmp_video, audio_arr, audio_sr, audio_ch,
+                              out, audio_offset_sec)
                     if os.path.isfile(out) and os.path.getsize(out) > 1024:
+                        _log(f"✅ 저장 완료: {os.path.basename(out)}")
                         self.root.after(0, lambda: rec_status.config(
-                            text="✅ 저장 완료: Video/" + os.path.basename(out), fg=self.ACCENT3))
+                            text="✅ 저장 완료: Video/" + os.path.basename(out),
+                            fg=self.ACCENT3))
                     else:
+                        _log("⚠ 저장 실패: 파일이 비어있습니다.")
                         self.root.after(0, lambda: rec_status.config(
-                            text="⚠ 저장 실패: 파일이 비어있습니다.", fg="#e0a03c"))
+                            text="⚠ 저장 실패: 파일이 비어있습니다.",
+                            fg="#e0a03c"))
+                        out_path_saved[0] = None
+
                 except Exception as e:
                     import traceback, tempfile
                     tb = traceback.format_exc()
                     try:
-                        with open(os.path.join(tempfile.gettempdir(), "autosinc_record_error.txt"),
+                        with open(os.path.join(tempfile.gettempdir(),
+                                               "autosinc_record_error.txt"),
                                   "w", encoding="utf-8") as lf:
                             lf.write(tb)
-                    except: pass
+                    except Exception:
+                        pass
+                    _log(f"❌ 저장 실패: {e}")
                     self.root.after(0, lambda: rec_status.config(
                         text="⚠ 저장 실패: " + str(e)[:80], fg="#e0a03c"))
+                    out_path_saved[0] = None
+
                 finally:
-                    # ── [정리] 저장 완료(성공/실패 무관) 후 대용량 버퍼 즉시 해제 ──
-                    # audio_arr: 녹화 시간 × 채널 × 48000 크기 float32 배열 (수십~수백 MB)
-                    # screen_rec / audio_rec: ffmpeg 핸들, chunk 리스트 등 참조 보유
                     try: del audio_arr
                     except Exception: pass
                     try: del audio_result
@@ -325,24 +410,233 @@ class LipSyncGUIRecordOpen:
                     try:
                         state["screen_rec"] = None
                         state["audio_rec"]  = None
-                    except Exception: pass
+                    except Exception:
+                        pass
                     run_gc()
+
+                # [NEW] 자동 녹화 루프: 저장 완료 후 제목 변화 감지 → 재시작
+                if state.get("auto_rec_active") and out_path_saved[0]:
+                    _auto_rec_wait_and_loop()
 
             threading.Thread(target=_save, daemon=True).start()
 
-        # ── 녹화 시작 ──────────────────────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════════════════
+        # [NEW] 자동 녹화 로직
+        # ══════════════════════════════════════════════════════════════════════
+
+        def _get_video_duration_with_retry(max_wait_sec=30) -> int:
+            """영상 길이(초)를 가져온다. 실패 시 최대 max_wait_sec 동안 재시도."""
+            from win32_utils import find_potplayer_hwnd, get_playback_info
+            deadline = _time.time() + max_wait_sec
+            while _time.time() < deadline:
+                hwnd = find_potplayer_hwnd()
+                if hwnd:
+                    pos_ms, dur_ms = get_playback_info(hwnd)
+                    if dur_ms and dur_ms > 0:
+                        _log(f"⏱ 영상 길이: {dur_ms // 1000}초")
+                        return dur_ms // 1000
+                _time.sleep(0.5)
+            _log("⚠ 영상 길이 가져오기 실패 (타임아웃)")
+            return 0
+
+        def _wait_for_video_play(max_wait_sec=60) -> bool:
+            """PotPlayer 에서 영상이 재생될 때까지 대기. 성공 시 True."""
+            from win32_utils import find_potplayer_hwnd, is_potplayer_playing
+            _log("⏳ 영상 재생 감지 대기 중...")
+            deadline = _time.time() + max_wait_sec
+            while _time.time() < deadline:
+                if not state.get("auto_rec_active"):
+                    return False
+                hwnd = find_potplayer_hwnd()
+                if hwnd and is_potplayer_playing(hwnd):
+                    _log("🎬 영상 재생 감지됨")
+                    return True
+                _time.sleep(0.5)
+            _log("⚠ 영상 재생 감지 타임아웃")
+            return False
+
+        def _get_current_potplayer_title() -> str:
+            """현재 PotPlayer 창 제목에서 파일명을 추출한다."""
+            import ctypes
+            from win32_utils import find_potplayer_hwnd
+            from gui.ui_logic import _extract_potplayer_title
+            hwnd = find_potplayer_hwnd()
+            if not hwnd:
+                return ""
+            try:
+                buf = ctypes.create_unicode_buffer(512)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+                return _extract_potplayer_title(buf.value)
+            except Exception:
+                return ""
+
+        def _auto_rec_wait_and_loop():
+            """저장 완료 후 영상 제목 변화를 감지해 자동 녹화를 재시작한다.
+            별도 데몬 스레드에서 실행된다.
+            """
+            if not state.get("auto_rec_active"):
+                return
+
+            _log("🔄 다음 영상 대기 중 (제목 변화 감지)...")
+            prev_title = _get_current_potplayer_title()
+
+            deadline = _time.time() + 300   # 최대 5분 대기
+            while _time.time() < deadline:
+                if not state.get("auto_rec_active"):
+                    _log("🛑 자동 녹화 루프 종료 (사용자 중단)")
+                    return
+                cur_title = _get_current_potplayer_title()
+                if cur_title and cur_title != prev_title:
+                    _log(f"🔍 제목 변경 감지: {prev_title!r} → {cur_title!r}")
+                    _time.sleep(1.0)   # 영상 안정화 대기
+                    # 메인 스레드에서 자동 녹화 재시작
+                    self.root.after(0, _auto_rec_start_one)
+                    return
+                _time.sleep(1.0)
+
+            _log("⚠ 제목 변화 없음 (5분 초과) → 자동 녹화 대기 종료")
+            state["auto_rec_active"] = False
+            self.root.after(0, lambda: rec_status.config(
+                text="⏸ 자동 녹화 대기 종료 (제목 변화 없음)", fg="#e0a03c"))
+
+        def _auto_rec_start_one():
+            """자동 녹화 1회 실행 (스레드 진입점)."""
+            if not state.get("auto_rec_active"):
+                return
+            if state["recording"]:
+                _log("⚠ 이미 녹화 중 — 자동 녹화 루프 건너뜀")
+                return
+
+            def _run_auto():
+                from win32_utils import find_potplayer_hwnd, get_playback_info
+                from gui.record_backend import _CV2_OK, _AudioRecorder, _ScreenRecorder
+                import psutil
+
+                if not _CV2_OK:
+                    self.root.after(0, lambda: rec_status.config(
+                        text="⚠ opencv-python 필요", fg="#e0a03c"))
+                    state["auto_rec_active"] = False
+                    return
+
+                # 1) 영상 재생 감지
+                self.root.after(0, lambda: rec_status.config(
+                    text="⏳ 영상 재생 감지 중...", fg=self.TEXT_MID))
+                if not _wait_for_video_play(max_wait_sec=60):
+                    state["auto_rec_active"] = False
+                    self.root.after(0, lambda: rec_status.config(
+                        text="⚠ 영상 재생 감지 실패", fg="#e0a03c"))
+                    return
+
+                # 2) 영상 길이 가져오기
+                self.root.after(0, lambda: rec_status.config(
+                    text="⏳ 영상 길이 확인 중...", fg=self.TEXT_MID))
+                dur_sec = _get_video_duration_with_retry(max_wait_sec=30)
+                if dur_sec <= 0:
+                    state["auto_rec_active"] = False
+                    self.root.after(0, lambda: rec_status.config(
+                        text="⚠ 영상 길이 가져오기 실패 → 자동 녹화 취소",
+                        fg="#e0a03c"))
+                    _log("❌ 자동 녹화 취소: 영상 길이 없음")
+                    return
+
+                end_sec_auto = dur_sec - 1   # 끝 1초 여유
+
+                # 3) PotPlayer PID 탐색
+                pid = None
+                try:
+                    for p in psutil.process_iter(["pid", "name"]):
+                        if "potplayer" in p.info["name"].lower():
+                            pid = p.info["pid"]
+                            break
+                except Exception:
+                    pass
+
+                # 4) 녹화 시작 (중복 실행 방지)
+                with state["auto_rec_lock"]:
+                    if state["recording"]:
+                        _log("⚠ 이미 녹화 중 → 자동 녹화 스킵")
+                        return
+
+                    state["audio_rec"]  = _AudioRecorder()
+                    state["screen_rec"] = _ScreenRecorder()
+                    _ts       = _time.strftime("%Y%m%d_%H%M%S")
+                    _out_path = os.path.join(ensure_subdir("Video"),
+                                             f"auto_record_{_ts}.mp4")
+                    state["out_path"] = _out_path
+
+                    try:
+                        state["screen_rec"].start(fps=30, out_path=_out_path)
+                    except Exception as e:
+                        self.root.after(0, lambda: rec_status.config(
+                            text="⚠ 화면 캡처 실패: " + str(e), fg="#e0a03c"))
+                        _log(f"❌ 화면 캡처 실패: {e}")
+                        state["auto_rec_active"] = False
+                        return
+
+                    if pid:
+                        state["audio_rec"].start(pid)
+
+                    state["recording"] = True
+                    self._recording = True
+
+                for _q in (getattr(self, "cmd_queue", None),
+                           getattr(self, "_om_cmd_queue", None)):
+                    if _q is not None:
+                        try: _q.put_nowait("recording_start")
+                        except Exception: pass
+
+                self.root.after(0, lambda: rec_btn.config(
+                    text="⏹ 녹화 정지", fg=self.ACCENT3))
+                self.root.after(0, lambda: rec_status.config(
+                    text=f"🔴 자동 녹화 중... (총 {dur_sec}초)",
+                    fg=self.ACCENT2))
+                self.root.after(0, _lock_range_ui)
+                self.root.after(0, show_recording_overlay)
+                _log(f"🔴 자동 녹화 시작 (예상 종료: {end_sec_auto}초)")
+
+                # 5) 종료 시간 대기
+                while state["recording"]:
+                    hwnd = find_potplayer_hwnd()
+                    if hwnd:
+                        pos_ms, _ = get_playback_info(hwnd)
+                        if pos_ms is not None and pos_ms // 1000 >= end_sec_auto:
+                            break
+                    _time.sleep(0.3)
+
+                # 6) 녹화 자동 종료 (stop_record → _save → _auto_rec_wait_and_loop)
+                if state["recording"]:
+                    self.root.after(0, stop_record)
+
+            threading.Thread(target=_run_auto, daemon=True,
+                             name="auto-rec-worker").start()
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 녹화 시작 (기존 코드 보존 + 자동 녹화 모드 분기)
+        # ══════════════════════════════════════════════════════════════════════
         def start_record():
             from gui.record_backend import _CV2_OK, _AudioRecorder, _ScreenRecorder
             if not _CV2_OK:
                 rec_status.config(text="⚠ opencv-python 필요", fg="#e0a03c")
                 return
 
+            # [NEW] 자동 녹화 모드 분기
+            if auto_rec_var.get():
+                if state["recording"]:
+                    _log("⚠ 자동 녹화 시작 불가: 이미 녹화 중")
+                    return
+                _log("🤖 자동 녹화 모드 진입")
+                state["auto_rec_active"] = True
+                rec_status.config(text="🤖 자동 녹화 모드 시작...", fg=self.ACCENT3)
+                _auto_rec_start_one()
+                return
+
+            # 기존 수동 녹화 로직
+            state["auto_rec_active"] = False
             use_range = range_var.get()
             start_sec = parse_time(start_time_var.get()) if use_range else None
             end_sec   = parse_time(end_time_var.get())   if use_range else None
 
             def _run():
-                import time as _t
                 if use_range and start_sec is not None:
                     from win32_utils import find_potplayer_hwnd, get_playback_info
                     self.root.after(0, lambda: rec_status.config(
@@ -353,27 +647,28 @@ class LipSyncGUIRecordOpen:
                             pos_ms, _ = get_playback_info(hwnd)
                             if pos_ms is not None and pos_ms // 1000 >= start_sec:
                                 break
-                        _t.sleep(0.2)
+                        _time.sleep(0.2)
 
                 import psutil
                 pid = None
                 for p in psutil.process_iter(["pid", "name"]):
                     if "potplayer" in p.info["name"].lower():
-                        pid = p.info["pid"]; break
+                        pid = p.info["pid"]
+                        break
 
                 state["audio_rec"]  = _AudioRecorder()
                 state["screen_rec"] = _ScreenRecorder()
-                import time as _t2
-                _ts       = _t2.strftime("%Y%m%d_%H%M%S")
-                _out_path = os.path.join(ensure_subdir("Video"), f"record_{_ts}.mp4")
+                _ts       = _time.strftime("%Y%m%d_%H%M%S")
+                _out_path = os.path.join(ensure_subdir("Video"),
+                                         f"record_{_ts}.mp4")
                 state["out_path"] = _out_path
 
                 try:
-                    # [기능3] OBS 방식: ffmpeg 즉시 기동 후 오디오도 동시 시작
                     state["screen_rec"].start(fps=30, out_path=_out_path)
                 except Exception as e:
                     self.root.after(0, lambda: rec_status.config(
                         text="⚠ 화면 캡처 실패: " + str(e), fg="#e0a03c"))
+                    _log(f"❌ 화면 캡처 실패: {e}")
                     return
 
                 if pid:
@@ -381,19 +676,20 @@ class LipSyncGUIRecordOpen:
 
                 state["recording"] = True
                 self._recording = True
-                # P3에 녹화 시작 알림 → 녹화 중 메모리 정리 억제
-                for _q in (getattr(self, "cmd_queue", None), getattr(self, "_om_cmd_queue", None)):
+                for _q in (getattr(self, "cmd_queue", None),
+                           getattr(self, "_om_cmd_queue", None)):
                     if _q is not None:
                         try: _q.put_nowait("recording_start")
                         except Exception: pass
-                self.root.after(0, lambda: rec_btn.config(text="⏹ 녹화 정지", fg=self.ACCENT3))
-                self.root.after(0, lambda: rec_status.config(text="🔴 녹화 중...", fg=self.ACCENT2))
-                # [기능1] 녹화 시작 시 구간 UI 잠금
-                self.root.after(0, _lock_range_ui)
-                # [기능2] 오버레이 표시
-                self.root.after(0, show_recording_overlay)
 
-                # 구간 녹화: 종료 시각 대기
+                self.root.after(0, lambda: rec_btn.config(
+                    text="⏹ 녹화 정지", fg=self.ACCENT3))
+                self.root.after(0, lambda: rec_status.config(
+                    text="🔴 녹화 중...", fg=self.ACCENT2))
+                self.root.after(0, _lock_range_ui)
+                self.root.after(0, show_recording_overlay)
+                _log("🔴 녹화 시작")
+
                 if use_range and end_sec is not None:
                     from win32_utils import find_potplayer_hwnd, get_playback_info
                     while state["recording"]:
@@ -402,7 +698,7 @@ class LipSyncGUIRecordOpen:
                             pos_ms, _ = get_playback_info(hwnd)
                             if pos_ms is not None and pos_ms // 1000 >= end_sec:
                                 break
-                        _t.sleep(0.2)
+                        _time.sleep(0.2)
                     if state["recording"]:
                         self.root.after(0, stop_record)
 
@@ -410,15 +706,18 @@ class LipSyncGUIRecordOpen:
 
         def toggle_record():
             if state["recording"]:
+                # 자동 녹화 중단 플래그
+                state["auto_rec_active"] = False
                 stop_record()
             else:
                 start_record()
 
         rec_btn.config(command=toggle_record)
 
-        # ── 캡처 ───────────────────────────────────────────────────────────────
+        # ── 캡처 (기존 코드 완전 보존) ─────────────────────────────────────────
         def do_capture():
-            import time as _t, ctypes, ctypes.wintypes as wt
+            import ctypes
+            import ctypes.wintypes as wt
             from gui.record_backend import _get_potplayer_video_hwnd, _show_overlay
             from win32_utils import find_potplayer_hwnd
             hwnd = find_potplayer_hwnd()
@@ -426,7 +725,8 @@ class LipSyncGUIRecordOpen:
                 cap_status.config(text="⚠ 팟플레이어 창 없음", fg="#e0a03c")
                 return
             try:
-                import numpy as np, cv2
+                import numpy as np
+                import cv2
                 from PIL import Image
 
                 video_hwnd = _get_potplayer_video_hwnd(hwnd)
@@ -443,33 +743,38 @@ class LipSyncGUIRecordOpen:
                     cap_status.config(text="⚠ 창 크기 오류", fg="#e0a03c")
                     return
 
-                # ── DIB Section 공통 헬퍼 ─────────────────────────────────
                 class BITMAPINFOHEADER(ctypes.Structure):
                     _fields_ = [
-                        ("biSize",          ctypes.c_uint32), ("biWidth",         ctypes.c_int32),
-                        ("biHeight",        ctypes.c_int32),  ("biPlanes",        ctypes.c_uint16),
-                        ("biBitCount",      ctypes.c_uint16), ("biCompression",   ctypes.c_uint32),
-                        ("biSizeImage",     ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
-                        ("biYPelsPerMeter", ctypes.c_int32),  ("biClrUsed",       ctypes.c_uint32),
+                        ("biSize",          ctypes.c_uint32),
+                        ("biWidth",         ctypes.c_int32),
+                        ("biHeight",        ctypes.c_int32),
+                        ("biPlanes",        ctypes.c_uint16),
+                        ("biBitCount",      ctypes.c_uint16),
+                        ("biCompression",   ctypes.c_uint32),
+                        ("biSizeImage",     ctypes.c_uint32),
+                        ("biXPelsPerMeter", ctypes.c_int32),
+                        ("biYPelsPerMeter", ctypes.c_int32),
+                        ("biClrUsed",       ctypes.c_uint32),
                         ("biClrImportant",  ctypes.c_uint32),
                     ]
+
                 class BITMAPINFO(ctypes.Structure):
-                    _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
+                    _fields_ = [("bmiHeader", BITMAPINFOHEADER),
+                                ("bmiColors", ctypes.c_uint32 * 3)]
 
                 def _make_dib_section(w, h):
-                    """32bpp top-down DIB Section 생성. (hdc_s, hdc_m, hbmp, pBits, old) 반환."""
                     bmi_ = BITMAPINFO()
                     bmi_.bmiHeader.biSize        = ctypes.sizeof(BITMAPINFOHEADER)
                     bmi_.bmiHeader.biWidth       = w
-                    bmi_.bmiHeader.biHeight      = -h   # top-down
+                    bmi_.bmiHeader.biHeight      = -h
                     bmi_.bmiHeader.biPlanes      = 1
                     bmi_.bmiHeader.biBitCount    = 32
                     bmi_.bmiHeader.biCompression = 0
                     hdc_s = user32.GetDC(None)
                     hdc_m = gdi32.CreateCompatibleDC(hdc_s)
                     pb    = ctypes.c_void_p()
-                    hb    = gdi32.CreateDIBSection(hdc_m, ctypes.byref(bmi_), 0,
-                                                   ctypes.byref(pb), None, 0)
+                    hb    = gdi32.CreateDIBSection(hdc_m, ctypes.byref(bmi_),
+                                                   0, ctypes.byref(pb), None, 0)
                     if not hb or not pb.value:
                         gdi32.DeleteDC(hdc_m)
                         user32.ReleaseDC(None, hdc_s)
@@ -490,10 +795,6 @@ class LipSyncGUIRecordOpen:
                 def _is_black(a):
                     return bool(a[..., :3].mean() < 1.0)
 
-                # ── 방법 1: PrintWindow(PW_RENDERFULLCONTENT)
-                #    다른 창에 가려도 GPU/D3D 렌더러까지 캡처 가능 (Vista+)
-                # ── 방법 2: PrintWindow(플래그=0) — 구형 GDI 렌더러 (XP+)
-                # ── 방법 3: BitBlt — 창이 화면에 보일 때 항상 동작 (Win2000+)
                 PW_RENDERFULLCONTENT = 0x00000002
                 arr = None
 
@@ -513,14 +814,14 @@ class LipSyncGUIRecordOpen:
                         break
 
                 if arr is None:
-                    # BitBlt 폴백: 창이 화면에 보이기만 하면 동작
                     dib = _make_dib_section(cw, ch)
                     if dib is not None:
                         hdc_s, hdc_m, hb, pb, ob = dib
                         try:
                             hdc_win = user32.GetWindowDC(target)
                             if hdc_win:
-                                gdi32.BitBlt(hdc_m, 0, 0, cw, ch, hdc_win, 0, 0, 0x00CC0020)
+                                gdi32.BitBlt(hdc_m, 0, 0, cw, ch,
+                                             hdc_win, 0, 0, 0x00CC0020)
                                 user32.ReleaseDC(target, hdc_win)
                             candidate = _read_pixels(pb, cw, ch)
                             if not _is_black(candidate):
@@ -529,32 +830,40 @@ class LipSyncGUIRecordOpen:
                             _free_dib(hdc_s, hdc_m, hb, ob)
 
                 if arr is None:
-                    cap_status.config(text="⚠ 캡처 실패: 검은 화면 (팟플레이어가 가려져 있거나 GPU 렌더러 문제)", fg="#e0a03c")
+                    cap_status.config(
+                        text="⚠ 캡처 실패: 검은 화면 (팟플레이어가 가려져 있거나 GPU 렌더러 문제)",
+                        fg="#e0a03c")
                     return
+
                 img = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
-                # ── [정리] DIB 복사본(arr) 즉시 해제 — PNG 변환 완료 후 불필요 ──
                 del arr; arr = None
-                ts  = _t.strftime("%Y%m%d_%H%M%S")
-                out = os.path.join(ensure_subdir("Screenshot"), f"capture_{ts}.png")
+                ts  = _time.strftime("%Y%m%d_%H%M%S")
+                out = os.path.join(ensure_subdir("Screenshot"),
+                                   f"capture_{ts}.png")
                 Image.fromarray(img).save(out, "PNG")
-                # ── [정리] PIL 변환용 RGB 배열(img) 저장 완료 후 즉시 해제 ──────
                 del img; img = None
                 run_gc()
-                cap_status.config(text="✅ 저장: Screenshot/" + os.path.basename(out),
-                                  fg=self.ACCENT3)
+                cap_status.config(
+                    text="✅ 저장: Screenshot/" + os.path.basename(out),
+                    fg=self.ACCENT3)
                 _show_overlay(self.root, "📷 장면이 캡처되었습니다.", duration_ms=3000)
+                _log(f"📷 캡처 저장: {os.path.basename(out)}")
+
             except Exception as e:
                 cap_status.config(text="⚠ 캡처 실패: " + str(e), fg="#e0a03c")
+                _log(f"❌ 캡처 실패: {e}")
 
         cap_btn.config(command=do_capture)
         switch_tab("record")
         return state, stop_record
 
-    # ── 팝업으로 열기 (기어 메뉴 등 외부 호출용) ─────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # 팝업으로 열기 (기어 메뉴 등 외부 호출용) — 기존 코드 보존
+    # ══════════════════════════════════════════════════════════════════════════
     def _open_record_capture(self):
-        r   = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-        pw  = round(340 * r)
-        ph  = round(400 * r)
+        r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        pw = round(340 * r)
+        ph = round(400 * r)
 
         popup = tk.Toplevel(self.root)
         popup.title("녹화 및 캡처")
@@ -570,23 +879,24 @@ class LipSyncGUIRecordOpen:
         tk.Label(popup, text="🎬 녹화 및 캡처",
                  font=("Segoe UI", F_TITLE, "bold"),
                  bg=self.BG, fg=self.TEXT).pack(pady=(PAD, 0))
-        tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", pady=(round(8*r), 0))
+        tk.Frame(popup, bg=self.BORDER, height=1).pack(
+            fill="x", pady=(round(8*r), 0))
 
-        state, stop_record = self._build_record_widgets(popup, r, vcmd_widget=popup)
+        state, stop_record = self._build_record_widgets(
+            popup, r, vcmd_widget=popup)
 
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", padx=PAD)
 
         def on_close():
             if state["recording"]:
+                state["auto_rec_active"] = False
                 stop_record()
             ov = state.get("overlay")
             if ov:
                 try: ov.destroy()
                 except Exception: pass
-            try:
-                popup.destroy()
-            except Exception:
-                pass
+            try: popup.destroy()
+            except Exception: pass
 
         tk.Button(popup, text="닫기",
                   font=("Consolas", F_BTN, "bold"),

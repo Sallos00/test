@@ -59,6 +59,26 @@ jobs:
       - name: 난독화 (gui 패키지)
         run: pyarmor obfuscate --no-runtime --recursive --output dist_obf/gui gui/__init__.py
 
+      - name: pytransform 런타임 위치 정리
+        run: |
+          # PyArmor 7 는 --output 과 무관하게 CWD 에 pytransform 을 만들기도 함
+          # → dist_obf/pytransform 에 없으면 루트에서 찾아 이동
+          Write-Host "=== dist_obf 구조 ==="
+          Get-ChildItem -Path dist_obf -Recurse -Name
+
+          if (Test-Path "dist_obf\pytransform") {
+            Write-Host "OK: dist_obf\pytransform 확인됨"
+          } elseif (Test-Path "pytransform") {
+            Write-Host "루트의 pytransform 을 dist_obf\ 로 이동"
+            Move-Item pytransform dist_obf\pytransform
+          } else {
+            Write-Host "ERROR: pytransform 을 찾을 수 없습니다"
+            Get-ChildItem -Path . -Recurse -Filter "_pytransform*" | Format-Table FullName
+            exit 1
+          }
+          Write-Host "=== 정리 후 dist_obf 구조 ==="
+          Get-ChildItem -Path dist_obf -Recurse -Name
+
       # main.py 는 PyInstaller 진입점 — 난독화 없이 복사
       - name: main.py 복사
         run: Copy-Item main.py dist_obf\main.py

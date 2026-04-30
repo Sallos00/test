@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller pyarmor
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller "pyarmor>=7.0,<8.0"
 
       - name: ffmpeg 다운로드 (번들용)
         run: |

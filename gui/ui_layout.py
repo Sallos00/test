@@ -439,6 +439,15 @@ class LipSyncGUILayout:
             bg="BG3", fg="TEXT_MID", abg="BORDER")
         self._link_save_btn.pack(side="left", padx=(round(4*r), 0))
 
+        # 저장 중지 버튼 (저장 진행 중에만 표시)
+        self._link_stop_btn = reg(
+            tk.Button(btn_row, text="■ 중지",
+                      bg=self.BG3, fg=self.ACCENT2,
+                      activebackground=self.BORDER,
+                      command=self._link_save_cancel, **BTN_S),
+            bg="BG3", fg="ACCENT2", abg="BORDER")
+        # pack() 하지 않음 — _dl_stop_btn_show() 에서 표시
+
         # 상태 레이블 (이미지 녹색 박스 위치)
         self._link_status_lbl = reg(
             tk.Label(top, text="URL을 입력하고 재생 버튼을 클릭하세요.",

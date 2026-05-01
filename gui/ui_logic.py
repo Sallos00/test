@@ -41,6 +41,30 @@ from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip, pi
 # ─────────────────────────────────────────────────────────────────────────────
 _LINK_HISTORY_FILENAME = "Livehistory.json"
 
+# 플랫폼별 이어보기 버튼 색상
+_PLATFORM_COLORS = {
+    "youtube":  "#e63333",  # 빨간색
+    "chzzk":    "#4caf50",  # 녹색
+    "twitch":   "#9b6fe0",  # 보라색
+    "facebook": "#4eb8f0",  # 하늘색
+    "default":  "#00c8e0",  # 기존 청록 (ACCENT)
+}
+
+def _get_platform_color(url: str) -> str:
+    """URL로 플랫폼을 판별해 이어보기 버튼 색상을 반환한다."""
+    if not url:
+        return _PLATFORM_COLORS["default"]
+    u = url.lower()
+    if re.search(r'(youtube\.com|youtu\.be)', u):
+        return _PLATFORM_COLORS["youtube"]
+    if re.search(r'(chzzk\.naver\.com|chzzk\.com)', u):
+        return _PLATFORM_COLORS["chzzk"]
+    if re.search(r'(twitch\.tv)', u):
+        return _PLATFORM_COLORS["twitch"]
+    if re.search(r'(facebook\.com|fb\.watch|fb\.com)', u):
+        return _PLATFORM_COLORS["facebook"]
+    return _PLATFORM_COLORS["default"]
+
 
 class LipSyncGUILogic:
 
@@ -233,7 +257,9 @@ class LipSyncGUILogic:
             return
         records = self._load_live_history()
         if records:
-            btn.config(state="normal", fg=self.ACCENT3)   # [수정] 녹색
+            last_url = records[-1].get("url", "")
+            color = _get_platform_color(last_url)
+            btn.config(state="normal", fg=color)
         else:
             btn.config(state="disabled", fg=self.TEXT_MID)
 
@@ -458,6 +484,55 @@ class LipSyncGUILogic:
         self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ ffmpeg 설치 완료: {local}")
         return local
 
+    def _dl_stop_btn_show(self):
+        """저장 중지 버튼 표시."""
+        btn = getattr(self, "_link_stop_btn", None)
+        if btn:
+            try:
+                r = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+                btn.pack(side="left", padx=(round(4*r), 0))
+            except Exception:
+                pass
+
+    def _dl_stop_btn_hide(self):
+        """저장 중지 버튼 숨기기."""
+        btn = getattr(self, "_link_stop_btn", None)
+        if btn:
+            try:
+                btn.pack_forget()
+            except Exception:
+                pass
+
+    def _link_save_cancel(self):
+        """중지 버튼 콜백 — 진행 중인 저장 작업을 즉시 중단하고 파일을 정리한다."""
+        proc = getattr(self, "_link_save_proc", None)
+        if proc:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            self._link_save_proc = None
+
+        # 저장 중이던 파일 정리 (_link_save_dest_glob에 저장된 패턴으로 삭제)
+        import glob as _glob
+        dest_glob = getattr(self, "_link_save_dest_glob", None)
+        if dest_glob:
+            for f in _glob.glob(dest_glob + "*"):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+            self._link_save_dest_glob = None
+
+        self.root.after(0, self._dl_progress_hide)
+        self.root.after(0, self._dl_stop_btn_hide)
+        self.root.after(0, lambda: self._link_save_btn.config(state="normal"))
+        self.root.after(0, lambda: self._link_status("⏹ 저장이 중단되었습니다."))
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] ⏹ yt-dlp 저장 중단")
+
     def _link_save(self):
         """저장 버튼 콜백 — yt-dlp + ffmpeg를 사용해 최고 화질로 저장한다.
         두 실행파일이 없으면 최초 1회 자동 다운로드 후 APP_DIR에 캐시한다.
@@ -504,12 +579,16 @@ class LipSyncGUILogic:
                 self.root.after(0, lambda: self._dl_progress_update(0.0))
                 self.root.after(0, lambda: self._link_status("동영상을 저장하고 있습니다."))
                 self.root.after(0, self._dl_progress_show)
+                self.root.after(0, self._dl_stop_btn_show)
+                self.root.after(0, lambda: self._link_save_btn.config(state="disabled"))
+
+                # 저장 파일 경로 패턴 추적 (중단 시 삭제용)
+                self._link_save_dest_glob = os.path.join(dl_dir, "")
 
                 cmd = [
                     ytdlp,
                     "-f", "bestvideo+bestaudio/best",
                     "--merge-output-format", "mp4",
-                    "--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k"
                     "--ffmpeg-location", os.path.dirname(ffmpeg),
                     "--newline",
                     "-o", os.path.join(dl_dir, "%(title)s.%(ext)s"),
@@ -525,22 +604,36 @@ class LipSyncGUILogic:
                     errors="replace",
                     creationflags=0x08000000,  # CREATE_NO_WINDOW
                 )
+                self._link_save_proc = proc
 
+                dest_file = None
                 for line in proc.stdout:
                     m = re.search(r'\[download\]\s+([\d.]+)%', line)
                     if m:
                         pct = float(m.group(1))
                         self.root.after(0, lambda p=pct: self._dl_progress_update(p))
+                    # 저장 파일명 추적
+                    mf = re.search(r'\[(?:download|Merger)\]\s+(?:Destination|Merging formats into):\s+"?(.+?\.\w+)"?', line)
+                    if mf:
+                        dest_file = mf.group(1).strip().strip('"')
+                        self._link_save_dest_glob = dest_file
 
                 proc.wait()
+                self._link_save_proc = None
+
+                # 사용자가 중단한 경우 (proc.kill 이후 returncode != 0)
+                if proc.returncode != 0 and not getattr(self, "_link_save_proc", None) is None:
+                    return
 
                 if proc.returncode == 0:
+                    self._link_save_dest_glob = None
                     self.root.after(0, lambda: self._dl_progress_update(100.0))
                     self.root.after(0, lambda: self._link_status(
                         f"✅ 저장 완료 → {dl_dir}"))
                     self.root.after(2500, self._dl_progress_hide)
                     self._log_lines.append(f"[{ts}] ✅ yt-dlp 저장 완료: {url}")
                 else:
+                    self._link_save_dest_glob = None
                     self.root.after(0, lambda: self._link_status(
                         "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
                     self.root.after(0, self._dl_progress_hide)
@@ -548,9 +641,15 @@ class LipSyncGUILogic:
                         f"[{ts}] ❌ yt-dlp 저장 실패 (code {proc.returncode}): {url}")
 
             except Exception as e:
+                self._link_save_proc = None
+                self._link_save_dest_glob = None
                 self.root.after(0, lambda: self._link_status(f"❌ 오류: {e}", warn=True))
                 self.root.after(0, self._dl_progress_hide)
                 self._log_lines.append(f"[{ts}] ❌ yt-dlp 예외: {e}")
+            finally:
+                self._link_save_proc = None
+                self.root.after(0, self._dl_stop_btn_hide)
+                self.root.after(0, lambda: self._link_save_btn.config(state="normal"))
 
         threading.Thread(target=_run, daemon=True, name="yt-dlp-save").start()
 
@@ -694,11 +793,11 @@ class LipSyncGUILogic:
                 padx=round(4 * r), pady=round(2 * r))
             del_btn.pack(side="right", anchor="center", padx=(0, round(4 * r)))
 
-            # 이어보기 버튼 — 텍스트 색상 녹색 (요구사항)
+            # 이어보기 버튼 — 색상은 URL 확정 후 업데이트 단계에서 지정
             resume_btn = tk.Button(
                 row, text="▶ 이어보기",
                 font=("Consolas", max(7, round(8 * r)), "bold"),
-                bg=btn_bg, fg=self.ACCENT3,   # [수정] 녹색
+                bg=btn_bg, fg=_PLATFORM_COLORS["default"],
                 activebackground=self.BORDER,
                 relief="flat", cursor="hand2",
                 padx=round(6 * r), pady=round(2 * r))
@@ -719,7 +818,6 @@ class LipSyncGUILogic:
             ts     = rec.get("timestamp", "")
             cached = cache[i]
 
-            # 표시: 제목 우선, 없으면 URL 앞부분으로 대체 (URL 자체는 숨김)
             if title:
                 display_text = title[:60] + "…" if len(title) > 60 else title
             else:
@@ -728,6 +826,7 @@ class LipSyncGUILogic:
             cached["url_lbl"].config(text=display_text)
             cached["ts_lbl"].config(text=ts if ts else "")
             cached["resume_btn"].config(
+                fg=_get_platform_color(url),
                 command=lambda u=url: self._link_resume_from_record(u))
             cached["del_btn"].config(
                 command=lambda u=url: self._live_hist_delete_one(u))

@@ -61,11 +61,26 @@ def _get_potplayer_rect():
     except Exception:
         return None
 
-# ── ffmpeg 탐색 ───────────────────────────────────────────────────────────────
-def _find_ffmpeg():
+# ── ffmpeg 런타임 관리 ────────────────────────────────────────────────────────
+
+# APP_DIR: gui/base.py 의 APP_DIR 와 동일 경로 (%APPDATA%\AutoSync)
+_APP_DIR = os.path.join(os.environ.get("APPDATA", ""), "AutoSync")
+
+# ffmpeg 다운로드 URL (yt-dlp 공식 권장 빌드, Windows x64 GPL)
+_FFMPEG_ZIP_URL = (
+    "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/"
+    "ffmpeg-master-latest-win64-gpl.zip"
+)
+
+
+def check_ffmpeg():
+    """ffmpeg 실행 가능 여부를 확인한다.
+    발견된 경로 문자열을 반환하고, 없으면 빈 문자열을 반환한다.
+    """
     import shutil, sys
     meipass = getattr(sys, "_MEIPASS", None)
     cands = ([os.path.join(meipass, "ffmpeg.exe")] if meipass else []) + [
+        os.path.join(_APP_DIR, "ffmpeg.exe"),                                    # APP_DIR (yt-dlp 와 동일 위치)
         os.path.join(os.path.dirname(sys.executable), "ffmpeg.exe"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffmpeg.exe"),
@@ -74,9 +89,81 @@ def _find_ffmpeg():
     ]
     for p in cands:
         try:
-            if os.path.isfile(p): return p
-        except Exception: pass
+            if os.path.isfile(p):
+                return p
+        except Exception:
+            pass
     return shutil.which("ffmpeg") or ""
+
+
+def download_ffmpeg():
+    """ffmpeg.exe를 APP_DIR(%APPDATA%\\AutoSync)에 다운로드하여 경로를 반환한다.
+    네트워크 오류 · 압축 해제 실패 · 권한 문제 발생 시 RuntimeError를 발생시킨다.
+    """
+    import urllib.request, zipfile
+    os.makedirs(_APP_DIR, exist_ok=True)
+    dest     = os.path.join(_APP_DIR, "ffmpeg.exe")
+    zip_path = dest + ".zip"
+    try:
+        _log(f"[ffmpeg] 다운로드 시작: {_FFMPEG_ZIP_URL}")
+        try:
+            urllib.request.urlretrieve(_FFMPEG_ZIP_URL, zip_path)
+        except Exception as e:
+            raise RuntimeError(f"네트워크 오류 — ffmpeg zip 다운로드 실패: {e}") from e
+
+        _log("[ffmpeg] zip 압축 해제 중...")
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                target = next(
+                    (n for n in zf.namelist() if n.endswith("/ffmpeg.exe")),
+                    None
+                )
+                if target is None:
+                    raise RuntimeError("zip 안에서 ffmpeg.exe 를 찾을 수 없습니다.")
+                with zf.open(target) as src, open(dest, "wb") as out:
+                    out.write(src.read())
+        except (zipfile.BadZipFile, OSError) as e:
+            raise RuntimeError(f"ffmpeg 압축 해제 실패: {e}") from e
+
+        # 실행 파일 접근 권한 확인 (Windows 에서는 통상 불필요하지만 안전 처리)
+        if not os.access(dest, os.X_OK):
+            try:
+                import stat as _stat
+                os.chmod(dest, os.stat(dest).st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+            except Exception as e:
+                raise RuntimeError(f"ffmpeg 실행 권한 설정 실패: {e}") from e
+
+        _log(f"[ffmpeg] 설치 완료: {dest}")
+        return dest
+
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"ffmpeg 다운로드 중 예상치 못한 오류: {e}") from e
+    finally:
+        try:
+            os.remove(zip_path)
+        except Exception:
+            pass
+
+
+def get_ffmpeg_path():
+    """ffmpeg 경로를 반환한다.
+    로컬에 없으면 자동 다운로드 후 경로를 반환한다.
+    실패 시 RuntimeError를 발생시킨다.
+    """
+    path = check_ffmpeg()
+    if path:
+        _log(f"[ffmpeg] 발견: {path}")
+        return path
+    _log("[ffmpeg] 로컬에 없음 → 자동 다운로드 시작")
+    return download_ffmpeg()
+
+
+# ── ffmpeg 탐색 (하위 호환 래퍼) ─────────────────────────────────────────────
+def _find_ffmpeg():
+    """기존 호환성 유지를 위한 래퍼. check_ffmpeg() 로 위임한다."""
+    return check_ffmpeg()
 
 # ── 화면 캡처 ─────────────────────────────────────────────────────────────────
 def _printwindow_capture(target, gdi32, user32, cw, ch):

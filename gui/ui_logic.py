@@ -183,7 +183,7 @@ class LipSyncGUILogic:
         threading.Thread(target=_run, daemon=True, name="link-play").start()
 
     def _link_resume(self):
-        """이어보기 버튼 콜백 — 마지막 기록된 URL로 재생."""
+        """이어보기 버튼 콜백 — 마지막 기록된 URL로 재생 (URL은 입력창에 노출하지 않음)."""
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
 
@@ -197,10 +197,8 @@ class LipSyncGUILogic:
             self._link_status("⚠ 저장된 URL이 없습니다.", warn=True)
             return
 
-        # URL 입력창에도 표시
-        if hasattr(self, "_link_url_var"):
-            self._link_url_var.set(last_url)
-        self._link_play()
+        # URL을 입력창에 노출하지 않고 내부적으로 재생
+        self._link_play_url(last_url)
 
     def _clipboard_set(self, text: str):
         """메인 스레드에서 클립보드에 텍스트를 복사한다."""
@@ -283,9 +281,10 @@ class LipSyncGUILogic:
             self._log_lines.append(
                 f"[{_time.strftime('%H:%M:%S')}] ❌ Livehistory 저장 오류: {e}")
 
-    def _save_live_history_entry(self, url: str):
-        """URL을 Livehistory.json에 기록한다.
-        동일한 URL이 이미 있으면 타임스탬프만 갱신 (중복 방지).
+    def _save_live_history_entry(self, url: str, title: str = ""):
+        """URL(및 제목)을 Livehistory.json에 기록한다.
+        URL은 내부 저장 전용 — 목록 표시에는 title을 사용한다.
+        동일한 URL이 이미 있으면 타임스탬프와 제목을 갱신 (중복 방지).
         """
         if not url:
             return
@@ -295,7 +294,7 @@ class LipSyncGUILogic:
         for i, rec in enumerate(records):
             if rec.get("url", "") == url:
                 records.pop(i)
-                records.append({"url": url, "timestamp": ts})
+                records.append({"url": url, "title": title or rec.get("title", ""), "timestamp": ts})
                 self._save_live_history(records)
                 if not hasattr(self, "_log_lines"):
                     self._log_lines = collections.deque(maxlen=100)
@@ -303,12 +302,27 @@ class LipSyncGUILogic:
                     f"[{_time.strftime('%H:%M:%S')}] 🔗 링크 기록 갱신: {url}")
                 return
 
-        records.append({"url": url, "timestamp": ts})
+        records.append({"url": url, "title": title, "timestamp": ts})
         self._save_live_history(records)
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
         self._log_lines.append(
             f"[{_time.strftime('%H:%M:%S')}] 🔗 링크 기록 추가: {url}")
+
+    def _live_hist_update_title(self, title: str):
+        """마지막으로 기록된 항목의 제목을 PotPlayer 창 제목으로 갱신한다."""
+        if not title:
+            return
+        records = self._load_live_history()
+        if not records:
+            return
+        records[-1]["title"] = title
+        self._save_live_history(records)
+        self._refresh_live_history_list()
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] 🔗 링크 기록 제목 갱신: {title}")
 
     def _live_hist_clear_all(self):
         """링크 시청 기록 전체 삭제."""
@@ -326,6 +340,142 @@ class LipSyncGUILogic:
         self._save_live_history(records)
         self._update_link_resume_btn()
         self._refresh_live_history_list()
+
+    # ── yt-dlp 영상 저장 기능 ─────────────────────────────────────────────────
+
+    def _link_save(self):
+        """저장 버튼 콜백 — yt-dlp를 사용해 입력창의 URL을 다운로드한다."""
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        url = getattr(self, "_link_url_var", tk.StringVar()).get().strip()
+        if not url:
+            self._link_status("⚠ URL을 입력하세요.", warn=True)
+            return
+
+        # 저장 디렉토리: ~/Downloads/
+        import pathlib
+        dl_dir = str(pathlib.Path.home() / "Downloads")
+        try:
+            os.makedirs(dl_dir, exist_ok=True)
+        except Exception:
+            dl_dir = self.APP_DIR  # 폴백: 앱 디렉토리
+
+        def _run():
+            ts = _time.strftime("%H:%M:%S")
+            try:
+                self.root.after(0, lambda: self._link_status("동영상을 저장하고 있습니다."))
+                self.root.after(0, self._dl_progress_show)
+
+                cmd = [
+                    "yt-dlp",
+                    "-f", "bestvideo+bestaudio/best",
+                    "--merge-output-format", "mp4",
+                    "--newline",
+                    "-o", os.path.join(dl_dir, "%(title)s.%(ext)s"),
+                    url,
+                ]
+
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+
+                for line in proc.stdout:
+                    m = re.search(r'\[download\]\s+([\d.]+)%', line)
+                    if m:
+                        pct = float(m.group(1))
+                        self.root.after(0, lambda p=pct: self._dl_progress_update(p))
+
+                proc.wait()
+
+                if proc.returncode == 0:
+                    self.root.after(0, lambda: self._dl_progress_update(100.0))
+                    self.root.after(0, lambda: self._link_status(
+                        f"✅ 저장 완료 → {dl_dir}"))
+                    self.root.after(2500, self._dl_progress_hide)
+                    self._log_lines.append(
+                        f"[{ts}] ✅ yt-dlp 저장 완료: {url}")
+                else:
+                    self.root.after(0, lambda: self._link_status(
+                        "❌ 저장 실패. URL 또는 yt-dlp를 확인하세요.", warn=True))
+                    self.root.after(0, self._dl_progress_hide)
+                    self._log_lines.append(
+                        f"[{ts}] ❌ yt-dlp 저장 실패 (code {proc.returncode}): {url}")
+
+            except FileNotFoundError:
+                self.root.after(0, lambda: self._link_status(
+                    "❌ yt-dlp를 찾을 수 없습니다. 설치 후 재시도하세요.", warn=True))
+                self.root.after(0, self._dl_progress_hide)
+                self._log_lines.append(
+                    f"[{ts}] ❌ yt-dlp 없음 (FileNotFoundError)")
+            except Exception as e:
+                self.root.after(0, lambda: self._link_status(
+                    f"❌ 오류: {e}", warn=True))
+                self.root.after(0, self._dl_progress_hide)
+                self._log_lines.append(
+                    f"[{ts}] ❌ yt-dlp 예외: {e}")
+
+        threading.Thread(target=_run, daemon=True, name="yt-dlp-save").start()
+
+    def _dl_progress_show(self):
+        """다운로드 진행 UI 표시."""
+        dl_row = getattr(self, "_dl_row", None)
+        if dl_row:
+            try:
+                dl_row.pack(fill="x", pady=(round(2), 0))
+            except Exception:
+                pass
+        lbl = getattr(self, "_dl_pct_lbl", None)
+        if lbl:
+            try:
+                lbl.config(text="0%")
+            except Exception:
+                pass
+        bar = getattr(self, "_dl_bar", None)
+        if bar:
+            try:
+                bar.place(x=0, y=0, width=0, height=8)
+            except Exception:
+                pass
+
+    def _dl_progress_hide(self):
+        """다운로드 진행 UI 숨기기."""
+        dl_row = getattr(self, "_dl_row", None)
+        if dl_row:
+            try:
+                dl_row.pack_forget()
+            except Exception:
+                pass
+        bar = getattr(self, "_dl_bar", None)
+        if bar:
+            try:
+                bar.place(x=0, y=0, width=0, height=8)
+            except Exception:
+                pass
+
+    def _dl_progress_update(self, pct: float):
+        """다운로드 진행률(0–100) 업데이트."""
+        bar_bg = getattr(self, "_dl_bar_bg", None)
+        bar    = getattr(self, "_dl_bar",    None)
+        lbl    = getattr(self, "_dl_pct_lbl", None)
+        if bar_bg and bar:
+            try:
+                bar_bg.update_idletasks()
+                w       = bar_bg.winfo_width()
+                fill_w  = max(0, int(w * pct / 100))
+                bar.place(x=0, y=0, width=fill_w, height=8)
+            except Exception:
+                pass
+        if lbl:
+            try:
+                lbl.config(text=f"{pct:.1f}%")
+            except Exception:
+                pass
 
     # ── 링크 기록 목록 갱신 ───────────────────────────────────────────────────
 
@@ -433,13 +583,17 @@ class LipSyncGUILogic:
         # 행 내용 업데이트
         for i, rec in enumerate(entries):
             url    = rec.get("url", "")
+            title  = rec.get("title", "")
             ts     = rec.get("timestamp", "")
             cached = cache[i]
 
-            # URL이 길면 줄바꿈
-            display_url = url[:60] + "…" if len(url) > 60 else url
+            # 표시: 제목 우선, 없으면 URL 앞부분으로 대체 (URL 자체는 숨김)
+            if title:
+                display_text = title[:60] + "…" if len(title) > 60 else title
+            else:
+                display_text = "(제목 불러오는 중…)"
 
-            cached["url_lbl"].config(text=display_url)
+            cached["url_lbl"].config(text=display_text)
             cached["ts_lbl"].config(text=ts if ts else "")
             cached["resume_btn"].config(
                 command=lambda u=url: self._link_resume_from_record(u))
@@ -459,10 +613,61 @@ class LipSyncGUILogic:
         canvas.configure(scrollregion=canvas.bbox("all"))
 
     def _link_resume_from_record(self, url: str):
-        """기록 목록의 이어보기 버튼 클릭 — 특정 URL로 재생."""
-        if hasattr(self, "_link_url_var"):
-            self._link_url_var.set(url)
-        self._link_play()
+        """기록 목록의 이어보기 버튼 클릭 — 특정 URL로 재생 (URL 입력창 미표시)."""
+        self._link_play_url(url)
+
+    def _link_play_url(self, url: str):
+        """지정된 URL을 PotPlayer에서 재생한다. 입력창을 수정하지 않는다."""
+        self._ensure_link_play_mode_state()
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        if not url:
+            self._link_status("⚠ URL이 비어 있습니다.", warn=True)
+            return
+
+        def _run():
+            ts = _time.strftime("%H:%M:%S")
+            try:
+                self._ensure_live_history_file()
+                self._link_status("⏳ PotPlayer 확인 중...")
+                ok = self._launch_potplayer_if_needed()
+                if not ok:
+                    self._link_status("❌ PotPlayer를 실행할 수 없습니다.", warn=True)
+                    return
+
+                hwnd = find_potplayer_hwnd()
+                if not hwnd:
+                    self._link_status("❌ PotPlayer 핸들을 찾을 수 없습니다.", warn=True)
+                    return
+
+                self.root.after(0, lambda: self._clipboard_set(url))
+                _time.sleep(0.3)
+
+                import ctypes
+                VK_CONTROL = 0x11
+                VK_V       = 0x56
+                user32 = ctypes.windll.user32
+                user32.SetForegroundWindow(hwnd)
+                _time.sleep(0.1)
+                user32.keybd_event(VK_CONTROL, 0, 0, 0)
+                user32.keybd_event(VK_V,       0, 0, 0)
+                user32.keybd_event(VK_V,       0, 2, 0)
+                user32.keybd_event(VK_CONTROL, 0, 2, 0)
+                _time.sleep(0.1)
+
+                self.root.after(0, lambda: self._set_link_play_mode(True))
+                self.root.after(0, lambda: self._save_live_history_entry(url))
+                self.root.after(0, lambda: self._refresh_live_history_list())
+                self.root.after(0, lambda: self._update_link_resume_btn())
+                self.root.after(0, lambda: self._link_status("✅ 재생 중 (이어보기)…"))
+                self._log_lines.append(f"[{ts}] 🔗 이어보기 재생: {url}")
+
+            except Exception as e:
+                self._link_status(f"❌ 오류: {e}", warn=True)
+                self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ❌ 이어보기 오류: {e}")
+
+        threading.Thread(target=_run, daemon=True, name="link-resume").start()
 
     # ══════════════════════════════════════════════════════════════════════════
     # ② 시청 기록 탭 (기존 코드 완전 보존)

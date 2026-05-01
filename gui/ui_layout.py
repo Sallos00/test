@@ -404,11 +404,11 @@ class LipSyncGUILayout:
                      bg=self.BG2, fg=self.TEXT_MID),
             bg="BG2", fg="TEXT_MID").pack(anchor="w")
 
+        # URL 입력창 (단독 행 — 재생 버튼 분리)
         url_row = tk.Frame(top, bg=self.BG2)
         url_row.pack(fill="x", pady=(round(4*r), 0))
         reg(url_row, bg="BG2")
 
-        # URL 입력창
         self._link_url_var = tk.StringVar()
         url_entry = tk.Entry(url_row,
                              textvariable=self._link_url_var,
@@ -416,33 +416,66 @@ class LipSyncGUILayout:
                              bg="white", fg="#111111",
                              insertbackground=self.ACCENT,
                              relief="flat", bd=4)
-        url_entry.pack(side="left", fill="x", expand=True)
+        url_entry.pack(fill="x", expand=True)
 
-        # 재생 버튼
-        reg(tk.Button(url_row, text="▶ 재생",
+        # ── 버튼 행: [▶ 재생(빨간 박스)] [⏮ 이어보기] [저장(노란 박스)] ──────
+        btn_row = tk.Frame(top, bg=self.BG2)
+        btn_row.pack(fill="x", pady=(round(6*r), 0))
+        reg(btn_row, bg="BG2")
+
+        # 재생 버튼 (이미지 빨간 박스 위치)
+        reg(tk.Button(btn_row, text="▶ 재생",
                       bg=self.BG3, fg=self.ACCENT,
                       activebackground=self.BORDER,
                       command=self._link_play, **BTN_S),
-            bg="BG3", fg="ACCENT", abg="BORDER").pack(side="left",
-                                                        padx=(round(4*r), 0))
+            bg="BG3", fg="ACCENT", abg="BORDER").pack(side="left")
 
         # 이어보기 버튼 (초기 비활성 — 기록 있을 때 활성화)
         self._link_resume_btn = reg(
-            tk.Button(top, text="⏮ 이어보기",
+            tk.Button(btn_row, text="⏮ 이어보기",
                       bg=self.BG3, fg=self.TEXT_MID,
                       activebackground=self.BORDER,
                       state="disabled",
                       command=self._link_resume, **BTN_S),
             bg="BG3", fg="TEXT_MID", abg="BORDER")
-        self._link_resume_btn.pack(fill="x", pady=(round(6*r), 0))
+        self._link_resume_btn.pack(side="left", padx=(round(4*r), 0))
 
-        # 상태 레이블
+        # 저장 버튼 (이미지 노란 박스 위치) — yt-dlp 다운로드
+        self._link_save_btn = reg(
+            tk.Button(btn_row, text="저장",
+                      bg=self.BG3, fg="#c8a83c",
+                      activebackground=self.BORDER,
+                      command=self._link_save, **BTN_S),
+            bg="BG3", fg="TEXT_MID", abg="BORDER")
+        self._link_save_btn.pack(side="left", padx=(round(4*r), 0))
+
+        # 상태 레이블 (이미지 녹색 박스 위치)
         self._link_status_lbl = reg(
             tk.Label(top, text="URL을 입력하고 재생 버튼을 클릭하세요.",
                      font=("Consolas", max(7, self.F_MONO_S - 1)),
                      bg=self.BG2, fg=self.TEXT_DIM),
             bg="BG2", fg="TEXT_DIM")
         self._link_status_lbl.pack(anchor="w", pady=(round(4*r), 0))
+
+        # ── 다운로드 진행 UI (초기 숨김) ──────────────────────────────────────
+        dl_row = tk.Frame(top, bg=self.BG2)
+        reg(dl_row, bg="BG2")
+        self._dl_row = dl_row
+
+        self._dl_bar_bg = tk.Frame(dl_row, bg=self.BG3, height=8)
+        self._dl_bar_bg.pack(fill="x")
+        self._dl_bar_bg.pack_propagate(False)
+        self._dl_bar = tk.Frame(self._dl_bar_bg, bg=self.ACCENT3, height=8)
+        self._dl_bar.place(x=0, y=0, width=0, height=8)
+
+        self._dl_pct_lbl = reg(
+            tk.Label(dl_row, text="0%",
+                     font=("Consolas", max(7, self.F_MONO_S - 1)),
+                     bg=self.BG2, fg=self.ACCENT3),
+            bg="BG2", fg="TEXT_MID")
+        self._dl_pct_lbl.pack(anchor="w", pady=(round(2*r), 0))
+
+        dl_row.pack_forget()   # 다운로드 시작 전까지 숨김
 
         # ── 구분선 ────────────────────────────────────────────────────────────
         reg(tk.Frame(parent, bg=self.BORDER, height=1),

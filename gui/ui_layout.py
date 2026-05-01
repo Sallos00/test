@@ -418,7 +418,7 @@ class LipSyncGUILayout:
                              relief="flat", bd=4)
         url_entry.pack(fill="x", expand=True)
 
-        # ── 버튼 행: [▶ 재생(빨간 박스)] [⏮ 이어보기] [저장(노란 박스)] ──────
+        # ── 버튼 행: [▶ 재생(빨간 박스)] [저장(노란 박스)] ──────
         btn_row = tk.Frame(top, bg=self.BG2)
         btn_row.pack(fill="x", pady=(round(6*r), 0))
         reg(btn_row, bg="BG2")
@@ -429,16 +429,6 @@ class LipSyncGUILayout:
                       activebackground=self.BORDER,
                       command=self._link_play, **BTN_S),
             bg="BG3", fg="ACCENT", abg="BORDER").pack(side="left")
-
-        # 이어보기 버튼 (초기 비활성 — 기록 있을 때 활성화)
-        self._link_resume_btn = reg(
-            tk.Button(btn_row, text="⏮ 이어보기",
-                      bg=self.BG3, fg=self.TEXT_MID,
-                      activebackground=self.BORDER,
-                      state="disabled",
-                      command=self._link_resume, **BTN_S),
-            bg="BG3", fg="TEXT_MID", abg="BORDER")
-        self._link_resume_btn.pack(side="left", padx=(round(4*r), 0))
 
         # 저장 버튼 (이미지 노란 박스 위치) — yt-dlp 다운로드
         self._link_save_btn = reg(

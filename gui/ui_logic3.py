@@ -122,6 +122,10 @@ class LipSyncGUILogic3:
                             was_running = True
                             self._log_lines.append(
                                 f"[{_time.strftime('%H:%M:%S')}] 🔍 제목 감지: {title}")
+                            # 링크 재생 모드 중이면 라이브 히스토리 제목을 갱신
+                            if getattr(self, "_link_play_mode", False):
+                                self.root.after(
+                                    0, lambda t=title: self._live_hist_update_title(t))
                             self.root.after(
                                 0, lambda t=title: self.record_video_history(t))
                             if old_title and old_title != title:

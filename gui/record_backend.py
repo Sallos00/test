@@ -14,7 +14,8 @@ import tkinter as tk
 from gui._record_impl import (
     _log, _debug_log, _WIN_OK,
     _get_potplayer_video_hwnd, _get_potplayer_rect,
-    _find_ffmpeg, _printwindow_capture,
+    _find_ffmpeg, check_ffmpeg, download_ffmpeg, get_ffmpeg_path,
+    _printwindow_capture,
     _mss_capture_loop, _wgc_capture_hwnd, _printwindow_loop,
     _retiming_audio,
     _write_audio_chunk, _read_audio_chunks_from_file,

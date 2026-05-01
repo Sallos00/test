@@ -522,6 +522,7 @@ class LipSyncGUILogic:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
                 )
 
                 for line in proc.stdout:

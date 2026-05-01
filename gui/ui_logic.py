@@ -589,9 +589,10 @@ class LipSyncGUILogic:
                     ytdlp,
                     "-f", "bestvideo+bestaudio/best",
                     "--merge-output-format", "mp4",
+                    "--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k"
                     "--ffmpeg-location", os.path.dirname(ffmpeg),
                     "--newline",
-                    "-o", os.path.join(dl_dir, "%(title)s.%(ext)s"),
+                    "-o", os.path.join(dl_dir, "%(playlist_title)s/%(title)s.%(ext)s"),
                     url,
                 ]
 
@@ -819,7 +820,31 @@ class LipSyncGUILogic:
             cached = cache[i]
 
             if title:
-                display_text = title[:60] + "…" if len(title) > 60 else title
+                display_title = os.path.splitext(title)[0]
+                display_title = re.sub(r'\s*\([^)]*\)', '', display_title).strip()
+                display_title = re.sub(r'\s*\[[^\]]*\]', '', display_title).strip()
+
+                MAX_LINE = 15
+
+                def _smart_wrap(text: str) -> str:
+                    if len(text) <= MAX_LINE:
+                        return text
+                    lines = []
+                    while len(text) > MAX_LINE:
+                        cut = text.rfind(' ', 0, MAX_LINE)
+                        if cut <= 0:
+                            cut = MAX_LINE
+                        lines.append(text[:cut])
+                        text = text[cut:].lstrip(' ')
+                    if text:
+                        lines.append(text)
+                    return '\n'.join(lines)
+
+                if " - " in display_title:
+                    first, rest = display_title.split(" - ", 1)
+                    display_text = _smart_wrap(first) + "\n- " + _smart_wrap(rest)
+                else:
+                    display_text = _smart_wrap(display_title)
             else:
                 display_text = "(제목 불러오는 중…)"
 
@@ -1070,7 +1095,7 @@ class LipSyncGUILogic:
             resume_btn = tk.Button(
                 row, text="▶ 이어보기",
                 font=("Consolas", max(7, round(8 * r)), "bold"),
-                bg=btn_bg, fg=self.ACCENT3,   # [수정] 녹색
+                bg=btn_bg, fg=self.ACCENT,
                 activebackground=self.BORDER,
                 relief="flat", cursor="hand2",
                 padx=round(6 * r), pady=round(2 * r))

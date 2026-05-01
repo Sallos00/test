@@ -509,6 +509,7 @@ class LipSyncGUILogic:
                     ytdlp,
                     "-f", "bestvideo+bestaudio/best",
                     "--merge-output-format", "mp4",
+                    "--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k"
                     "--ffmpeg-location", os.path.dirname(ffmpeg),
                     "--newline",
                     "-o", os.path.join(dl_dir, "%(title)s.%(ext)s"),

@@ -343,8 +343,125 @@ class LipSyncGUILogic:
 
     # ── yt-dlp 영상 저장 기능 ─────────────────────────────────────────────────
 
+    # yt-dlp 최신 릴리즈 단일 실행파일 (Windows x64)
+    _YTDLP_URL = (
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    )
+    # ffmpeg Builds (yt-dlp 공식 권장 빌드, Windows x64 GPL)
+    _FFMPEG_ZIP_URL = (
+        "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/"
+        "ffmpeg-master-latest-win64-gpl.zip"
+    )
+
+    # ── 공통 다운로드 헬퍼 ───────────────────────────────────────────────────
+
+    def _download_file(self, url: str, dest: str, label: str):
+        """url → dest 로 파일을 내려받는다. 진행률을 상태 레이블에 표시한다.
+        실패 시 임시 파일을 삭제하고 예외를 발생시킨다.
+        """
+        import urllib.request
+        tmp = dest + ".tmp"
+
+        def _hook(block_num, block_size, total_size):
+            if total_size > 0:
+                pct = min(100.0, block_num * block_size * 100.0 / total_size)
+                self.root.after(0, lambda p=pct: self._dl_progress_update(p))
+                self.root.after(0, lambda p=pct: self._link_status(
+                    f"⬇ {label} 설치 중… {p:.0f}%"))
+
+        try:
+            urllib.request.urlretrieve(url, tmp, reporthook=_hook)
+            os.replace(tmp, dest)   # 원자적 이동
+        except Exception as e:
+            if os.path.exists(tmp):
+                try: os.remove(tmp)
+                except Exception: pass
+            raise RuntimeError(f"{label} 다운로드 실패: {e}") from e
+
+    # ── yt-dlp ───────────────────────────────────────────────────────────────
+
+    def _ytdlp_path(self) -> str:
+        return os.path.join(self.APP_DIR, "yt-dlp.exe")
+
+    def _ensure_ytdlp(self) -> str:
+        """yt-dlp 실행파일을 확보해 경로를 반환한다.
+        없으면 GitHub Releases에서 자동 다운로드한다.
+        """
+        import shutil
+
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        found = shutil.which("yt-dlp")
+        if found:
+            self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ yt-dlp (PATH): {found}")
+            return found
+
+        local = self._ytdlp_path()
+        if os.path.isfile(local):
+            self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ yt-dlp (로컬): {local}")
+            return local
+
+        self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ⬇ yt-dlp 다운로드 시작")
+        self.root.after(0, self._dl_progress_show)
+        os.makedirs(self.APP_DIR, exist_ok=True)
+        self._download_file(self._YTDLP_URL, local, "yt-dlp")
+        self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ yt-dlp 설치 완료: {local}")
+        return local
+
+    # ── ffmpeg ────────────────────────────────────────────────────────────────
+
+    def _ffmpeg_path(self) -> str:
+        return os.path.join(self.APP_DIR, "ffmpeg.exe")
+
+    def _ensure_ffmpeg(self) -> str:
+        """ffmpeg 실행파일을 확보해 경로를 반환한다.
+        없으면 yt-dlp/FFmpeg-Builds zip을 내려받아 ffmpeg.exe만 추출한다.
+        """
+        import shutil, zipfile
+
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        found = shutil.which("ffmpeg")
+        if found:
+            self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ ffmpeg (PATH): {found}")
+            return found
+
+        local = self._ffmpeg_path()
+        if os.path.isfile(local):
+            self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ ffmpeg (로컬): {local}")
+            return local
+
+        # zip 다운로드 후 ffmpeg.exe 만 추출
+        self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ⬇ ffmpeg 다운로드 시작")
+        os.makedirs(self.APP_DIR, exist_ok=True)
+        zip_path = local + ".zip"
+        self._download_file(self._FFMPEG_ZIP_URL, zip_path, "ffmpeg")
+
+        self.root.after(0, lambda: self._link_status("⬇ ffmpeg 압축 해제 중…"))
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                # zip 내부 경로: ffmpeg-master-.../bin/ffmpeg.exe
+                target = next(
+                    (n for n in zf.namelist() if n.endswith("/ffmpeg.exe")),
+                    None
+                )
+                if target is None:
+                    raise RuntimeError("zip 안에서 ffmpeg.exe를 찾을 수 없습니다.")
+                with zf.open(target) as src, open(local, "wb") as dst:
+                    dst.write(src.read())
+        finally:
+            try: os.remove(zip_path)
+            except Exception: pass
+
+        self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ ffmpeg 설치 완료: {local}")
+        return local
+
     def _link_save(self):
-        """저장 버튼 콜백 — yt-dlp를 사용해 입력창의 URL을 다운로드한다."""
+        """저장 버튼 콜백 — yt-dlp + ffmpeg를 사용해 최고 화질로 저장한다.
+        두 실행파일이 없으면 최초 1회 자동 다운로드 후 APP_DIR에 캐시한다.
+        """
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
 
@@ -353,24 +470,46 @@ class LipSyncGUILogic:
             self._link_status("⚠ URL을 입력하세요.", warn=True)
             return
 
-        # 저장 디렉토리: ~/Downloads/
         import pathlib
         dl_dir = str(pathlib.Path.home() / "Downloads")
         try:
             os.makedirs(dl_dir, exist_ok=True)
         except Exception:
-            dl_dir = self.APP_DIR  # 폴백: 앱 디렉토리
+            dl_dir = self.APP_DIR
 
         def _run():
             ts = _time.strftime("%H:%M:%S")
             try:
+                # ── 1) yt-dlp 확보 ────────────────────────────────────────────
+                try:
+                    ytdlp = self._ensure_ytdlp()
+                except Exception as e:
+                    self.root.after(0, lambda: self._link_status(
+                        f"❌ yt-dlp 설치 실패: {e}", warn=True))
+                    self.root.after(0, self._dl_progress_hide)
+                    self._log_lines.append(f"[{ts}] ❌ yt-dlp 설치 실패: {e}")
+                    return
+
+                # ── 2) ffmpeg 확보 ────────────────────────────────────────────
+                try:
+                    ffmpeg = self._ensure_ffmpeg()
+                except Exception as e:
+                    self.root.after(0, lambda: self._link_status(
+                        f"❌ ffmpeg 설치 실패: {e}", warn=True))
+                    self.root.after(0, self._dl_progress_hide)
+                    self._log_lines.append(f"[{ts}] ❌ ffmpeg 설치 실패: {e}")
+                    return
+
+                # ── 3) 영상 다운로드 (bestvideo+bestaudio → mp4 병합) ─────────
+                self.root.after(0, lambda: self._dl_progress_update(0.0))
                 self.root.after(0, lambda: self._link_status("동영상을 저장하고 있습니다."))
                 self.root.after(0, self._dl_progress_show)
 
                 cmd = [
-                    "yt-dlp",
+                    ytdlp,
                     "-f", "bestvideo+bestaudio/best",
                     "--merge-output-format", "mp4",
+                    "--ffmpeg-location", os.path.dirname(ffmpeg),
                     "--newline",
                     "-o", os.path.join(dl_dir, "%(title)s.%(ext)s"),
                     url,
@@ -398,27 +537,18 @@ class LipSyncGUILogic:
                     self.root.after(0, lambda: self._link_status(
                         f"✅ 저장 완료 → {dl_dir}"))
                     self.root.after(2500, self._dl_progress_hide)
-                    self._log_lines.append(
-                        f"[{ts}] ✅ yt-dlp 저장 완료: {url}")
+                    self._log_lines.append(f"[{ts}] ✅ yt-dlp 저장 완료: {url}")
                 else:
                     self.root.after(0, lambda: self._link_status(
-                        "❌ 저장 실패. URL 또는 yt-dlp를 확인하세요.", warn=True))
+                        "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
                     self.root.after(0, self._dl_progress_hide)
                     self._log_lines.append(
                         f"[{ts}] ❌ yt-dlp 저장 실패 (code {proc.returncode}): {url}")
 
-            except FileNotFoundError:
-                self.root.after(0, lambda: self._link_status(
-                    "❌ yt-dlp를 찾을 수 없습니다. 설치 후 재시도하세요.", warn=True))
-                self.root.after(0, self._dl_progress_hide)
-                self._log_lines.append(
-                    f"[{ts}] ❌ yt-dlp 없음 (FileNotFoundError)")
             except Exception as e:
-                self.root.after(0, lambda: self._link_status(
-                    f"❌ 오류: {e}", warn=True))
+                self.root.after(0, lambda: self._link_status(f"❌ 오류: {e}", warn=True))
                 self.root.after(0, self._dl_progress_hide)
-                self._log_lines.append(
-                    f"[{ts}] ❌ yt-dlp 예외: {e}")
+                self._log_lines.append(f"[{ts}] ❌ yt-dlp 예외: {e}")
 
         threading.Thread(target=_run, daemon=True, name="yt-dlp-save").start()
 

@@ -510,6 +510,7 @@ class LipSyncGUIRecordOpen:
             def _run_auto():
                 from win32_utils import find_potplayer_hwnd, get_playback_info
                 from gui.record_backend import _CV2_OK, _AudioRecorder, _ScreenRecorder
+                from gui._record_impl import check_ffmpeg, download_ffmpeg
                 import psutil
 
                 if not _CV2_OK:
@@ -517,6 +518,25 @@ class LipSyncGUIRecordOpen:
                         text="⚠ opencv-python 필요", fg="#e0a03c"))
                     state["auto_rec_active"] = False
                     return
+
+                # ── [NEW] ffmpeg 확인 / 자동 다운로드 ───────────────────────────
+                try:
+                    _ff = check_ffmpeg()
+                    if not _ff:
+                        self.root.after(0, lambda: rec_status.config(
+                            text="⬇ ffmpeg 다운로드 중...", fg=self.TEXT_MID))
+                        _log("⬇ ffmpeg 없음 → 자동 다운로드 시작 (자동 녹화)")
+                        _ff = download_ffmpeg()
+                        _log(f"✅ ffmpeg 다운로드 완료: {_ff}")
+                    else:
+                        _log(f"✅ ffmpeg 확인: {_ff}")
+                except Exception as _fe:
+                    self.root.after(0, lambda e=_fe: rec_status.config(
+                        text=f"⚠ ffmpeg 오류: {e}", fg="#e0a03c"))
+                    _log(f"❌ ffmpeg 준비 실패: {_fe}")
+                    state["auto_rec_active"] = False
+                    return
+                # ────────────────────────────────────────────────────────────────
 
                 # 1) 영상 재생 감지
                 self.root.after(0, lambda: rec_status.config(
@@ -637,6 +657,25 @@ class LipSyncGUIRecordOpen:
             end_sec   = parse_time(end_time_var.get())   if use_range else None
 
             def _run():
+                # ── [NEW] ffmpeg 확인 / 자동 다운로드 ───────────────────────────
+                from gui._record_impl import check_ffmpeg, download_ffmpeg
+                try:
+                    _ff = check_ffmpeg()
+                    if not _ff:
+                        self.root.after(0, lambda: rec_status.config(
+                            text="⬇ ffmpeg 다운로드 중...", fg=self.TEXT_MID))
+                        _log("⬇ ffmpeg 없음 → 자동 다운로드 시작")
+                        _ff = download_ffmpeg()
+                        _log(f"✅ ffmpeg 다운로드 완료: {_ff}")
+                    else:
+                        _log(f"✅ ffmpeg 확인: {_ff}")
+                except Exception as _fe:
+                    self.root.after(0, lambda e=_fe: rec_status.config(
+                        text=f"⚠ ffmpeg 오류: {e}", fg="#e0a03c"))
+                    _log(f"❌ ffmpeg 준비 실패: {_fe}")
+                    return
+                # ────────────────────────────────────────────────────────────────
+
                 if use_range and start_sec is not None:
                     from win32_utils import find_potplayer_hwnd, get_playback_info
                     self.root.after(0, lambda: rec_status.config(

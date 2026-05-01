@@ -27,14 +27,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller Cython setuptools wheel
 
-      - name: ffmpeg 다운로드 (번들용)
-        run: |
-          curl -L "https://github.com/BtbN/ffmpeg-builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -o ffmpeg.zip
-          7z e ffmpeg.zip "*/bin/ffmpeg.exe" -o"." -r
-          if not exist ffmpeg.exe (echo "ffmpeg 압축 해제 실패" && exit 1)
-          echo "ffmpeg 준비 완료"
-        shell: cmd
-
       - name: 아이콘 생성
         run: python scripts/make_icon.py
 
@@ -179,7 +171,6 @@ jobs:
           --collect-data cv2
           --add-data "lbpcascade_animeface.xml;."
           --add-data "app.ico;."
-          --add-data "ffmpeg.exe;."
           main.py
 
       - name: 빌드 결과 확인

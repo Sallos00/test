@@ -121,6 +121,13 @@ class LipSyncGUIRecordOpen:
                     _rec_btn_ref[0].config(state=s)
                 if _cap_btn_ref[0]:
                     _cap_btn_ref[0].config(state=s)
+                # 링크 탭 저장 위치 표시 연동
+                _lsv = getattr(self, "_link_save_dir_var", None)
+                if _lsv is not None:
+                    try:
+                        _lsv.set(path)
+                    except Exception:
+                        pass
 
         def open_dir():
             d = state["save_dir"]

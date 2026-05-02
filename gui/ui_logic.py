@@ -768,9 +768,13 @@ class LipSyncGUILogic:
 
             deleted = []
 
-            # yt-dlp stdout 에서 추적한 파일만 삭제
-            for path in tracked_snapshot:
-                # 파일 자체 + .part / .ytdl 변형(미완성 조각) 삭제
+            # 취소 시점 스냅샷 + 취소 이후 worker thread 가 추가한 경로를 병합
+            # (경쟁 조건: 스냅샷 캡처 직후에 Destination 라인이 출력된 경우 누락 방지)
+            live_paths = getattr(self, "_link_save_tracked_files", set())
+            all_paths  = tracked_snapshot | live_paths
+
+            # yt-dlp stdout 에서 추적한 파일 + .part/.ytdl 임시 파일 모두 삭제
+            for path in all_paths:
                 for candidate in (path, path + ".part", path + ".ytdl"):
                     if os.path.isfile(candidate):
                         try:
@@ -1444,26 +1448,28 @@ class LipSyncGUILogic:
     def _send_url_to_potplayer(self, hwnd: int, url: str):
         """PotPlayer 창에 URL을 클립보드 Ctrl+V로 전달한다.
 
-        [버그2 수정] 기존 SetForegroundWindow + keybd_event 방식은
-        AutoSinc 창이 포커스를 잃기 전에 Ctrl+V 가 잘못된 창으로 전달되는
-        경쟁 조건이 있었다. 수정 후:
-          - Win32 클립보드 API를 워커 스레드에서 직접 호출 (스레드 세이프)
-          - post_key_to_potplayer(ctrl=True) 로 POT_SEND_VIRTUAL_KEY 커맨드 전송
-            → PotPlayer 포커스 없이도 Ctrl+V 를 확실히 전달
-          - Facebook(CDN URL) · 일반 URL 모두 동일 로직 적용
+        PotPlayer는 클립보드에 복사된 URL을 Ctrl+V로 받으면 해당 링크의
+        영상을 직접 재생한다 (Facebook CDN URL 포함 모든 URL 공통 적용).
+        SetForegroundWindow + keybd_event 방식으로 실제 키 입력을 전달한다.
         """
-        from win32_utils import post_key_to_potplayer as _pot_key
+        import ctypes
 
-        # ① Win32 API로 클립보드 설정 (스레드 세이프 — Tk 메인 스레드 불필요)
+        # ① Win32 API로 클립보드 설정 (워커 스레드 세이프)
         ok = _win32_set_clipboard(url)
         if not ok:
-            # 클립보드 API 실패 시 Tkinter 방식으로 폴백 (메인 스레드 예약)
             self.root.after(0, lambda: self._clipboard_set(url))
-        _time.sleep(0.2)    # 클립보드 반영 + 메인 스레드 after 처리 대기
 
-        # ② PotPlayer에 Ctrl+V 전송 (포커스 불필요)
-        #    POT_SEND_VIRTUAL_KEY lParam: VK_V(0x56) | CTRL_MODIFIER(0x0200)
-        _pot_key(hwnd, 0x56, ctrl=True)
+        # ② PotPlayer 포커스 후 Ctrl+V 전달
+        _time.sleep(0.3)
+        VK_CONTROL = 0x11
+        VK_V       = 0x56
+        user32 = ctypes.windll.user32
+        user32.SetForegroundWindow(hwnd)
+        _time.sleep(0.1)
+        user32.keybd_event(VK_CONTROL, 0, 0, 0)
+        user32.keybd_event(VK_V,       0, 0, 0)
+        user32.keybd_event(VK_V,       0, 2, 0)   # KEYUP
+        user32.keybd_event(VK_CONTROL, 0, 2, 0)   # KEYUP
         _time.sleep(0.1)
 
 

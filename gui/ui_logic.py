@@ -258,7 +258,7 @@ class LipSyncGUILogic:
     def _link_play(self):
         """재생 버튼 콜백.
         1) URL 확인 → 2) Livehistory.json 생성 → 3) PotPlayer 확인/실행
-        4) Facebook이면 스트림 URL 추출 → 5) 클립보드 복사+Ctrl+V 전달 → 6) 기록 저장
+        4) 클립보드 복사+Ctrl+V 전달 → 5) 기록 저장
         """
         self._ensure_link_play_mode_state()
         if not hasattr(self, "_log_lines"):
@@ -288,30 +288,21 @@ class LipSyncGUILogic:
                     self._link_status("❌ PotPlayer 핸들을 찾을 수 없습니다.", warn=True)
                     return
 
-                # ── Facebook : yt-dlp -j로 스트림 URL + 제목 추출 ──────────
-                # ── Soop    : Facebook 방식과 동일하게 yt-dlp -j 추출 ──────
-                # ── 그 외   : 원본 URL 그대로 PotPlayer에 전달 ────────────
-                is_facebook = bool(re.search(
-                    r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
+                # ── Soop : yt-dlp -j 추출 ─────────────────────────────────
+                # ── 그 외: 원본 URL 그대로 PotPlayer에 전달 ────────────────
                 is_soop = bool(_SOOP_RE.search(url))
 
                 self._log_lines.append(
                     f"[{ts}] 🔗 링크 재생 시작 | 원본 URL: {url} | "
-                    f"platform={'facebook' if is_facebook else 'soop' if is_soop else 'general'}")
+                    f"platform={'soop' if is_soop else 'general'}")
 
-                if is_facebook:
-                    self._link_status("⏳ Facebook 영상 정보 추출 중…")
-                    play_url, real_title = self._fetch_fb_play_info(url)
-                    if play_url == url:
-                        # _fetch_fb_play_info 실패 → --get-url 방식 폴백
-                        play_url = self._resolve_play_url(url)
-                elif is_soop:
-                    # Soop: Facebook 방식과 동일하게 yt-dlp로 스트림 URL 추출
+                if is_soop:
+                    # Soop: yt-dlp로 스트림 URL 추출
                     self._link_status("⏳ Soop 영상 정보 추출 중…")
                     play_url, real_title = self._fetch_soop_play_info(url)
                     # _fetch_soop_play_info 실패 시 play_url == url(원본) → fallback 로그는 내부 기록
                 else:
-                    # 유튜브·트위치·일반 URL 등: 원본 URL 그대로 PotPlayer에 전달
+                    # 유튜브·치지직·페이스북·일반 URL 등: 원본 URL 그대로 PotPlayer에 전달
                     play_url   = url
                     real_title = ""
                     self._log_lines.append(
@@ -468,10 +459,9 @@ class LipSyncGUILogic:
     def _live_hist_update_title(self, title: str):
         """마지막으로 기록된 항목의 제목을 PotPlayer 창 제목으로 갱신한다.
 
-        [버그1 수정] Facebook 재생 시 PotPlayer 창 제목이 CDN URL 이나
-        미디어 파일명(video_12345.mp4)으로 표시될 수 있다.
-        이 경우 기존에 _fetch_fb_play_info 로 저장된 실제 영상 제목을
-        CDN URL 패턴의 '가짜 제목'으로 덮어쓰지 않도록 차단한다.
+        PotPlayer 창 제목이 CDN URL 이나 미디어 파일명(video_12345.mp4)으로
+        표시되는 경우 실제 영상 제목을 CDN URL 패턴의 '가짜 제목'으로
+        덮어쓰지 않도록 차단한다.
 
         [수정] 동일 계열(시리즈) 이전 기록이 있으면 덮어쓰기(중복 제거).
         """
@@ -1404,115 +1394,10 @@ class LipSyncGUILogic:
         """기록 목록의 이어보기 버튼 클릭 — 특정 URL로 재생 (URL 입력창 미표시)."""
         self._link_play_url(url)
 
-    def _fetch_fb_play_info(self, url: str):
-        """Facebook URL에서 실제 영상 제목과 재생용 스트림 URL을 동시에 추출한다.
-
-        [버그1 수정] 기존 _resolve_play_url 은 스트림 URL 만 반환했고
-        제목은 PotPlayer 창 제목(CDN 파일명)을 사용했다.
-        이 함수는 yt-dlp --dump-json(-j) 으로 메타데이터를 한 번에 읽어
-        실제 영상 제목(fulltitle > title 우선)을 제공한다.
-
-        Returns:
-            (stream_url, real_title)
-            추출 실패 시 (original_url, "") 반환
-        """
-        if not hasattr(self, "_log_lines"):
-            self._log_lines = collections.deque(maxlen=100)
-
-        ts = _time.strftime("%H:%M:%S")
-        self._log_lines.append(f"[{ts}] 🔍 Facebook 영상 메타데이터 추출 시도: {url}")
-
-        try:
-            ytdlp = self._ensure_ytdlp()
-        except Exception as e:
-            self._log_lines.append(
-                f"[{_time.strftime('%H:%M:%S')}] ⚠ yt-dlp 없음: {e}")
-            return url, ""
-
-        def _parse_info(raw_json: str):
-            """JSON 파싱 후 (stream_url, title) 반환."""
-            info = json.loads(raw_json.strip().splitlines()[0])
-            # 제목 우선순위: fulltitle > title > webpage_url_basename
-            title = (
-                info.get("fulltitle") or
-                info.get("title") or
-                info.get("webpage_url_basename") or ""
-            )
-            stream_url = _pick_best_stream_url(info) or url
-            return stream_url, title
-
-        base_cmd = [
-            ytdlp,
-            "-j",                        # --dump-json: 단일 JSON 출력
-            "--no-playlist",
-            "-f", "bestvideo+bestaudio/best",
-            "--extractor-retries", "2",
-            "--socket-timeout", "15",
-        ]
-
-        # Chrome → Firefox → Edge → Chromium 순으로 쿠키 시도
-        for browser in ("chrome", "firefox", "edge", "chromium"):
-            try:
-                cmd = base_cmd + [
-                    "--cookies-from-browser", browser,
-                    url,
-                ]
-                proc = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=35,
-                    creationflags=0x08000000,   # CREATE_NO_WINDOW
-                )
-                if proc.returncode == 0 and proc.stdout.strip():
-                    stream_url, title = _parse_info(proc.stdout)
-                    self._log_lines.append(
-                        f"[{_time.strftime('%H:%M:%S')}] ✅ Facebook 정보 추출 완료 "
-                        f"({browser}) 제목={title!r}")
-                    return stream_url, title
-                self._log_lines.append(
-                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 정보 추출 실패 "
-                    f"({browser}), 다음 브라우저 시도…")
-            except subprocess.TimeoutExpired:
-                self._log_lines.append(
-                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 타임아웃 ({browser})")
-            except (json.JSONDecodeError, Exception) as e:
-                self._log_lines.append(
-                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 예외 ({browser}): {e}")
-
-        # 쿠키 없이 재시도 (공개 영상)
-        try:
-            proc2 = subprocess.run(
-                base_cmd + [url],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=25,
-                creationflags=0x08000000,
-            )
-            if proc2.returncode == 0 and proc2.stdout.strip():
-                stream_url, title = _parse_info(proc2.stdout)
-                self._log_lines.append(
-                    f"[{_time.strftime('%H:%M:%S')}] ✅ Facebook 정보 추출 완료 "
-                    f"(쿠키 없음) 제목={title!r}")
-                return stream_url, title
-        except Exception as e:
-            self._log_lines.append(
-                f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 쿠키 없음 추출 실패: {e}")
-
-        self._log_lines.append(
-            f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 정보 추출 전체 실패 → 원본 URL 사용")
-        return url, ""
-
     def _fetch_soop_play_info(self, url: str):
         """Soop(AfreecaTV) URL에서 실제 영상 제목과 재생용 스트림 URL을 추출한다.
 
-        Facebook 방식과 동일하게 yt-dlp -j (dump-json)으로 메타데이터를 읽고
+        yt-dlp -j (dump-json)으로 메타데이터를 읽고
         스트림 URL(m3u8 포함)과 실제 제목을 반환한다.
 
         로그에 기록하는 항목:
@@ -1620,133 +1505,11 @@ class LipSyncGUILogic:
             f"→ 원본 URL fallback 사용 | 원본 URL: {url}")
         return url, ""
 
-    def _resolve_play_url(self, url: str) -> str:
-        """재생용 URL을 반환한다.
-        Facebook 등 PotPlayer가 직접 처리하지 못하는 플랫폼은
-        yt-dlp -g 로 실제 스트림 URL을 추출해 반환한다.
-        추출에 실패하거나 일반 URL이면 원본 URL을 그대로 반환한다.
-
-        [Facebook 처리 근거]
-        PotPlayer는 Facebook URL을 Ctrl+V로 받아도 스트림을 자동 추출하지 못함.
-        yt-dlp --get-url 로 실제 CDN 스트림 URL을 얻은 뒤 PotPlayer에 전달하면
-        정상 재생된다. 브라우저 쿠키(--cookies-from-browser)를 사용해 로그인
-        세션을 자동 공유한다.
-        """
-        if not url:
-            return url
-
-        is_facebook = bool(re.search(
-            r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
-
-        if not is_facebook:
-            return url   # 일반 URL — 원본 그대로
-
-        if not hasattr(self, "_log_lines"):
-            self._log_lines = collections.deque(maxlen=100)
-
-        ts = _time.strftime("%H:%M:%S")
-        self._log_lines.append(
-            f"[{ts}] 🔍 Facebook 스트림 URL 추출 시도: {url}")
-        self.root.after(0, lambda: self._link_status(
-            "⏳ Facebook 스트림 URL 추출 중…"))
-
-        try:
-            ytdlp = self._ensure_ytdlp()
-        except Exception as e:
-            self._log_lines.append(
-                f"[{_time.strftime('%H:%M:%S')}] ⚠ yt-dlp 없어 Facebook 직접 전달: {e}")
-            return url
-
-        # Chrome → Firefox → Edge 순으로 쿠키 추출 시도
-        for browser in ("chrome", "firefox", "edge", "chromium"):
-            try:
-                cmd = [
-                    ytdlp,
-                    "--get-url",
-                    "--no-playlist",
-                    "-f", "bestvideo+bestaudio/best/bestvideo/bestaudio",
-                    "--cookies-from-browser", browser,
-                    "--extractor-retries", "2",
-                    "--socket-timeout", "15",
-                    url,
-                ]
-                proc = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=30,
-                    creationflags=0x08000000,   # CREATE_NO_WINDOW
-                )
-                if proc.returncode == 0:
-                    # stdout 에 스트림 URL이 줄바꿈으로 구분되어 출력될 수 있음
-                    # (video + audio 따로 나오는 경우) → 첫 번째 줄 사용
-                    lines = [l.strip() for l in proc.stdout.splitlines()
-                             if l.strip().startswith("http")]
-                    if lines:
-                        resolved = lines[0]
-                        self._log_lines.append(
-                            f"[{_time.strftime('%H:%M:%S')}] ✅ Facebook 스트림 추출 완료 "
-                            f"({browser}): {resolved[:80]}")
-                        return resolved
-                # 해당 브라우저 실패 → 다음 브라우저 시도
-                self._log_lines.append(
-                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 실패 ({browser}), "
-                    f"다음 브라우저 시도…")
-            except subprocess.TimeoutExpired:
-                self._log_lines.append(
-                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 타임아웃 ({browser})")
-            except Exception as e:
-                self._log_lines.append(
-                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 예외 ({browser}): {e}")
-
-        # 쿠키 없이 재시도 (공개 영상)
-        try:
-            cmd_no_cookie = [
-                ytdlp,
-                "--get-url",
-                "--no-playlist",
-                "-f", "bestvideo+bestaudio/best/bestvideo/bestaudio",
-                "--extractor-retries", "2",
-                "--socket-timeout", "15",
-                url,
-            ]
-            proc2 = subprocess.run(
-                cmd_no_cookie,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=25,
-                creationflags=0x08000000,
-            )
-            if proc2.returncode == 0:
-                lines = [l.strip() for l in proc2.stdout.splitlines()
-                         if l.strip().startswith("http")]
-                if lines:
-                    self._log_lines.append(
-                        f"[{_time.strftime('%H:%M:%S')}] ✅ Facebook 스트림 추출 완료 "
-                        f"(쿠키 없음): {lines[0][:80]}")
-                    return lines[0]
-        except Exception:
-            pass
-
-        # 모두 실패 → 원본 URL 그대로 (PotPlayer 자체 처리에 위임)
-        self._log_lines.append(
-            f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 스트림 추출 실패 → 원본 URL 사용")
-        self.root.after(0, lambda: self._link_status(
-            "⚠ Facebook 스트림 추출 실패. 브라우저 로그인 상태를 확인하세요.",
-            warn=True))
-        return url
-
     def _send_url_to_potplayer(self, hwnd: int, url: str):
         """PotPlayer 창에 URL을 클립보드 Ctrl+V로 전달한다.
 
         PotPlayer는 클립보드에 복사된 URL을 Ctrl+V로 받으면 해당 링크의
-        영상을 직접 재생한다 (Facebook CDN URL 포함 모든 URL 공통 적용).
+        영상을 직접 재생한다 (모든 URL 공통 적용).
         SetForegroundWindow + keybd_event 방식으로 실제 키 입력을 전달한다.
         """
         import ctypes
@@ -1771,9 +1534,7 @@ class LipSyncGUILogic:
 
 
     def _link_play_url(self, url: str):
-        """지정된 URL을 PotPlayer에서 재생한다. 입력창을 수정하지 않는다.
-        [수정] Facebook URL은 _resolve_play_url 로 스트림 URL을 먼저 추출한다.
-        """
+        """지정된 URL을 PotPlayer에서 재생한다. 입력창을 수정하지 않는다."""
         self._ensure_link_play_mode_state()
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
@@ -1797,30 +1558,21 @@ class LipSyncGUILogic:
                     self._link_status("❌ PotPlayer 핸들을 찾을 수 없습니다.", warn=True)
                     return
 
-                # ── Facebook : yt-dlp -j로 스트림 URL + 제목 추출 ──────────
-                # ── Soop    : Facebook 방식과 동일하게 yt-dlp -j 추출 ──────
-                # ── 그 외   : 원본 URL 그대로 PotPlayer에 전달 ────────────
-                is_facebook = bool(re.search(
-                    r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
+                # ── Soop : yt-dlp -j 추출 ─────────────────────────────────
+                # ── 그 외: 원본 URL 그대로 PotPlayer에 전달 ────────────────
                 is_soop = bool(_SOOP_RE.search(url))
 
                 self._log_lines.append(
                     f"[{ts}] 🔗 이어보기 재생 시작 | 원본 URL: {url} | "
-                    f"platform={'facebook' if is_facebook else 'soop' if is_soop else 'general'}")
+                    f"platform={'soop' if is_soop else 'general'}")
 
-                if is_facebook:
-                    self._link_status("⏳ Facebook 영상 정보 추출 중…")
-                    play_url, real_title = self._fetch_fb_play_info(url)
-                    if play_url == url:
-                        # _fetch_fb_play_info 실패 → --get-url 방식 폴백
-                        play_url = self._resolve_play_url(url)
-                elif is_soop:
-                    # Soop: Facebook 방식과 동일하게 yt-dlp로 스트림 URL 추출
+                if is_soop:
+                    # Soop: yt-dlp로 스트림 URL 추출
                     self._link_status("⏳ Soop 영상 정보 추출 중…")
                     play_url, real_title = self._fetch_soop_play_info(url)
                     # 실패 시 play_url == url(원본) → fallback 로그는 내부 기록
                 else:
-                    # 유튜브·트위치·일반 URL 등: 원본 URL 그대로 PotPlayer에 전달
+                    # 유튜브·치지직·페이스북·일반 URL 등: 원본 URL 그대로 PotPlayer에 전달
                     play_url   = url
                     real_title = ""
                     self._log_lines.append(

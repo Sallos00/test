@@ -44,6 +44,8 @@ WM_KEYUP             = 0x0101
 POT_COMMAND          = 0x0400
 POT_SEND_VIRTUAL_KEY = 0x5010   # wParam for WM_USER (포커스 없이 가상 키 전송)
 POT_VIRTUAL_KEY_SHIFT = 0x0100
+POT_VIRTUAL_KEY_CTRL  = 0x0200   # HOTKEYF_CONTROL × 0x100
+POT_VIRTUAL_KEY_ALT   = 0x0400   # HOTKEYF_ALT × 0x100
 POT_GET_TOTAL_TIME     = 0x5002   # wParam for WM_USER
 POT_GET_CURRENT_TIME   = 0x5004   # wParam for WM_USER
 POT_SET_CURRENT_TIME   = 0x5005   # wParam for WM_USER
@@ -112,12 +114,25 @@ def find_potplayer_hwnd():
     _hwnd_cache[1] = now
     return hwnd
 
-def post_key_to_potplayer(hwnd, vk, shift=False):
-    """POT_SEND_VIRTUAL_KEY로 팟플레이어에 키 전송 (포커스/게임 무관)."""
-    if not hwnd: return
-    lparam = vk
+def post_key_to_potplayer(hwnd, vk, shift=False, ctrl=False, alt=False):
+    """POT_SEND_VIRTUAL_KEY로 팟플레이어에 키 전송 (포커스/게임 무관).
+
+    Args:
+        hwnd:  PotPlayer 창 핸들
+        vk:    가상 키 코드 (VK_*)
+        shift: Shift 수정자 포함 여부
+        ctrl:  Ctrl 수정자 포함 여부 (Ctrl+V 등 단축키 전송에 사용)
+        alt:   Alt 수정자 포함 여부
+    """
+    if not hwnd:
+        return
+    lparam = vk & 0xFF
     if shift:
-        lparam = lparam | POT_VIRTUAL_KEY_SHIFT
+        lparam |= POT_VIRTUAL_KEY_SHIFT
+    if ctrl:
+        lparam |= POT_VIRTUAL_KEY_CTRL
+    if alt:
+        lparam |= POT_VIRTUAL_KEY_ALT
     _user32.PostMessageW(hwnd, POT_COMMAND, POT_SEND_VIRTUAL_KEY, lparam)
 
 def is_potplayer_playing(hwnd):

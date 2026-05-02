@@ -232,8 +232,11 @@ class LipSyncGUILayout:
         sync_frame = reg(tk.Frame(container, bg=self.BG), bg="BG")
         self._tab_frames["sync"] = sync_frame
 
-        card = reg(tk.Frame(sync_frame, bg=self.BG2, pady=12, padx=16), bg="BG2")
-        card.pack(fill="x", padx=P2, pady=(round(12*r), 0))
+        # [수정] pady=12, padx=16 하드코딩 → r 배율 적용 (DPI 스케일 대응)
+        #        pack padx 도 P2 로 통일 (link/history 탭과 동일 기준)
+        card = reg(tk.Frame(sync_frame, bg=self.BG2,
+                            pady=round(10*r), padx=round(10*r)), bg="BG2")
+        card.pack(fill="x", padx=P2, pady=(round(10*r), 0))
 
         def status_row(parent, label):
             row = reg(tk.Frame(parent, bg=self.BG2), bg="BG2")
@@ -277,8 +280,9 @@ class LipSyncGUILayout:
                             bg="BG2", fg="TEXT_MID")
         self._dur_lbl.pack(side="left", padx=4, anchor="center")
 
-        or_ = reg(tk.Frame(sync_frame, bg=self.BG, padx=P), bg="BG")
-        or_.pack(fill="x", pady=(round(12*r), 0))
+        # [수정] padx=P → padx=P2 (link/history 탭의 hdr_row 와 동일 기준으로 통일)
+        or_ = reg(tk.Frame(sync_frame, bg=self.BG, padx=P2), bg="BG")
+        or_.pack(fill="x", pady=(round(10*r), 0))
         self._oped_btn = reg(
             tk.Button(or_, font=("Consolas", max(8, round(9*r)), "bold"),
                       relief="flat", cursor="hand2",
@@ -289,7 +293,8 @@ class LipSyncGUILayout:
 
         reg(tk.Frame(sync_frame, bg=self.BORDER, height=1),
             bg="BORDER").pack(fill="x", padx=P2, pady=(round(8*r), 0))
-        mf = reg(tk.Frame(sync_frame, bg=self.BG, pady=round(6*r), padx=P), bg="BG")
+        # [수정] padx=P → padx=P2 (link/history 탭의 hdr_row 와 동일 기준으로 통일)
+        mf = reg(tk.Frame(sync_frame, bg=self.BG, pady=round(6*r), padx=P2), bg="BG")
         mf.pack(fill="x")
         tp = reg(tk.Frame(mf, bg=self.BG), bg="BG")
         tp.pack(fill="x")

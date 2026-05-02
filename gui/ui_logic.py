@@ -36,6 +36,112 @@ from win32_utils import find_potplayer_hwnd, get_playback_info, do_oped_skip, pi
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 모듈 수준 Win32 / yt-dlp 보조 함수
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _win32_set_clipboard(text: str) -> bool:
+    """Win32 API로 클립보드에 유니코드 텍스트를 설정한다 (스레드 세이프).
+
+    Tkinter의 root.clipboard_clear/append 는 메인 스레드에서만 안전하지만,
+    이 함수는 Win32 직접 호출이므로 워커 스레드에서도 사용 가능하다.
+    성공 시 True, 실패 시 False 반환.
+    """
+    import ctypes
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE  = 0x0002
+    k32 = ctypes.windll.kernel32
+    u32 = ctypes.windll.user32
+    try:
+        encoded = (text + '\0').encode('utf-16-le')
+        h = k32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+        if not h:
+            return False
+        ptr = k32.GlobalLock(h)
+        if not ptr:
+            k32.GlobalFree(h)
+            return False
+        ctypes.memmove(ptr, encoded, len(encoded))
+        k32.GlobalUnlock(h)
+        if not u32.OpenClipboard(0):
+            k32.GlobalFree(h)
+            return False
+        u32.EmptyClipboard()
+        if not u32.SetClipboardData(CF_UNICODETEXT, h):
+            # 실패 시 메모리는 시스템이 소유하지 않으므로 직접 해제
+            u32.CloseClipboard()
+            k32.GlobalFree(h)
+            return False
+        # 성공 시 시스템이 h 소유 → GlobalFree 금지
+        u32.CloseClipboard()
+        return True
+    except Exception:
+        return False
+
+
+_CDN_TITLE_RE = re.compile(
+    r'^https?://'                   # 전체 URL이 제목으로 표시되는 경우
+    r'|^video[-_]?\d{4,}'          # Facebook CDN 파일명 (video_12345, video12345678)
+    r'|\.m3u8(?:[?#]|$)'           # HLS 매니페스트 URL
+    r'|\.mp4(?:[?#]|$)'            # 직접 MP4 링크
+    r'|[&?]Expires=\d',            # CDN 서명 쿼리스트링 잔재
+    re.IGNORECASE,
+)
+
+def _is_cdn_url_title(title: str) -> bool:
+    """제목 문자열이 CDN URL 또는 미디어 파일명 패턴이면 True 반환.
+
+    PotPlayer가 직접 스트림 URL을 재생하면 창 제목이 CDN URL이나
+    파일명(video_1234.mp4)으로 표시되는 경우가 있다.
+    이런 '가짜 제목'으로 실제 영상 제목을 덮어쓰는 것을 방지하기 위해 사용.
+    """
+    if not title:
+        return False
+    if _CDN_TITLE_RE.search(title):
+        return True
+    # 공백이 없고 매우 긴 문자열 → URL 잔재 또는 해시 (실제 제목이 아님)
+    if len(title) > 80 and ' ' not in title and '한' not in title:
+        return True
+    return False
+
+
+def _pick_best_stream_url(info: dict) -> str:
+    """yt-dlp JSON 메타데이터에서 PotPlayer 재생에 최적인 스트림 URL을 선택한다.
+
+    선택 우선순위:
+      1. info['url'] — 단일 포맷(영상+오디오 혼합)이 있으면 그대로 사용
+      2. formats 중 vcodec + acodec 모두 포함(혼합) 포맷 → 높이 기준 최고화질
+      3. formats 중 영상만 있는 포맷 → 높이 기준 최고화질
+      4. formats 마지막 항목 (최후 보루)
+    """
+    direct = info.get("url", "")
+    if direct and direct.startswith("http"):
+        return direct
+    formats = info.get("formats", [])
+    if not formats:
+        return ""
+    merged = [
+        f for f in formats
+        if f.get("vcodec", "none") not in ("none", None)
+        and f.get("acodec", "none") not in ("none", None)
+    ]
+    if merged:
+        merged.sort(key=lambda f: f.get("height", 0) or 0, reverse=True)
+        url = merged[0].get("url", "")
+        if url:
+            return url
+    video_only = [
+        f for f in formats
+        if f.get("vcodec", "none") not in ("none", None)
+    ]
+    if video_only:
+        video_only.sort(key=lambda f: f.get("height", 0) or 0, reverse=True)
+        url = video_only[0].get("url", "")
+        if url:
+            return url
+    return formats[-1].get("url", "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 링크 재생 모드: 이 플래그가 True일 때 싱크 보정 · OP/ED 비활성화 처리는
 # _toggle() 및 _start_oped_monitor() 진입부에서 체크한다.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -173,8 +279,21 @@ class LipSyncGUILogic:
                     self._link_status("❌ PotPlayer 핸들을 찾을 수 없습니다.", warn=True)
                     return
 
-                # Facebook 등 PotPlayer 직접 처리 불가 URL은 스트림 추출
-                play_url = self._resolve_play_url(url)
+                # ── Facebook: yt-dlp로 실제 제목 + 스트림 URL 동시 추출 ──────
+                # ── 그 외: URL 그대로 PotPlayer에 전달 (Ctrl+V 커맨더) ─────────
+                is_facebook = bool(re.search(
+                    r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
+
+                if is_facebook:
+                    self._link_status("⏳ Facebook 영상 정보 추출 중…")
+                    play_url, real_title = self._fetch_fb_play_info(url)
+                    if play_url == url:
+                        # _fetch_fb_play_info 실패 → --get-url 방식 폴백
+                        play_url = self._resolve_play_url(url)
+                else:
+                    # Facebook 이외: 원본 URL 그대로 PotPlayer에 전달
+                    play_url   = url
+                    real_title = ""
 
                 # PotPlayer에 URL 전달 (클립보드 Ctrl+V)
                 self._send_url_to_potplayer(hwnd, play_url)
@@ -182,8 +301,8 @@ class LipSyncGUILogic:
                 # 링크 재생 모드 ON → 싱크/OP/ED 비활성화
                 self.root.after(0, lambda: self._set_link_play_mode(True))
 
-                # 시청 기록 저장 (원본 URL 기준으로 저장)
-                self.root.after(0, lambda: self._save_live_history_entry(url))
+                # 시청 기록 저장 (원본 URL + 추출된 실제 제목)
+                self.root.after(0, lambda: self._save_live_history_entry(url, title=real_title))
                 self.root.after(0, lambda: self._refresh_live_history_list())
                 self.root.after(0, lambda: self._update_link_resume_btn())
                 self.root.after(0, lambda: self._link_status(f"✅ 재생 중: {url[:50]}"))
@@ -326,9 +445,13 @@ class LipSyncGUILogic:
 
     def _live_hist_update_title(self, title: str):
         """마지막으로 기록된 항목의 제목을 PotPlayer 창 제목으로 갱신한다.
+
+        [버그1 수정] Facebook 재생 시 PotPlayer 창 제목이 CDN URL 이나
+        미디어 파일명(video_12345.mp4)으로 표시될 수 있다.
+        이 경우 기존에 _fetch_fb_play_info 로 저장된 실제 영상 제목을
+        CDN URL 패턴의 '가짜 제목'으로 덮어쓰지 않도록 차단한다.
+
         [수정] 동일 계열(시리즈) 이전 기록이 있으면 덮어쓰기(중복 제거).
-        예) 기존: 꼬마마법사 레미_49화 → 새: 꼬마마법사 레미_50화 이면
-            49화 기록 제거 후 50화로 교체.
         """
         if not title:
             return
@@ -336,6 +459,16 @@ class LipSyncGUILogic:
             self._log_lines = collections.deque(maxlen=100)
         records = self._load_live_history()
         if not records:
+            return
+
+        # ── [버그1 수정] CDN URL 패턴 제목 차단 ────────────────────────────────
+        # PotPlayer 가 스트림 URL 을 직접 재생하면 창 제목이 CDN URL 또는
+        # 미디어 파일명으로 표시된다. 이미 실제 제목이 저장돼 있으면 유지.
+        existing_title = records[-1].get("title", "")
+        if existing_title and _is_cdn_url_title(title):
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] 🔗 CDN URL 제목 차단 — "
+                f"기존 제목 유지: {existing_title!r} (무시된 제목: {title[:60]!r})")
             return
 
         # 마지막 항목 제목 갱신
@@ -524,37 +657,99 @@ class LipSyncGUILogic:
     def _link_save_cancel(self):
         """중지 버튼 콜백 — 진행 중인 저장을 즉시 중단하고 잔여 파일을 정리한다.
 
-        수정 사항:
-        1) taskkill /F /T 로 yt-dlp + 자식 ffmpeg 프로세스 트리 전체 종료
-           (proc.kill() 은 부모만 종료 → ffmpeg가 살아남아 파일 계속 점유)
-        2) _link_save_tracked_files 로 다운로드 중 생성된 모든 파일 추적 후 삭제
-           (기존 단일 glob 방식은 fragment 파일 누락)
-        3) _link_save_cancelled 플래그로 worker thread에 취소 신호 전달
-        4) 파일 삭제는 0.6초 딜레이 후 — 프로세스 종료 완료·파일 핸들 해제 대기
+        [버그3 수정] yt-dlp 프로세스 트리(ffmpeg 포함) 전체 종료:
+          - subprocess.run(taskkill) 에 creationflags=CREATE_NO_WINDOW 추가
+            → CMD 창이 순간적으로 나타나지 않음
+          - Win32 TerminateProcess API 를 직접 사용하는 폴백 추가
+            → taskkill 바이너리 없이도 프로세스 트리 강제 종료 가능
+          - _link_save_tracked_files 로 다운로드 중 생성된 모든 파일 추적 후 삭제
+
+        [버그4 수정] 콘솔창 깜빡임 방지:
+          - creationflags=0x08000000 (CREATE_NO_WINDOW) 를 taskkill 호출에도 적용
+          - shell=False 유지 (shell=True 는 cmd.exe 를 거치므로 반드시 False)
         """
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
 
-        # ① 취소 플래그 설정 (worker thread의 post-wait 처리에서 감지)
+        # ① 취소 플래그 설정 (worker thread 의 post-wait 처리에서 감지)
         self._link_save_cancelled = True
 
         # ② yt-dlp + 자식 프로세스(ffmpeg) 전체 강제 종료
         proc = getattr(self, "_link_save_proc", None)
         pid  = proc.pid if (proc and proc.poll() is None) else None
+
         if pid:
+            _killed = False
+
+            # 방법1: taskkill /F /T — 콘솔 창 없이 실행 (CREATE_NO_WINDOW)
             try:
-                # Windows: /F 강제, /T 자식 트리 포함 종료
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/PID", str(pid)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=5,
+                    creationflags=0x08000000,   # CREATE_NO_WINDOW — CMD 깜빡임 방지
+                    shell=False,                 # shell=True 이면 cmd.exe 경유 → 창 발생
                 )
+                _killed = True
+            except FileNotFoundError:
+                pass    # taskkill.exe 없는 환경 → 방법2로 폴백
             except Exception:
+                pass
+
+            if not _killed:
+                # 방법2: Win32 TerminateProcess + 자식 프로세스 직접 탐색 후 종료
                 try:
-                    proc.kill()
+                    import ctypes
+                    import ctypes.wintypes
+
+                    TH32CS_SNAPPROCESS  = 0x00000002
+                    PROCESS_TERMINATE   = 0x0001
+                    PROCESS_QUERY_INFO  = 0x1000
+
+                    class _PROCESSENTRY32(ctypes.Structure):
+                        _fields_ = [
+                            ("dwSize",              ctypes.wintypes.DWORD),
+                            ("cntUsage",            ctypes.wintypes.DWORD),
+                            ("th32ProcessID",       ctypes.wintypes.DWORD),
+                            ("th32DefaultHeapID",   ctypes.POINTER(ctypes.c_ulong)),
+                            ("th32ModuleID",        ctypes.wintypes.DWORD),
+                            ("cntThreads",          ctypes.wintypes.DWORD),
+                            ("th32ParentProcessID", ctypes.wintypes.DWORD),
+                            ("pcPriClassBase",      ctypes.c_long),
+                            ("dwFlags",             ctypes.wintypes.DWORD),
+                            ("szExeFile",           ctypes.c_char * 260),
+                        ]
+
+                    k32 = ctypes.windll.kernel32
+                    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+                    if snap and snap != ctypes.wintypes.HANDLE(-1).value:
+                        entry = _PROCESSENTRY32()
+                        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
+                        children = []
+                        if k32.Process32First(snap, ctypes.byref(entry)):
+                            while True:
+                                if entry.th32ParentProcessID == pid:
+                                    children.append(entry.th32ProcessID)
+                                if not k32.Process32Next(snap, ctypes.byref(entry)):
+                                    break
+                        k32.CloseHandle(snap)
+                        for cpid in children:
+                            h = k32.OpenProcess(PROCESS_TERMINATE, False, cpid)
+                            if h:
+                                k32.TerminateProcess(h, 1)
+                                k32.CloseHandle(h)
+                    # 부모(yt-dlp) 도 종료
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
                 except Exception:
-                    pass
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
         self._link_save_proc = None
 
         # 취소 즉시 UI 업데이트 (파일 삭제는 별도 스레드에서)
@@ -564,19 +759,18 @@ class LipSyncGUILogic:
         self._log_lines.append(
             f"[{_time.strftime('%H:%M:%S')}] ⏹ yt-dlp 중단 요청 (PID={pid})")
 
-        # ③ 잔여 파일 삭제 — 별도 스레드에서 0.6초 대기 후 실행
-        #    (프로세스 완전 종료 + OS 파일 핸들 해제 대기)
+        # ③ 잔여 파일 삭제 — 별도 스레드에서 0.8초 대기 후 실행
+        #    (프로세스 완전 종료 + OS 파일 핸들 해제 대기, 이전 0.6s → 0.8s)
         tracked_snapshot = set(getattr(self, "_link_save_tracked_files", set()))
 
         def _cleanup():
-            _time.sleep(0.6)
+            _time.sleep(0.8)
 
             deleted = []
 
-            # yt-dlp 출력에서 추적한 파일만 삭제
-            # (tracked_snapshot = yt-dlp가 stdout에 명시적으로 출력한 경로 전부)
+            # yt-dlp stdout 에서 추적한 파일만 삭제
             for path in tracked_snapshot:
-                # 파일 자체 + .part / .ytdl 변형 (미완성 조각) 삭제
+                # 파일 자체 + .part / .ytdl 변형(미완성 조각) 삭제
                 for candidate in (path, path + ".part", path + ".ytdl"):
                     if os.path.isfile(candidate):
                         try:
@@ -1020,6 +1214,111 @@ class LipSyncGUILogic:
         """기록 목록의 이어보기 버튼 클릭 — 특정 URL로 재생 (URL 입력창 미표시)."""
         self._link_play_url(url)
 
+    def _fetch_fb_play_info(self, url: str):
+        """Facebook URL에서 실제 영상 제목과 재생용 스트림 URL을 동시에 추출한다.
+
+        [버그1 수정] 기존 _resolve_play_url 은 스트림 URL 만 반환했고
+        제목은 PotPlayer 창 제목(CDN 파일명)을 사용했다.
+        이 함수는 yt-dlp --dump-json(-j) 으로 메타데이터를 한 번에 읽어
+        실제 영상 제목(fulltitle > title 우선)을 제공한다.
+
+        Returns:
+            (stream_url, real_title)
+            추출 실패 시 (original_url, "") 반환
+        """
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        ts = _time.strftime("%H:%M:%S")
+        self._log_lines.append(f"[{ts}] 🔍 Facebook 영상 메타데이터 추출 시도: {url}")
+
+        try:
+            ytdlp = self._ensure_ytdlp()
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⚠ yt-dlp 없음: {e}")
+            return url, ""
+
+        def _parse_info(raw_json: str):
+            """JSON 파싱 후 (stream_url, title) 반환."""
+            info = json.loads(raw_json.strip().splitlines()[0])
+            # 제목 우선순위: fulltitle > title > webpage_url_basename
+            title = (
+                info.get("fulltitle") or
+                info.get("title") or
+                info.get("webpage_url_basename") or ""
+            )
+            stream_url = _pick_best_stream_url(info) or url
+            return stream_url, title
+
+        base_cmd = [
+            ytdlp,
+            "-j",                        # --dump-json: 단일 JSON 출력
+            "--no-playlist",
+            "-f", "bestvideo+bestaudio/best",
+            "--extractor-retries", "2",
+            "--socket-timeout", "15",
+        ]
+
+        # Chrome → Firefox → Edge → Chromium 순으로 쿠키 시도
+        for browser in ("chrome", "firefox", "edge", "chromium"):
+            try:
+                cmd = base_cmd + [
+                    "--cookies-from-browser", browser,
+                    url,
+                ]
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=35,
+                    creationflags=0x08000000,   # CREATE_NO_WINDOW
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    stream_url, title = _parse_info(proc.stdout)
+                    self._log_lines.append(
+                        f"[{_time.strftime('%H:%M:%S')}] ✅ Facebook 정보 추출 완료 "
+                        f"({browser}) 제목={title!r}")
+                    return stream_url, title
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 정보 추출 실패 "
+                    f"({browser}), 다음 브라우저 시도…")
+            except subprocess.TimeoutExpired:
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 타임아웃 ({browser})")
+            except (json.JSONDecodeError, Exception) as e:
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 예외 ({browser}): {e}")
+
+        # 쿠키 없이 재시도 (공개 영상)
+        try:
+            proc2 = subprocess.run(
+                base_cmd + [url],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=25,
+                creationflags=0x08000000,
+            )
+            if proc2.returncode == 0 and proc2.stdout.strip():
+                stream_url, title = _parse_info(proc2.stdout)
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ✅ Facebook 정보 추출 완료 "
+                    f"(쿠키 없음) 제목={title!r}")
+                return stream_url, title
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 쿠키 없음 추출 실패: {e}")
+
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 정보 추출 전체 실패 → 원본 URL 사용")
+        return url, ""
+
     def _resolve_play_url(self, url: str) -> str:
         """재생용 URL을 반환한다.
         Facebook 등 PotPlayer가 직접 처리하지 못하는 플랫폼은
@@ -1143,22 +1442,28 @@ class LipSyncGUILogic:
         return url
 
     def _send_url_to_potplayer(self, hwnd: int, url: str):
-        """PotPlayer 창에 URL을 클립보드로 붙여넣기한다.
-        공통 로직을 한 곳으로 집약해 _link_play / _link_play_url 에서 재사용.
-        """
-        import ctypes
-        self.root.after(0, lambda: self._clipboard_set(url))
-        _time.sleep(0.35)   # 클립보드 반영 대기
+        """PotPlayer 창에 URL을 클립보드 Ctrl+V로 전달한다.
 
-        VK_CONTROL = 0x11
-        VK_V       = 0x56
-        user32 = ctypes.windll.user32
-        user32.SetForegroundWindow(hwnd)
-        _time.sleep(0.1)
-        user32.keybd_event(VK_CONTROL, 0, 0, 0)
-        user32.keybd_event(VK_V,       0, 0, 0)
-        user32.keybd_event(VK_V,       0, 2, 0)   # KEYUP
-        user32.keybd_event(VK_CONTROL, 0, 2, 0)   # KEYUP
+        [버그2 수정] 기존 SetForegroundWindow + keybd_event 방식은
+        AutoSinc 창이 포커스를 잃기 전에 Ctrl+V 가 잘못된 창으로 전달되는
+        경쟁 조건이 있었다. 수정 후:
+          - Win32 클립보드 API를 워커 스레드에서 직접 호출 (스레드 세이프)
+          - post_key_to_potplayer(ctrl=True) 로 POT_SEND_VIRTUAL_KEY 커맨드 전송
+            → PotPlayer 포커스 없이도 Ctrl+V 를 확실히 전달
+          - Facebook(CDN URL) · 일반 URL 모두 동일 로직 적용
+        """
+        from win32_utils import post_key_to_potplayer as _pot_key
+
+        # ① Win32 API로 클립보드 설정 (스레드 세이프 — Tk 메인 스레드 불필요)
+        ok = _win32_set_clipboard(url)
+        if not ok:
+            # 클립보드 API 실패 시 Tkinter 방식으로 폴백 (메인 스레드 예약)
+            self.root.after(0, lambda: self._clipboard_set(url))
+        _time.sleep(0.2)    # 클립보드 반영 + 메인 스레드 after 처리 대기
+
+        # ② PotPlayer에 Ctrl+V 전송 (포커스 불필요)
+        #    POT_SEND_VIRTUAL_KEY lParam: VK_V(0x56) | CTRL_MODIFIER(0x0200)
+        _pot_key(hwnd, 0x56, ctrl=True)
         _time.sleep(0.1)
 
 
@@ -1189,15 +1494,27 @@ class LipSyncGUILogic:
                     self._link_status("❌ PotPlayer 핸들을 찾을 수 없습니다.", warn=True)
                     return
 
-                # Facebook 등 직접 처리 불가 URL은 스트림 추출
-                play_url = self._resolve_play_url(url)
+                # ── Facebook: yt-dlp로 실제 제목 + 스트림 URL 동시 추출 ──────
+                # ── 그 외: URL 그대로 PotPlayer에 전달 (Ctrl+V 커맨더) ─────────
+                is_facebook = bool(re.search(
+                    r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
+
+                if is_facebook:
+                    self._link_status("⏳ Facebook 영상 정보 추출 중…")
+                    play_url, real_title = self._fetch_fb_play_info(url)
+                    if play_url == url:
+                        # _fetch_fb_play_info 실패 → --get-url 방식 폴백
+                        play_url = self._resolve_play_url(url)
+                else:
+                    play_url   = url
+                    real_title = ""
 
                 # PotPlayer에 URL 전달
                 self._send_url_to_potplayer(hwnd, play_url)
 
                 self.root.after(0, lambda: self._set_link_play_mode(True))
-                # 이어보기 기록은 원본 URL 기준으로 저장
-                self.root.after(0, lambda: self._save_live_history_entry(url))
+                # 이어보기 기록은 원본 URL + 실제 제목으로 저장
+                self.root.after(0, lambda: self._save_live_history_entry(url, title=real_title))
                 self.root.after(0, lambda: self._refresh_live_history_list())
                 self.root.after(0, lambda: self._update_link_resume_btn())
                 self.root.after(0, lambda: self._link_status("✅ 재생 중 (이어보기)…"))

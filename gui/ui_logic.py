@@ -153,8 +153,15 @@ _PLATFORM_COLORS = {
     "chzzk":    "#4caf50",  # 녹색
     "twitch":   "#9b6fe0",  # 보라색
     "facebook": "#4eb8f0",  # 하늘색
+    "soop":     "#ff6b35",  # Soop 오렌지
     "default":  "#00c8e0",  # 기존 청록 (ACCENT)
 }
+
+# Soop(AfreecaTV) 도메인 정규식 — 모듈 전역 공유
+_SOOP_RE = re.compile(
+    r'(sooplive\.co\.kr|afreecatv\.com|soop\.com)',
+    re.IGNORECASE,
+)
 
 def _get_platform_color(url: str) -> str:
     """URL로 플랫폼을 판별해 이어보기 버튼 색상을 반환한다."""
@@ -169,6 +176,8 @@ def _get_platform_color(url: str) -> str:
         return _PLATFORM_COLORS["twitch"]
     if re.search(r'(facebook\.com|fb\.watch|fb\.com)', u):
         return _PLATFORM_COLORS["facebook"]
+    if _SOOP_RE.search(u):
+        return _PLATFORM_COLORS["soop"]
     return _PLATFORM_COLORS["default"]
 
 
@@ -279,10 +288,16 @@ class LipSyncGUILogic:
                     self._link_status("❌ PotPlayer 핸들을 찾을 수 없습니다.", warn=True)
                     return
 
-                # ── Facebook: yt-dlp로 실제 제목 + 스트림 URL 동시 추출 ──────
-                # ── 그 외: URL 그대로 PotPlayer에 전달 (Ctrl+V 커맨더) ─────────
+                # ── Facebook : yt-dlp -j로 스트림 URL + 제목 추출 ──────────
+                # ── Soop    : Facebook 방식과 동일하게 yt-dlp -j 추출 ──────
+                # ── 그 외   : 원본 URL 그대로 PotPlayer에 전달 ────────────
                 is_facebook = bool(re.search(
                     r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
+                is_soop = bool(_SOOP_RE.search(url))
+
+                self._log_lines.append(
+                    f"[{ts}] 🔗 링크 재생 시작 | 원본 URL: {url} | "
+                    f"platform={'facebook' if is_facebook else 'soop' if is_soop else 'general'}")
 
                 if is_facebook:
                     self._link_status("⏳ Facebook 영상 정보 추출 중…")
@@ -290,10 +305,17 @@ class LipSyncGUILogic:
                     if play_url == url:
                         # _fetch_fb_play_info 실패 → --get-url 방식 폴백
                         play_url = self._resolve_play_url(url)
+                elif is_soop:
+                    # Soop: Facebook 방식과 동일하게 yt-dlp로 스트림 URL 추출
+                    self._link_status("⏳ Soop 영상 정보 추출 중…")
+                    play_url, real_title = self._fetch_soop_play_info(url)
+                    # _fetch_soop_play_info 실패 시 play_url == url(원본) → fallback 로그는 내부 기록
                 else:
-                    # Facebook 이외: 원본 URL 그대로 PotPlayer에 전달
+                    # 유튜브·트위치·일반 URL 등: 원본 URL 그대로 PotPlayer에 전달
                     play_url   = url
                     real_title = ""
+                    self._log_lines.append(
+                        f"[{ts}] 🔗 일반 URL 직접 전달 (m3u8 추출 없음, fallback 없음)")
 
                 # PotPlayer에 URL 전달 (클립보드 Ctrl+V)
                 self._send_url_to_potplayer(hwnd, play_url)
@@ -874,11 +896,16 @@ class LipSyncGUILogic:
                 # 저장 파일 경로 패턴 추적 (중단 시 삭제용)
                 self._link_save_dest_glob = os.path.join(dl_dir, "")
 
-                # ── Facebook / 치지직 여부 판별 ───────────────────────────────
+                # ── Facebook / Soop / 치지직 여부 판별 ──────────────────────
                 _is_facebook = bool(re.search(
                     r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
                 _is_chzzk = bool(re.search(
                     r'chzzk\.naver\.com', url.lower()))
+                _is_soop = bool(_SOOP_RE.search(url))
+
+                self._log_lines.append(
+                    f"[{ts}] 💾 저장 시작 | 원본 URL: {url} | "
+                    f"platform={'facebook' if _is_facebook else 'soop' if _is_soop else 'chzzk' if _is_chzzk else 'general'}")
 
                 # ── yt-dlp 명령 구성 ───────────────────────────────────────────
                 # [수정1] --postprocessor-args 뒤 쉼표 누락 버그 수정
@@ -886,9 +913,8 @@ class LipSyncGUILogic:
                 # [수정3] Facebook 쿠키·헤더 처리 추가
                 # [수정4] 치지직 HLS 전용 옵션 분기 추가
                 #
-                # 치지직은 HLS(m3u8) 세그먼트 방식이므로 --buffer-size 16K 는
-                # 작은 조각 파일에 역효과. 치지직만 1M 으로 오버라이드한다.
-                _buf = "1M" if _is_chzzk else "16K"
+                # 치지직·Soop은 HLS(m3u8) 세그먼트 방식이므로 버퍼 1M 적용
+                _buf = "1M" if (_is_chzzk or _is_soop) else "16K"
 
                 cmd = [
                     ytdlp,
@@ -922,6 +948,21 @@ class LipSyncGUILogic:
                         "--sleep-interval", "0",
                         "--max-sleep-interval", "0",
                     ])
+
+                # ── Soop 전용 저장 옵션 (Facebook 방식 준용) ─────────────────
+                # Referer 헤더 추가: Soop CDN 인증 우회
+                # HLS 세그먼트 재시도 옵션 적용 (치지직과 동일 이유)
+                if _is_soop:
+                    cmd.extend([
+                        "--add-header", "Referer:https://www.sooplive.co.kr/",
+                        "--retries", "10",
+                        "--fragment-retries", "10",
+                        "--sleep-interval", "0",
+                        "--max-sleep-interval", "0",
+                    ])
+                    self.root.after(0, lambda: self._link_status("⏳ Soop 저장 중…"))
+                    self._log_lines.append(
+                        f"[{ts}] 💾 Soop 저장 옵션 적용 | 원본 URL: {url}")
 
                 # [버그3 수정] Facebook: 비로그인(공개 콘텐츠) 우선 시도
                 #   --cookies-from-browser 를 초기 커맨드에서 제거하고,
@@ -1027,28 +1068,107 @@ class LipSyncGUILogic:
                         if getattr(self, "_link_save_cancelled", False):
                             return
 
+                # ── Soop 인증 오류 감지 → 쿠키로 2차 재시도 (Facebook 방식 준용) ──
+                elif _is_soop and _rc != 0:
+                    _soop_auth_kws = (
+                        "login", "cookie", "private", "sign in",
+                        "not available", "requires authentication",
+                        "could not extract", "unable to extract",
+                        "need to log", "authentication", "restricted",
+                        "unavailable",
+                    )
+                    _needs_retry = any(
+                        kw in _ln.lower()
+                        for _ln in _captured_lines
+                        for kw in _soop_auth_kws
+                    )
+                    if _needs_retry:
+                        for _soop_browser in ("chrome", "firefox", "edge", "chromium"):
+                            _browser_hint = _soop_browser
+                            break
+                        _cmd_retry = cmd[:-1] + [
+                            "--cookies-from-browser", _browser_hint,
+                            "--extractor-retries", "3",
+                            url,
+                        ]
+                        self.root.after(0, lambda bh=_browser_hint: self._link_status(
+                            f"⏳ Soop 재시도 중 ({bh} 쿠키 사용)…"))
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ Soop 비로그인 실패 "
+                            f"→ {_browser_hint} 쿠키로 재시도 | 원본 URL: {url}")
+                        _rc, _ = _exec_ytdlp(_cmd_retry)
+
+                        if getattr(self, "_link_save_cancelled", False):
+                            return
+
+                # ── 치지직 인증 오류 감지 → 쿠키로 2차 재시도 (Facebook 방식 준용) ─
+                elif _is_chzzk and _rc != 0:
+                    _chzzk_auth_kws = (
+                        "login", "cookie", "private", "sign in",
+                        "not available", "requires authentication",
+                        "could not extract", "unable to extract",
+                        "need to log", "authentication", "restricted",
+                        "unavailable",
+                    )
+                    _needs_retry = any(
+                        kw in _ln.lower()
+                        for _ln in _captured_lines
+                        for kw in _chzzk_auth_kws
+                    )
+                    if _needs_retry:
+                        for _chzzk_browser in ("chrome", "firefox", "edge", "chromium"):
+                            _browser_hint = _chzzk_browser
+                            break
+                        _cmd_retry = cmd[:-1] + [
+                            "--cookies-from-browser", _browser_hint,
+                            "--extractor-retries", "3",
+                            url,
+                        ]
+                        self.root.after(0, lambda bh=_browser_hint: self._link_status(
+                            f"⏳ 치지직 재시도 중 ({bh} 쿠키 사용)…"))
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ 치지직 비로그인 실패 "
+                            f"→ {_browser_hint} 쿠키로 재시도 | 원본 URL: {url}")
+                        _rc, _ = _exec_ytdlp(_cmd_retry)
+
+                        if getattr(self, "_link_save_cancelled", False):
+                            return
+
                 if _rc == 0:
                     self._link_save_dest_glob = None
                     self.root.after(0, lambda: self._dl_progress_update(100.0))
                     self.root.after(0, lambda: self._link_status(
                         f"✅ 저장 완료 → {dl_dir}"))
                     self.root.after(2500, self._dl_progress_hide)
-                    self._log_lines.append(f"[{ts}] ✅ yt-dlp 저장 완료: {url}")
+                    self._log_lines.append(
+                        f"[{ts}] ✅ yt-dlp 저장 완료 | 원본 URL: {url} | m3u8 추출=False")
                 else:
                     self._link_save_dest_glob = None
-                    # Facebook 실패 시 추가 안내 메시지
+                    # 플랫폼별 실패 안내 메시지
                     if _is_facebook:
                         self.root.after(0, lambda: self._link_status(
                             "❌ Facebook 저장 실패. "
                             "공개 콘텐츠인지 확인하거나, "
                             "브라우저에서 Facebook에 로그인 후 다시 시도하세요.",
                             warn=True))
+                    elif _is_soop:
+                        self.root.after(0, lambda: self._link_status(
+                            "❌ Soop 저장 실패. "
+                            "공개 영상인지 확인하거나, "
+                            "브라우저에서 Soop에 로그인 후 다시 시도하세요.",
+                            warn=True))
+                    elif _is_chzzk:
+                        self.root.after(0, lambda: self._link_status(
+                            "❌ 치지직 저장 실패. "
+                            "공개 영상인지 확인하거나, "
+                            "브라우저에서 치지직에 로그인 후 다시 시도하세요.",
+                            warn=True))
                     else:
                         self.root.after(0, lambda: self._link_status(
                             "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
                     self.root.after(0, self._dl_progress_hide)
                     self._log_lines.append(
-                        f"[{ts}] ❌ yt-dlp 저장 실패 (code {_rc}): {url}")
+                        f"[{ts}] ❌ yt-dlp 저장 실패 (code {_rc}) | 원본 URL: {url} | fallback=없음")
 
             except Exception as e:
                 self._link_save_proc = None
@@ -1389,6 +1509,117 @@ class LipSyncGUILogic:
             f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 정보 추출 전체 실패 → 원본 URL 사용")
         return url, ""
 
+    def _fetch_soop_play_info(self, url: str):
+        """Soop(AfreecaTV) URL에서 실제 영상 제목과 재생용 스트림 URL을 추출한다.
+
+        Facebook 방식과 동일하게 yt-dlp -j (dump-json)으로 메타데이터를 읽고
+        스트림 URL(m3u8 포함)과 실제 제목을 반환한다.
+
+        로그에 기록하는 항목:
+          - 원본 URL
+          - 추출된 m3u8 URL 사용 여부
+          - fallback 여부
+
+        Returns:
+            (stream_url, real_title)
+            추출 실패 시 (original_url, "") 반환 (fallback)
+        """
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        ts = _time.strftime("%H:%M:%S")
+        self._log_lines.append(
+            f"[{ts}] 🔍 Soop 영상 정보 추출 시도 | 원본 URL: {url}")
+
+        try:
+            ytdlp = self._ensure_ytdlp()
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⚠ yt-dlp 없음 → Soop fallback: {e}")
+            return url, ""
+
+        def _parse_info(raw_json: str):
+            """JSON 파싱 후 (stream_url, title) 반환."""
+            info = json.loads(raw_json.strip().splitlines()[0])
+            title = (
+                info.get("fulltitle") or
+                info.get("title") or
+                info.get("webpage_url_basename") or ""
+            )
+            stream_url = _pick_best_stream_url(info) or url
+            return stream_url, title
+
+        base_cmd = [
+            ytdlp,
+            "-j",                          # --dump-json: 단일 JSON 출력
+            "--no-playlist",
+            "-f", "bestvideo+bestaudio/best",
+            "--extractor-retries", "2",
+            "--socket-timeout", "15",
+        ]
+
+        # 브라우저 쿠키 순서대로 시도 (로그인 콘텐츠 대응)
+        for browser in ("chrome", "firefox", "edge", "chromium"):
+            try:
+                cmd = base_cmd + ["--cookies-from-browser", browser, url]
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=35,
+                    creationflags=0x08000000,   # CREATE_NO_WINDOW
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    stream_url, title = _parse_info(proc.stdout)
+                    _is_m3u8 = ".m3u8" in stream_url
+                    self._log_lines.append(
+                        f"[{_time.strftime('%H:%M:%S')}] ✅ Soop 정보 추출 완료 "
+                        f"({browser}) | 제목={title!r} | "
+                        f"m3u8={'사용' if _is_m3u8 else '미사용'} | fallback=False")
+                    return stream_url, title
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Soop 정보 추출 실패 "
+                    f"({browser}), 다음 브라우저 시도…")
+            except subprocess.TimeoutExpired:
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Soop 추출 타임아웃 ({browser})")
+            except (json.JSONDecodeError, Exception) as e:
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Soop 추출 예외 ({browser}): {e}")
+
+        # 쿠키 없이 재시도 (공개 영상)
+        try:
+            proc2 = subprocess.run(
+                base_cmd + [url],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=25,
+                creationflags=0x08000000,
+            )
+            if proc2.returncode == 0 and proc2.stdout.strip():
+                stream_url, title = _parse_info(proc2.stdout)
+                _is_m3u8 = ".m3u8" in stream_url
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ✅ Soop 정보 추출 완료 "
+                    f"(쿠키 없음) | 제목={title!r} | "
+                    f"m3u8={'사용' if _is_m3u8 else '미사용'} | fallback=False")
+                return stream_url, title
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⚠ Soop 쿠키 없음 추출 실패: {e}")
+
+        # 모두 실패 → fallback: 원본 URL 반환 (PotPlayer 직접 처리 시도)
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] ⚠ Soop 정보 추출 전체 실패 "
+            f"→ 원본 URL fallback 사용 | 원본 URL: {url}")
+        return url, ""
+
     def _resolve_play_url(self, url: str) -> str:
         """재생용 URL을 반환한다.
         Facebook 등 PotPlayer가 직접 처리하지 못하는 플랫폼은
@@ -1566,10 +1797,16 @@ class LipSyncGUILogic:
                     self._link_status("❌ PotPlayer 핸들을 찾을 수 없습니다.", warn=True)
                     return
 
-                # ── Facebook: yt-dlp로 실제 제목 + 스트림 URL 동시 추출 ──────
-                # ── 그 외: URL 그대로 PotPlayer에 전달 (Ctrl+V 커맨더) ─────────
+                # ── Facebook : yt-dlp -j로 스트림 URL + 제목 추출 ──────────
+                # ── Soop    : Facebook 방식과 동일하게 yt-dlp -j 추출 ──────
+                # ── 그 외   : 원본 URL 그대로 PotPlayer에 전달 ────────────
                 is_facebook = bool(re.search(
                     r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
+                is_soop = bool(_SOOP_RE.search(url))
+
+                self._log_lines.append(
+                    f"[{ts}] 🔗 이어보기 재생 시작 | 원본 URL: {url} | "
+                    f"platform={'facebook' if is_facebook else 'soop' if is_soop else 'general'}")
 
                 if is_facebook:
                     self._link_status("⏳ Facebook 영상 정보 추출 중…")
@@ -1577,9 +1814,17 @@ class LipSyncGUILogic:
                     if play_url == url:
                         # _fetch_fb_play_info 실패 → --get-url 방식 폴백
                         play_url = self._resolve_play_url(url)
+                elif is_soop:
+                    # Soop: Facebook 방식과 동일하게 yt-dlp로 스트림 URL 추출
+                    self._link_status("⏳ Soop 영상 정보 추출 중…")
+                    play_url, real_title = self._fetch_soop_play_info(url)
+                    # 실패 시 play_url == url(원본) → fallback 로그는 내부 기록
                 else:
+                    # 유튜브·트위치·일반 URL 등: 원본 URL 그대로 PotPlayer에 전달
                     play_url   = url
                     real_title = ""
+                    self._log_lines.append(
+                        f"[{ts}] 🔗 일반 URL 직접 전달 (m3u8 추출 없음, fallback 없음)")
 
                 # PotPlayer에 URL 전달
                 self._send_url_to_potplayer(hwnd, play_url)

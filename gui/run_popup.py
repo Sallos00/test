@@ -128,6 +128,12 @@ class PopupMixin:
             if hwnd and is_potplayer_playing(hwnd) and is_potplayer_running():
                 if self._closing or self._running:
                     return
+                # [수정] 링크 재생 모드 중에는 팝업 차단 — 루프 유지
+                if getattr(self, "_link_play_mode", False):
+                    for _ in range(10):
+                        if self._closing or self._running: return
+                        time.sleep(0.1)
+                    continue
                 self._popup_open = True
                 def _safe_show():
                     # ── 싱크가 이미 시작됐으면 팝업을 표시하지 않는다 ──────

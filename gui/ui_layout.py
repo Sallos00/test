@@ -97,7 +97,7 @@ class LipSyncGUILayout:
             for name, btn in [("sync", self._tab_btn_sync), ("record", self._tab_btn_record), ("history", self._tab_btn_history)]:
                 if btn is None: continue
                 if name == cur:
-                    btn.config(bg=self.BG, fg=self.ACCENT, font=("Consolas", TAB_F, "bold"))
+                    btn.config(bg=self.BG, fg=self.ACCENT, font=("Consolas", TAB_F))
                 else:
                     btn.config(bg=self.BG2, fg=self.TEXT_MID, font=("Consolas", TAB_F))
 
@@ -140,20 +140,23 @@ class LipSyncGUILayout:
                     continue
                 if name == cur:
                     btn.config(bg=self.BG, fg=self.ACCENT,
-                               font=("Consolas", TAB_F, "bold"),
-                               padx=round(14*r))
+                               font=("Consolas", TAB_F),
+                               padx=round(10*r), width=8)
                 else:
                     btn.config(bg=self.BG2, fg=self.TEXT_MID,
                                font=("Consolas", TAB_F),
-                               padx=round(10*r))
+                               padx=round(10*r), width=8)
 
         self._switch_tab_fn        = _switch_tab
         self._update_tab_styles_fn = _update_tab_styles
 
+        TAB_W = 8  # 모든 탭 버튼 고정 너비 (글자 단위)
+
         # 탭1: 싱크 보정
         self._tab_btn_sync = tk.Button(
             tab_inner, text="싱크 보정",
-            font=("Consolas", TAB_F, "bold"),
+            font=("Consolas", TAB_F),
+            width=TAB_W,
             bg=self.BG, fg=self.ACCENT,
             activebackground=self.BG3, activeforeground=self.ACCENT,
             relief="flat", cursor="hand2",
@@ -165,6 +168,7 @@ class LipSyncGUILayout:
         self._tab_btn_link = tk.Button(
             tab_inner, text="링크 재생",
             font=("Consolas", TAB_F),
+            width=TAB_W,
             bg=self.BG2, fg=self.TEXT_MID,
             activebackground=self.BG3, activeforeground=self.TEXT,
             relief="flat", cursor="hand2",
@@ -176,6 +180,7 @@ class LipSyncGUILayout:
         self._tab_btn_record = tk.Button(
             tab_inner, text="녹화/캡처",
             font=("Consolas", TAB_F),
+            width=TAB_W,
             bg=self.BG2, fg=self.TEXT_MID,
             activebackground=self.BG3, activeforeground=self.TEXT,
             relief="flat", cursor="hand2",
@@ -187,6 +192,7 @@ class LipSyncGUILayout:
         self._tab_btn_history = tk.Button(
             tab_inner, text="시청 기록",
             font=("Consolas", TAB_F),
+            width=TAB_W,
             bg=self.BG2, fg=self.TEXT_MID,
             activebackground=self.BG3, activeforeground=self.TEXT,
             relief="flat", cursor="hand2",

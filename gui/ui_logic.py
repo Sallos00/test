@@ -522,34 +522,84 @@ class LipSyncGUILogic:
                 pass
 
     def _link_save_cancel(self):
-        """중지 버튼 콜백 — 진행 중인 저장 작업을 즉시 중단하고 파일을 정리한다."""
-        proc = getattr(self, "_link_save_proc", None)
-        if proc:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            self._link_save_proc = None
+        """중지 버튼 콜백 — 진행 중인 저장을 즉시 중단하고 잔여 파일을 정리한다.
 
-        # 저장 중이던 파일 정리 (_link_save_dest_glob에 저장된 패턴으로 삭제)
-        import glob as _glob
-        dest_glob = getattr(self, "_link_save_dest_glob", None)
-        if dest_glob:
-            for f in _glob.glob(dest_glob + "*"):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
-            self._link_save_dest_glob = None
-
-        self.root.after(0, self._dl_progress_hide)
-        self.root.after(0, self._dl_stop_btn_hide)
-        self.root.after(0, lambda: self._link_save_btn.config(state="normal"))
-        self.root.after(0, lambda: self._link_status("⏹ 저장이 중단되었습니다."))
+        수정 사항:
+        1) taskkill /F /T 로 yt-dlp + 자식 ffmpeg 프로세스 트리 전체 종료
+           (proc.kill() 은 부모만 종료 → ffmpeg가 살아남아 파일 계속 점유)
+        2) _link_save_tracked_files 로 다운로드 중 생성된 모든 파일 추적 후 삭제
+           (기존 단일 glob 방식은 fragment 파일 누락)
+        3) _link_save_cancelled 플래그로 worker thread에 취소 신호 전달
+        4) 파일 삭제는 0.6초 딜레이 후 — 프로세스 종료 완료·파일 핸들 해제 대기
+        """
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
+
+        # ① 취소 플래그 설정 (worker thread의 post-wait 처리에서 감지)
+        self._link_save_cancelled = True
+
+        # ② yt-dlp + 자식 프로세스(ffmpeg) 전체 강제 종료
+        proc = getattr(self, "_link_save_proc", None)
+        pid  = proc.pid if (proc and proc.poll() is None) else None
+        if pid:
+            try:
+                # Windows: /F 강제, /T 자식 트리 포함 종료
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self._link_save_proc = None
+
+        # 취소 즉시 UI 업데이트 (파일 삭제는 별도 스레드에서)
+        self.root.after(0, self._dl_stop_btn_hide)
+        self.root.after(0, lambda: self._link_save_btn.config(state="normal"))
+        self.root.after(0, lambda: self._link_status("⏹ 중단 중… 잔여 파일 정리 중."))
         self._log_lines.append(
-            f"[{_time.strftime('%H:%M:%S')}] ⏹ yt-dlp 저장 중단")
+            f"[{_time.strftime('%H:%M:%S')}] ⏹ yt-dlp 중단 요청 (PID={pid})")
+
+        # ③ 잔여 파일 삭제 — 별도 스레드에서 0.6초 대기 후 실행
+        #    (프로세스 완전 종료 + OS 파일 핸들 해제 대기)
+        tracked_snapshot = set(getattr(self, "_link_save_tracked_files", set()))
+
+        def _cleanup():
+            _time.sleep(0.6)
+
+            deleted = []
+
+            # yt-dlp 출력에서 추적한 파일만 삭제
+            # (tracked_snapshot = yt-dlp가 stdout에 명시적으로 출력한 경로 전부)
+            for path in tracked_snapshot:
+                # 파일 자체 + .part / .ytdl 변형 (미완성 조각) 삭제
+                for candidate in (path, path + ".part", path + ".ytdl"):
+                    if os.path.isfile(candidate):
+                        try:
+                            os.remove(candidate)
+                            deleted.append(os.path.basename(candidate))
+                        except Exception:
+                            pass
+
+            # 상태 초기화
+            self._link_save_tracked_files = set()
+            self._link_save_dest_glob     = None
+
+            n  = len(deleted)
+            ts = _time.strftime("%H:%M:%S")
+            self._log_lines.append(
+                f"[{ts}] ⏹ 잔여 파일 {n}개 삭제: {deleted}")
+
+            self.root.after(0, self._dl_progress_hide)
+            self.root.after(0, lambda: self._link_status(
+                f"⏹ 저장 중단 — 잔여 파일 {n}개 삭제됨."))
+
+        threading.Thread(
+            target=_cleanup, daemon=True, name="dl-cancel-cleanup").start()
 
     def _link_save(self):
         """저장 버튼 콜백 — yt-dlp + ffmpeg를 사용해 최고 화질로 저장한다.
@@ -572,6 +622,10 @@ class LipSyncGUILogic:
 
         def _run():
             ts = _time.strftime("%H:%M:%S")
+            # 취소 플래그 초기화 + 파일 추적 셋 초기화
+            self._link_save_cancelled     = False
+            self._link_save_tracked_files = set()
+            self._link_save_dl_dir        = dl_dir
             try:
                 # ── 1) yt-dlp 확보 ────────────────────────────────────────────
                 try:
@@ -603,29 +657,51 @@ class LipSyncGUILogic:
                 # 저장 파일 경로 패턴 추적 (중단 시 삭제용)
                 self._link_save_dest_glob = os.path.join(dl_dir, "")
 
-                # ── Facebook 여부 판별 ─────────────────────────────────────────
+                # ── Facebook / 치지직 여부 판별 ───────────────────────────────
                 _is_facebook = bool(re.search(
                     r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
+                _is_chzzk = bool(re.search(
+                    r'chzzk\.naver\.com', url.lower()))
 
                 # ── yt-dlp 명령 구성 ───────────────────────────────────────────
                 # [수정1] --postprocessor-args 뒤 쉼표 누락 버그 수정
-                #         (이전 코드에서 두 문자열이 연결되어 모든 저장 실패)
                 # [수정2] 병렬 다운로드 옵션 추가 (-N 8 / --concurrent-fragments 8)
                 # [수정3] Facebook 쿠키·헤더 처리 추가
+                # [수정4] 치지직 HLS 전용 옵션 분기 추가
+                #
+                # 치지직은 HLS(m3u8) 세그먼트 방식이므로 --buffer-size 16K 는
+                # 작은 조각 파일에 역효과. 치지직만 1M 으로 오버라이드한다.
+                _buf = "1M" if _is_chzzk else "16K"
+
                 cmd = [
                     ytdlp,
                     "-f", "bestvideo+bestaudio/best",
                     "--merge-output-format", "mp4",
-                    # 병렬 다운로드: 속도 개선
+                    # 병렬 다운로드
                     "-N", "8",
                     "--concurrent-fragments", "8",
-                    "--buffer-size", "16K",
-                    # ffmpeg 후처리 (쉼표 누락 버그 수정: 반드시 별도 원소)
+                    "--buffer-size", _buf,
+                    # AAC 재인코딩 유지
                     "--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k",
                     "--ffmpeg-location", os.path.dirname(ffmpeg),
                     "--newline",
                     "-o", os.path.join(dl_dir, "%(playlist_title)s/%(title)s.%(ext)s"),
                 ]
+
+                # ── 치지직 전용 HLS 속도 개선 옵션 ──────────────────────────
+                # 1) --hls-use-mpegts : 세그먼트를 조각 파일로 쌓지 않고
+                #    단일 연속 스트림으로 처리 → 병합 후처리 오버헤드 감소
+                # 2) --retries / --fragment-retries : Naver CDN 토큰 만료·
+                #    속도 제한으로 인한 세그먼트 오류 자동 재시도
+                # 3) --sleep-interval 0 : 세그먼트 요청 사이 불필요한 대기 제거
+                if _is_chzzk:
+                    cmd.extend([
+                        "--hls-use-mpegts",
+                        "--retries", "10",
+                        "--fragment-retries", "10",
+                        "--sleep-interval", "0",
+                        "--max-sleep-interval", "0",
+                    ])
 
                 # Facebook: 브라우저 쿠키 자동 추출 (로그인 세션 활용)
                 if _is_facebook:
@@ -656,21 +732,36 @@ class LipSyncGUILogic:
 
                 dest_file = None
                 for line in proc.stdout:
+                    # 취소 신호 감지 시 stdout 읽기 중단 (proc는 이미 kill됨)
+                    if getattr(self, "_link_save_cancelled", False):
+                        break
+
                     m = re.search(r'\[download\]\s+([\d.]+)%', line)
                     if m:
                         pct = float(m.group(1))
                         self.root.after(0, lambda p=pct: self._dl_progress_update(p))
-                    # 저장 파일명 추적
-                    mf = re.search(r'\[(?:download|Merger)\]\s+(?:Destination|Merging formats into):\s+"?(.+?\.\w+)"?', line)
+
+                    # ── 파일 경로 추적 (모든 패턴 누적) ────────────────────
+                    # yt-dlp가 생성하는 파일 종류:
+                    #   [download] Destination: path/title.f137.mp4    (video fragment)
+                    #   [download] Destination: path/title.f140.m4a    (audio fragment)
+                    #   [Merger]   Merging formats into: "path/title.mp4"  (병합 결과)
+                    #   [ffmpeg]   Merging formats into "path/title.mp4"   (동일 패턴)
+                    # 단일 변수 덮어쓰기 → set에 누적 (fragment 누락 방지)
+                    mf = re.search(
+                        r'\[(?:download|Merger|ffmpeg)\]\s+'
+                        r'(?:Destination|Merging formats into):?\s+"?([^"\n]+\.\w+)"?',
+                        line)
                     if mf:
-                        dest_file = mf.group(1).strip().strip('"')
-                        self._link_save_dest_glob = dest_file
+                        tracked_path = mf.group(1).strip().strip('"')
+                        self._link_save_tracked_files.add(tracked_path)
+                        dest_file = tracked_path   # 최종 완성 파일명 갱신
 
                 proc.wait()
                 self._link_save_proc = None
 
-                # 사용자가 중단한 경우 (proc.kill 이후 returncode != 0)
-                if proc.returncode != 0 and not getattr(self, "_link_save_proc", None) is None:
+                # ── 취소된 경우 → _link_save_cancel 이 파일 정리를 담당하므로 여기서 종료
+                if getattr(self, "_link_save_cancelled", False):
                     return
 
                 if proc.returncode == 0:
@@ -703,8 +794,11 @@ class LipSyncGUILogic:
                 self._log_lines.append(f"[{ts}] ❌ yt-dlp 예외: {e}")
             finally:
                 self._link_save_proc = None
-                self.root.after(0, self._dl_stop_btn_hide)
-                self.root.after(0, lambda: self._link_save_btn.config(state="normal"))
+                # 취소된 경우 UI 복구는 _link_save_cancel의 _cleanup 스레드가 담당
+                # (여기서 중복 처리하면 "⏹ 저장 중단" 메시지가 덮어쓰여짐)
+                if not getattr(self, "_link_save_cancelled", False):
+                    self.root.after(0, self._dl_stop_btn_hide)
+                    self.root.after(0, lambda: self._link_save_btn.config(state="normal"))
 
         threading.Thread(target=_run, daemon=True, name="yt-dlp-save").start()
 

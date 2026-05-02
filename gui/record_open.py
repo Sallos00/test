@@ -306,6 +306,12 @@ class LipSyncGUIRecordOpen:
             os.makedirs(d, exist_ok=True)
             return d
 
+        def ensure_record_dir():
+            """녹화 저장 폴더: 설정폴더/Video/Recode (없으면 생성)"""
+            d = os.path.join(state["save_dir"], "Video", "Recode")
+            os.makedirs(d, exist_ok=True)
+            return d
+
         def show_recording_overlay():
             from gui.record_backend import _show_overlay
             close_recording_overlay()
@@ -587,7 +593,7 @@ class LipSyncGUIRecordOpen:
                     state["audio_rec"]  = _AudioRecorder()
                     state["screen_rec"] = _ScreenRecorder()
                     _ts       = _time.strftime("%Y%m%d_%H%M%S")
-                    _out_path = os.path.join(ensure_subdir("Video"),
+                    _out_path = os.path.join(ensure_record_dir(),
                                              f"auto_record_{_ts}.mp4")
                     state["out_path"] = _out_path
 
@@ -705,7 +711,7 @@ class LipSyncGUIRecordOpen:
                 state["audio_rec"]  = _AudioRecorder()
                 state["screen_rec"] = _ScreenRecorder()
                 _ts       = _time.strftime("%Y%m%d_%H%M%S")
-                _out_path = os.path.join(ensure_subdir("Video"),
+                _out_path = os.path.join(ensure_record_dir(),
                                          f"record_{_ts}.mp4")
                 state["out_path"] = _out_path
 

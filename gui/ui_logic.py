@@ -143,7 +143,7 @@ class LipSyncGUILogic:
     def _link_play(self):
         """재생 버튼 콜백.
         1) URL 확인 → 2) Livehistory.json 생성 → 3) PotPlayer 확인/실행
-        4) 클립보드 복사 → 5) Ctrl+V 전달 → 6) 기록 저장
+        4) Facebook이면 스트림 URL 추출 → 5) 클립보드 복사+Ctrl+V 전달 → 6) 기록 저장
         """
         self._ensure_link_play_mode_state()
         if not hasattr(self, "_log_lines"):
@@ -173,27 +173,16 @@ class LipSyncGUILogic:
                     self._link_status("❌ PotPlayer 핸들을 찾을 수 없습니다.", warn=True)
                     return
 
-                # 클립보드에 URL 복사 (tkinter 메인 스레드에서 실행)
-                self.root.after(0, lambda: self._clipboard_set(url))
-                _time.sleep(0.3)   # 클립보드 반영 대기
+                # Facebook 등 PotPlayer 직접 처리 불가 URL은 스트림 추출
+                play_url = self._resolve_play_url(url)
 
-                # PotPlayer에 Ctrl+V 전달
-                import ctypes
-                VK_CONTROL = 0x11
-                VK_V       = 0x56
-                user32 = ctypes.windll.user32
-                user32.SetForegroundWindow(hwnd)
-                _time.sleep(0.1)
-                user32.keybd_event(VK_CONTROL, 0, 0, 0)
-                user32.keybd_event(VK_V,       0, 0, 0)
-                user32.keybd_event(VK_V,       0, 2, 0)   # KEYUP
-                user32.keybd_event(VK_CONTROL, 0, 2, 0)   # KEYUP
-                _time.sleep(0.1)
+                # PotPlayer에 URL 전달 (클립보드 Ctrl+V)
+                self._send_url_to_potplayer(hwnd, play_url)
 
                 # 링크 재생 모드 ON → 싱크/OP/ED 비활성화
                 self.root.after(0, lambda: self._set_link_play_mode(True))
 
-                # 시청 기록 저장
+                # 시청 기록 저장 (원본 URL 기준으로 저장)
                 self.root.after(0, lambda: self._save_live_history_entry(url))
                 self.root.after(0, lambda: self._refresh_live_history_list())
                 self.root.after(0, lambda: self._update_link_resume_btn())
@@ -336,17 +325,46 @@ class LipSyncGUILogic:
             f"[{_time.strftime('%H:%M:%S')}] 🔗 링크 기록 추가: {url}")
 
     def _live_hist_update_title(self, title: str):
-        """마지막으로 기록된 항목의 제목을 PotPlayer 창 제목으로 갱신한다."""
+        """마지막으로 기록된 항목의 제목을 PotPlayer 창 제목으로 갱신한다.
+        [수정] 동일 계열(시리즈) 이전 기록이 있으면 덮어쓰기(중복 제거).
+        예) 기존: 꼬마마법사 레미_49화 → 새: 꼬마마법사 레미_50화 이면
+            49화 기록 제거 후 50화로 교체.
+        """
         if not title:
             return
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
         records = self._load_live_history()
         if not records:
             return
+
+        # 마지막 항목 제목 갱신
         records[-1]["title"] = title
+
+        # ── 계열(시리즈) 기반 중복 제거 ─────────────────────────────────────
+        # _strip_series_name 으로 계열명 추출 후 동일 계열의 이전 기록 삭제
+        new_series = _strip_series_name(title)
+        if new_series:
+            current_url = records[-1].get("url", "")
+            kept = []
+            for rec in records[:-1]:   # 마지막(방금 갱신된 것) 제외한 이전 기록들
+                existing_title = rec.get("title", "")
+                if existing_title:
+                    existing_series = _strip_series_name(existing_title)
+                    # 계열명이 같고 URL이 다르면 이전 화수 기록으로 간주 → 제거
+                    if (existing_series
+                            and existing_series == new_series
+                            and rec.get("url", "") != current_url):
+                        self._log_lines.append(
+                            f"[{_time.strftime('%H:%M:%S')}] 🔗 링크 계열 덮어쓰기: "
+                            f"{existing_title} → {title}")
+                        continue   # 이전 기록 드롭
+                kept.append(rec)
+            kept.append(records[-1])   # 갱신된 최신 기록 추가
+            records = kept
+
         self._save_live_history(records)
         self._refresh_live_history_list()
-        if not hasattr(self, "_log_lines"):
-            self._log_lines = collections.deque(maxlen=100)
         self._log_lines.append(
             f"[{_time.strftime('%H:%M:%S')}] 🔗 링크 기록 제목 갱신: {title}")
 
@@ -585,16 +603,45 @@ class LipSyncGUILogic:
                 # 저장 파일 경로 패턴 추적 (중단 시 삭제용)
                 self._link_save_dest_glob = os.path.join(dl_dir, "")
 
+                # ── Facebook 여부 판별 ─────────────────────────────────────────
+                _is_facebook = bool(re.search(
+                    r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
+
+                # ── yt-dlp 명령 구성 ───────────────────────────────────────────
+                # [수정1] --postprocessor-args 뒤 쉼표 누락 버그 수정
+                #         (이전 코드에서 두 문자열이 연결되어 모든 저장 실패)
+                # [수정2] 병렬 다운로드 옵션 추가 (-N 8 / --concurrent-fragments 8)
+                # [수정3] Facebook 쿠키·헤더 처리 추가
                 cmd = [
                     ytdlp,
                     "-f", "bestvideo+bestaudio/best",
                     "--merge-output-format", "mp4",
-                    "--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k"
+                    # 병렬 다운로드: 속도 개선
+                    "-N", "8",
+                    "--concurrent-fragments", "8",
+                    "--buffer-size", "16K",
+                    # ffmpeg 후처리 (쉼표 누락 버그 수정: 반드시 별도 원소)
+                    "--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k",
                     "--ffmpeg-location", os.path.dirname(ffmpeg),
                     "--newline",
                     "-o", os.path.join(dl_dir, "%(playlist_title)s/%(title)s.%(ext)s"),
-                    url,
                 ]
+
+                # Facebook: 브라우저 쿠키 자동 추출 (로그인 세션 활용)
+                if _is_facebook:
+                    # Chrome → Firefox → Edge 순으로 시도
+                    # yt-dlp 가 해당 브라우저를 찾지 못하면 자동 스킵
+                    for _fb_browser in ("chrome", "firefox", "edge", "chromium"):
+                        _browser_hint = _fb_browser
+                        break   # 첫 번째만 우선 지정; 실패 시 사용자 안내
+                    cmd.extend(["--cookies-from-browser", _browser_hint])
+                    cmd.extend(["--add-header",
+                                "Referer:https://www.facebook.com/"])
+                    cmd.extend(["--extractor-retries", "3"])
+                    self.root.after(0, lambda: self._link_status(
+                        f"⏳ Facebook 저장 중 ({_browser_hint} 쿠키 사용)…"))
+
+                cmd.append(url)
 
                 proc = subprocess.Popen(
                     cmd,
@@ -635,8 +682,15 @@ class LipSyncGUILogic:
                     self._log_lines.append(f"[{ts}] ✅ yt-dlp 저장 완료: {url}")
                 else:
                     self._link_save_dest_glob = None
-                    self.root.after(0, lambda: self._link_status(
-                        "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
+                    # Facebook 실패 시 추가 안내 메시지
+                    if _is_facebook:
+                        self.root.after(0, lambda: self._link_status(
+                            "❌ Facebook 저장 실패. "
+                            "브라우저에서 Facebook에 로그인되어 있는지 확인하세요.",
+                            warn=True))
+                    else:
+                        self.root.after(0, lambda: self._link_status(
+                            "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
                     self.root.after(0, self._dl_progress_hide)
                     self._log_lines.append(
                         f"[{ts}] ❌ yt-dlp 저장 실패 (code {proc.returncode}): {url}")
@@ -872,8 +926,152 @@ class LipSyncGUILogic:
         """기록 목록의 이어보기 버튼 클릭 — 특정 URL로 재생 (URL 입력창 미표시)."""
         self._link_play_url(url)
 
+    def _resolve_play_url(self, url: str) -> str:
+        """재생용 URL을 반환한다.
+        Facebook 등 PotPlayer가 직접 처리하지 못하는 플랫폼은
+        yt-dlp -g 로 실제 스트림 URL을 추출해 반환한다.
+        추출에 실패하거나 일반 URL이면 원본 URL을 그대로 반환한다.
+
+        [Facebook 처리 근거]
+        PotPlayer는 Facebook URL을 Ctrl+V로 받아도 스트림을 자동 추출하지 못함.
+        yt-dlp --get-url 로 실제 CDN 스트림 URL을 얻은 뒤 PotPlayer에 전달하면
+        정상 재생된다. 브라우저 쿠키(--cookies-from-browser)를 사용해 로그인
+        세션을 자동 공유한다.
+        """
+        if not url:
+            return url
+
+        is_facebook = bool(re.search(
+            r'(facebook\.com|fb\.watch|fb\.com)', url.lower()))
+
+        if not is_facebook:
+            return url   # 일반 URL — 원본 그대로
+
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        ts = _time.strftime("%H:%M:%S")
+        self._log_lines.append(
+            f"[{ts}] 🔍 Facebook 스트림 URL 추출 시도: {url}")
+        self.root.after(0, lambda: self._link_status(
+            "⏳ Facebook 스트림 URL 추출 중…"))
+
+        try:
+            ytdlp = self._ensure_ytdlp()
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⚠ yt-dlp 없어 Facebook 직접 전달: {e}")
+            return url
+
+        # Chrome → Firefox → Edge 순으로 쿠키 추출 시도
+        for browser in ("chrome", "firefox", "edge", "chromium"):
+            try:
+                cmd = [
+                    ytdlp,
+                    "--get-url",
+                    "--no-playlist",
+                    "-f", "bestvideo+bestaudio/best/bestvideo/bestaudio",
+                    "--cookies-from-browser", browser,
+                    "--extractor-retries", "2",
+                    "--socket-timeout", "15",
+                    url,
+                ]
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=30,
+                    creationflags=0x08000000,   # CREATE_NO_WINDOW
+                )
+                if proc.returncode == 0:
+                    # stdout 에 스트림 URL이 줄바꿈으로 구분되어 출력될 수 있음
+                    # (video + audio 따로 나오는 경우) → 첫 번째 줄 사용
+                    lines = [l.strip() for l in proc.stdout.splitlines()
+                             if l.strip().startswith("http")]
+                    if lines:
+                        resolved = lines[0]
+                        self._log_lines.append(
+                            f"[{_time.strftime('%H:%M:%S')}] ✅ Facebook 스트림 추출 완료 "
+                            f"({browser}): {resolved[:80]}")
+                        return resolved
+                # 해당 브라우저 실패 → 다음 브라우저 시도
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 실패 ({browser}), "
+                    f"다음 브라우저 시도…")
+            except subprocess.TimeoutExpired:
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 타임아웃 ({browser})")
+            except Exception as e:
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 추출 예외 ({browser}): {e}")
+
+        # 쿠키 없이 재시도 (공개 영상)
+        try:
+            cmd_no_cookie = [
+                ytdlp,
+                "--get-url",
+                "--no-playlist",
+                "-f", "bestvideo+bestaudio/best/bestvideo/bestaudio",
+                "--extractor-retries", "2",
+                "--socket-timeout", "15",
+                url,
+            ]
+            proc2 = subprocess.run(
+                cmd_no_cookie,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=25,
+                creationflags=0x08000000,
+            )
+            if proc2.returncode == 0:
+                lines = [l.strip() for l in proc2.stdout.splitlines()
+                         if l.strip().startswith("http")]
+                if lines:
+                    self._log_lines.append(
+                        f"[{_time.strftime('%H:%M:%S')}] ✅ Facebook 스트림 추출 완료 "
+                        f"(쿠키 없음): {lines[0][:80]}")
+                    return lines[0]
+        except Exception:
+            pass
+
+        # 모두 실패 → 원본 URL 그대로 (PotPlayer 자체 처리에 위임)
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] ⚠ Facebook 스트림 추출 실패 → 원본 URL 사용")
+        self.root.after(0, lambda: self._link_status(
+            "⚠ Facebook 스트림 추출 실패. 브라우저 로그인 상태를 확인하세요.",
+            warn=True))
+        return url
+
+    def _send_url_to_potplayer(self, hwnd: int, url: str):
+        """PotPlayer 창에 URL을 클립보드로 붙여넣기한다.
+        공통 로직을 한 곳으로 집약해 _link_play / _link_play_url 에서 재사용.
+        """
+        import ctypes
+        self.root.after(0, lambda: self._clipboard_set(url))
+        _time.sleep(0.35)   # 클립보드 반영 대기
+
+        VK_CONTROL = 0x11
+        VK_V       = 0x56
+        user32 = ctypes.windll.user32
+        user32.SetForegroundWindow(hwnd)
+        _time.sleep(0.1)
+        user32.keybd_event(VK_CONTROL, 0, 0, 0)
+        user32.keybd_event(VK_V,       0, 0, 0)
+        user32.keybd_event(VK_V,       0, 2, 0)   # KEYUP
+        user32.keybd_event(VK_CONTROL, 0, 2, 0)   # KEYUP
+        _time.sleep(0.1)
+
+
     def _link_play_url(self, url: str):
-        """지정된 URL을 PotPlayer에서 재생한다. 입력창을 수정하지 않는다."""
+        """지정된 URL을 PotPlayer에서 재생한다. 입력창을 수정하지 않는다.
+        [수정] Facebook URL은 _resolve_play_url 로 스트림 URL을 먼저 추출한다.
+        """
         self._ensure_link_play_mode_state()
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
@@ -897,22 +1095,14 @@ class LipSyncGUILogic:
                     self._link_status("❌ PotPlayer 핸들을 찾을 수 없습니다.", warn=True)
                     return
 
-                self.root.after(0, lambda: self._clipboard_set(url))
-                _time.sleep(0.3)
+                # Facebook 등 직접 처리 불가 URL은 스트림 추출
+                play_url = self._resolve_play_url(url)
 
-                import ctypes
-                VK_CONTROL = 0x11
-                VK_V       = 0x56
-                user32 = ctypes.windll.user32
-                user32.SetForegroundWindow(hwnd)
-                _time.sleep(0.1)
-                user32.keybd_event(VK_CONTROL, 0, 0, 0)
-                user32.keybd_event(VK_V,       0, 0, 0)
-                user32.keybd_event(VK_V,       0, 2, 0)
-                user32.keybd_event(VK_CONTROL, 0, 2, 0)
-                _time.sleep(0.1)
+                # PotPlayer에 URL 전달
+                self._send_url_to_potplayer(hwnd, play_url)
 
                 self.root.after(0, lambda: self._set_link_play_mode(True))
+                # 이어보기 기록은 원본 URL 기준으로 저장
                 self.root.after(0, lambda: self._save_live_history_entry(url))
                 self.root.after(0, lambda: self._refresh_live_history_list())
                 self.root.after(0, lambda: self._update_link_resume_btn())

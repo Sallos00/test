@@ -483,6 +483,22 @@ class LipSyncGUILogic:
                 f"기존 제목 유지: {existing_title!r} (무시된 제목: {title[:60]!r})")
             return
 
+        # ── [Facebook 제목 정리] 조회수·반응수 등 불필요한 접두어 제거 ──────────
+        # PotPlayer 가 Facebook 영상을 재생하면 창 제목에
+        # "1.9K views · 18 reactions | 실제 제목" 형태가 포함될 수 있다.
+        # "|" 구분자 기준 마지막 부분만 실제 제목으로 사용한다.
+        last_url = records[-1].get("url", "")
+        if re.search(r'(facebook\.com|fb\.watch|fb\.com)', last_url.lower()):
+            if "|" in title:
+                # parts[0] = 조회수·반응수 등 불필요한 접두어
+                # parts[1] = 실제 제목  (두 번째 | 이후 이름 등은 버림)
+                cleaned = title.split("|")[1].strip()
+                if cleaned:  # 빈 문자열 방지
+                    self._log_lines.append(
+                        f"[{_time.strftime('%H:%M:%S')}] 🔗 Facebook 제목 정리: "
+                        f"{title!r} → {cleaned!r}")
+                    title = cleaned
+
         # 마지막 항목 제목 갱신
         records[-1]["title"] = title
 

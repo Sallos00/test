@@ -929,6 +929,31 @@ class LipSyncGUILogic:
                 # 치지직·Soop은 HLS(m3u8) 세그먼트 방식이므로 버퍼 1M 적용
                 _buf = "1M" if (_is_chzzk or _is_soop) else "16K"
 
+                # ── 재생목록 여부 사전 확인 → 출력 경로 결정 ──────────────────
+                # 단일 영상이면 폴더 생성 없이 dl_dir 바로 저장,
+                # 재생목록이면 기존대로 playlist_title 하위 폴더에 저장.
+                _is_playlist = False
+                try:
+                    import json as _json
+                    _meta_proc = __import__("subprocess").run(
+                        [ytdlp, "--flat-playlist", "-J",
+                         "--no-warnings", "--quiet", url],
+                        capture_output=True, text=True, timeout=30,
+                        creationflags=0x08000000 if os.name == "nt" else 0)
+                    _meta = _json.loads(_meta_proc.stdout)
+                    _is_playlist = (
+                        _meta.get("_type") == "playlist"
+                        and int(_meta.get("playlist_count") or 0) > 1
+                    )
+                except Exception:
+                    pass  # 확인 실패 시 단일 영상으로 간주
+
+                if _is_playlist:
+                    _out_tmpl = os.path.join(
+                        dl_dir, "%(playlist_title)s", "%(title)s.%(ext)s")
+                else:
+                    _out_tmpl = os.path.join(dl_dir, "%(title)s.%(ext)s")
+
                 cmd = [
                     ytdlp,
                     "-f", "bestvideo+bestaudio/best",
@@ -941,7 +966,7 @@ class LipSyncGUILogic:
                     "--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k",
                     "--ffmpeg-location", os.path.dirname(ffmpeg),
                     "--newline",
-                    "-o", os.path.join(dl_dir, "%(playlist_title)s/%(title)s.%(ext)s"),
+                    "-o", _out_tmpl,
                 ]
 
                 # ── 치지직 전용 HLS 속도 개선 옵션 ──────────────────────────

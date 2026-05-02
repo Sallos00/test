@@ -412,14 +412,43 @@ class LipSyncGUILayout:
         top.pack(fill="x", padx=P2, pady=(round(10*r), 0))
         reg(top, bg="BG2")
 
-        reg(tk.Label(top, text="인터넷 영상 재생",
-                     font=("Consolas", self.F_MONO_S, "bold"),
-                     bg=self.BG2, fg=self.TEXT_MID),
-            bg="BG2", fg="TEXT_MID").pack(anchor="w")
+        # ── 서브탭 버튼 행: [인터넷영상재생] [저장위치] ───────────────────────
+        _stab_pages = {}
+        _stab_btns  = {}
 
-        # URL 입력창 (단독 행 — 재생 버튼 분리)
-        url_row = tk.Frame(top, bg=self.BG2)
-        url_row.pack(fill="x", pady=(round(4*r), 0))
+        _stab_btn_row = tk.Frame(top, bg=self.BG2)
+        _stab_btn_row.pack(fill="x", pady=(0, round(6*r)))
+        reg(_stab_btn_row, bg="BG2")
+
+        def _switch_inet_stab(name):
+            for p in _stab_pages.values():
+                p.pack_forget()
+            _stab_pages[name].pack(fill="x")
+            for n, b in _stab_btns.items():
+                b.config(bg=self.BG3 if n == name else self.BG2,
+                         fg=self.ACCENT if n == name else self.TEXT_MID)
+
+        _STAB_S = dict(font=("Consolas", self.F_MONO_S, "bold"),
+                       relief="flat", cursor="hand2",
+                       padx=round(8*r), pady=round(2*r),
+                       activebackground=self.BORDER)
+        for _lbl, _key in [("인터넷영상재생", "play"), ("저장위치", "savedir")]:
+            _b = reg(tk.Button(_stab_btn_row, text=_lbl,
+                               bg=self.BG2, fg=self.TEXT_MID,
+                               command=lambda k=_key: _switch_inet_stab(k),
+                               **_STAB_S),
+                     bg="BG2", fg="TEXT_MID", abg="BORDER")
+            _b.pack(side="left")
+            _stab_btns[_key] = _b
+
+        # ── 서브탭 1: 인터넷영상재생 ──────────────────────────────────────────
+        _play_page = tk.Frame(top, bg=self.BG2)
+        _stab_pages["play"] = _play_page
+        reg(_play_page, bg="BG2")
+
+        # URL 입력창
+        url_row = tk.Frame(_play_page, bg=self.BG2)
+        url_row.pack(fill="x")
         reg(url_row, bg="BG2")
 
         self._link_url_var = tk.StringVar()
@@ -431,19 +460,17 @@ class LipSyncGUILayout:
                              relief="flat", bd=4)
         url_entry.pack(fill="x", expand=True)
 
-        # ── 버튼 행: [▶ 재생(빨간 박스)] [저장(노란 박스)] ──────
-        btn_row = tk.Frame(top, bg=self.BG2)
+        # 버튼 행
+        btn_row = tk.Frame(_play_page, bg=self.BG2)
         btn_row.pack(fill="x", pady=(round(6*r), 0))
         reg(btn_row, bg="BG2")
 
-        # 재생 버튼 (이미지 빨간 박스 위치)
         reg(tk.Button(btn_row, text="▶ 재생",
                       bg=self.BG3, fg=self.ACCENT,
                       activebackground=self.BORDER,
                       command=self._link_play, **BTN_S),
             bg="BG3", fg="ACCENT", abg="BORDER").pack(side="left")
 
-        # 저장 버튼 (이미지 노란 박스 위치) — yt-dlp 다운로드
         self._link_save_btn = reg(
             tk.Button(btn_row, text="저장",
                       bg=self.BG3, fg="#c8a83c",
@@ -452,7 +479,6 @@ class LipSyncGUILayout:
             bg="BG3", fg="TEXT_MID", abg="BORDER")
         self._link_save_btn.pack(side="left", padx=(round(4*r), 0))
 
-        # 저장 중지 버튼 (저장 진행 중에만 표시)
         self._link_stop_btn = reg(
             tk.Button(btn_row, text="■ 중지",
                       bg=self.BG3, fg=self.ACCENT2,
@@ -461,16 +487,16 @@ class LipSyncGUILayout:
             bg="BG3", fg="ACCENT2", abg="BORDER")
         # pack() 하지 않음 — _dl_stop_btn_show() 에서 표시
 
-        # 상태 레이블 (이미지 녹색 박스 위치)
+        # 상태 레이블
         self._link_status_lbl = reg(
-            tk.Label(top, text="URL을 입력하고 재생 버튼을 클릭하세요.",
+            tk.Label(_play_page, text="URL을 입력하고 재생 버튼을 클릭하세요.",
                      font=("Consolas", max(7, self.F_MONO_S - 1)),
                      bg=self.BG2, fg=self.TEXT_DIM),
             bg="BG2", fg="TEXT_DIM")
         self._link_status_lbl.pack(anchor="w", pady=(round(4*r), 0))
 
-        # ── 다운로드 진행 UI (초기 숨김) ──────────────────────────────────────
-        dl_row = tk.Frame(top, bg=self.BG2)
+        # 다운로드 진행 UI (초기 숨김)
+        dl_row = tk.Frame(_play_page, bg=self.BG2)
         reg(dl_row, bg="BG2")
         self._dl_row = dl_row
 
@@ -488,6 +514,80 @@ class LipSyncGUILayout:
         self._dl_pct_lbl.pack(anchor="w", pady=(round(2*r), 0))
 
         dl_row.pack_forget()   # 다운로드 시작 전까지 숨김
+
+        # ── 서브탭 2: 저장위치 (녹화/캡처 탭 record_save_dir 연동) ───────────
+        _savedir_page = tk.Frame(top, bg=self.BG2)
+        _stab_pages["savedir"] = _savedir_page
+        reg(_savedir_page, bg="BG2")
+
+        _init_save_dir = (getattr(self, "_record_save_dir", None)
+                          or self._load_setting("record_save_dir", ""))
+        self._link_save_dir_var = tk.StringVar(value=_init_save_dir)
+
+        _sd_row = tk.Frame(_savedir_page, bg=self.BG2)
+        _sd_row.pack(fill="x")
+        reg(_sd_row, bg="BG2")
+
+        reg(tk.Entry(_sd_row,
+                     textvariable=self._link_save_dir_var,
+                     font=("Consolas", max(7, self.F_MONO_S - 1)),
+                     bg="white", fg="#111111",
+                     disabledforeground="#111111",
+                     readonlybackground="white",
+                     insertbackground=self.ACCENT,
+                     relief="flat", bd=4,
+                     state="readonly"),
+            bg="BG2").pack(side="left", fill="x", expand=True)
+
+        def _link_pick_save_dir():
+            from tkinter import filedialog
+            import json
+            path = filedialog.askdirectory(
+                title="저장 위치 선택",
+                initialdir=(self._link_save_dir_var.get()
+                             or os.path.expanduser("~")))
+            if path:
+                self._link_save_dir_var.set(path)
+                self._record_save_dir = path
+                try:
+                    existing = {}
+                    try:
+                        with open(self.CFG_FILE, "r") as f:
+                            existing = json.load(f)
+                    except Exception:
+                        pass
+                    existing["record_save_dir"] = path
+                    os.makedirs(self.APP_DIR, exist_ok=True)
+                    with open(self.CFG_FILE, "w") as f:
+                        json.dump(existing, f)
+                except Exception:
+                    pass
+
+        def _link_open_save_dir():
+            d = (getattr(self, "_record_save_dir", None)
+                 or self._link_save_dir_var.get())
+            if d and os.path.isdir(d):
+                os.startfile(d)
+
+        reg(tk.Button(_sd_row, text="📂",
+                      bg=self.BG3, fg=self.TEXT,
+                      activebackground=self.BORDER,
+                      relief="flat", cursor="hand2",
+                      padx=round(6*r), pady=round(3*r),
+                      command=_link_pick_save_dir),
+            bg="BG3", abg="BORDER").pack(side="left", padx=(round(4*r), 0))
+
+        reg(tk.Button(_sd_row, text="열기",
+                      bg=self.BG3, fg=self.TEXT_MID,
+                      activebackground=self.BORDER,
+                      relief="flat", cursor="hand2",
+                      padx=round(6*r), pady=round(3*r),
+                      command=_link_open_save_dir),
+            bg="BG3", fg="TEXT_MID", abg="BORDER").pack(
+            side="left", padx=(round(4*r), 0))
+
+        # 초기 서브탭: 인터넷영상재생
+        _switch_inet_stab("play")
 
         # ── 구분선 ────────────────────────────────────────────────────────────
         reg(tk.Frame(parent, bg=self.BORDER, height=1),

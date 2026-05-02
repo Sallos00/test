@@ -86,8 +86,6 @@ class RefreshMixin:
                             # 수정: _update_ui에서 _pot_was_ok를 직접 확인해 즉시 호출.
                             #   _refresh의 omed/main 블록과의 중복 전환은 이 시점에
                             #   _pot_was_ok=False로 설정함으로써 방지한다.
-                            if getattr(self, "_pot_was_ok", False) and hasattr(self, "_switch_tab_fn"):
-                                self._switch_tab_fn("history")
                             self._pot_was_ok = False   # 즉시 미감지 상태로 고정
 
                             # ── [연결됨 → 미감지] 전환: 상태 표기 즉시 갱신 ──────────
@@ -219,9 +217,6 @@ class RefreshMixin:
                     self._om_log_seen_last  = om_logs[-1] if om_logs else None
 
                 pot_ok = om_latest.get("potplayer_ok", False)
-                if not pot_ok and getattr(self, "_pot_was_ok", False):
-                    if hasattr(self, "_switch_tab_fn"):
-                        self._switch_tab_fn("history")
                 self._pot_was_ok = pot_ok
 
                 # ── 팟플레이어 상태 표기 ─────────────────────────────────────
@@ -307,9 +302,6 @@ class RefreshMixin:
             corr   = latest.get("correction_ms", 0)
             logs   = latest.get("log_lines", [])
 
-            if not pot_ok and getattr(self, "_pot_was_ok", False):
-                if hasattr(self, "_switch_tab_fn"):
-                    self._switch_tab_fn("history")
             self._pot_was_ok = pot_ok
 
             # ── 팟플레이어 상태 표기 ─────────────────────────────────────────

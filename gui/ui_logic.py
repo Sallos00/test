@@ -205,6 +205,9 @@ class LipSyncGUILogic:
         if active:
             self._log_lines.append(
                 f"[{ts}] 🔗 링크 재생 모드 ON → 싱크 보정·OP/ED 비활성화")
+            # 이미 실행 중인 OP/ED 모니터 스레드도 즉시 중지
+            # (_start_oped_monitor 가드는 신규 시작만 막고 기존 실행분은 막지 못함)
+            self._stop_oped_monitor()
         else:
             self._log_lines.append(
                 f"[{ts}] 🔗 링크 재생 모드 OFF → 싱크 보정·OP/ED 복귀")

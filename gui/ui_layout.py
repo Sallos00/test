@@ -140,10 +140,12 @@ class LipSyncGUILayout:
                     continue
                 if name == cur:
                     btn.config(bg=self.BG, fg=self.ACCENT,
-                               font=("Consolas", TAB_F, "bold"))
+                               font=("Consolas", TAB_F, "bold"),
+                               padx=round(14*r))
                 else:
                     btn.config(bg=self.BG2, fg=self.TEXT_MID,
-                               font=("Consolas", TAB_F))
+                               font=("Consolas", TAB_F),
+                               padx=round(10*r))
 
         self._switch_tab_fn        = _switch_tab
         self._update_tab_styles_fn = _update_tab_styles

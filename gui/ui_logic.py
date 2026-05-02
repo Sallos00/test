@@ -859,7 +859,14 @@ class LipSyncGUILogic:
             return
 
         import pathlib
-        dl_dir = str(pathlib.Path.home() / "Downloads")
+        # 저장 위치: 링크 탭 저장 경로 (녹화/캡처 탭과 연동)
+        _rec_dir = getattr(self, "_record_save_dir", None)
+        if not _rec_dir:
+            _rec_dir = self._load_setting("record_save_dir", "")
+        if _rec_dir and os.path.isdir(_rec_dir):
+            dl_dir = _rec_dir
+        else:
+            dl_dir = str(pathlib.Path.home() / "Downloads")
         try:
             os.makedirs(dl_dir, exist_ok=True)
         except Exception:

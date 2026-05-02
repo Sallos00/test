@@ -783,6 +783,25 @@ class LipSyncGUILogic:
                         except Exception:
                             pass
 
+            # [버그2 수정] glob 으로 다운로드 디렉터리 내 잔여 임시 파일 보완 삭제
+            #   취소가 "[download] Destination:" 출력 이전에 발생해
+            #   tracked_files 가 비어 있을 경우에도 .part / .ytdl 파일을
+            #   다운로드 디렉터리 전체에서 찾아 삭제한다.
+            import glob as _glob
+            _dl_dir = getattr(self, "_link_save_dl_dir", None)
+            if _dl_dir and os.path.isdir(_dl_dir):
+                for _pat in ("*.part", "*.ytdl"):
+                    for _f in _glob.glob(
+                            os.path.join(_dl_dir, "**", _pat), recursive=True):
+                        if os.path.isfile(_f):
+                            _bn = os.path.basename(_f)
+                            if _bn not in deleted:
+                                try:
+                                    os.remove(_f)
+                                    deleted.append(_bn)
+                                except Exception:
+                                    pass
+
             # 상태 초기화
             self._link_save_tracked_files = set()
             self._link_save_dest_glob     = None
@@ -887,82 +906,128 @@ class LipSyncGUILogic:
                 ]
 
                 # ── 치지직 전용 HLS 속도 개선 옵션 ──────────────────────────
-                # 1) --hls-use-mpegts : 세그먼트를 조각 파일로 쌓지 않고
-                #    단일 연속 스트림으로 처리 → 병합 후처리 오버헤드 감소
-                # 2) --retries / --fragment-retries : Naver CDN 토큰 만료·
+                # [버그1 수정] --hls-use-mpegts 제거
+                #   --hls-use-mpegts 는 HLS 세그먼트를 단일 순차(sequential)
+                #   MPEG-TS 스트림으로 처리하도록 yt-dlp 에 지시한다.
+                #   이 모드에서는 전역 옵션으로 설정된 --concurrent-fragments 8 이
+                #   내부적으로 무효화되어 병렬 다운로드가 동작하지 않는다.
+                #   두 옵션은 상호 배타적이므로 --hls-use-mpegts 를 제거한다.
+                # 1) --retries / --fragment-retries : Naver CDN 토큰 만료·
                 #    속도 제한으로 인한 세그먼트 오류 자동 재시도
-                # 3) --sleep-interval 0 : 세그먼트 요청 사이 불필요한 대기 제거
+                # 2) --sleep-interval 0 : 세그먼트 요청 사이 불필요한 대기 제거
                 if _is_chzzk:
                     cmd.extend([
-                        "--hls-use-mpegts",
                         "--retries", "10",
                         "--fragment-retries", "10",
                         "--sleep-interval", "0",
                         "--max-sleep-interval", "0",
                     ])
 
-                # Facebook: 브라우저 쿠키 자동 추출 (로그인 세션 활용)
+                # [버그3 수정] Facebook: 비로그인(공개 콘텐츠) 우선 시도
+                #   --cookies-from-browser 를 초기 커맨드에서 제거하고,
+                #   인증 오류가 확인된 경우에만 2차 시도에서 쿠키를 사용한다.
                 if _is_facebook:
-                    # Chrome → Firefox → Edge 순으로 시도
-                    # yt-dlp 가 해당 브라우저를 찾지 못하면 자동 스킵
-                    for _fb_browser in ("chrome", "firefox", "edge", "chromium"):
-                        _browser_hint = _fb_browser
-                        break   # 첫 번째만 우선 지정; 실패 시 사용자 안내
-                    cmd.extend(["--cookies-from-browser", _browser_hint])
                     cmd.extend(["--add-header",
                                 "Referer:https://www.facebook.com/"])
-                    cmd.extend(["--extractor-retries", "3"])
                     self.root.after(0, lambda: self._link_status(
-                        f"⏳ Facebook 저장 중 ({_browser_hint} 쿠키 사용)…"))
+                        "⏳ Facebook 저장 중…"))
 
                 cmd.append(url)
 
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    creationflags=0x08000000,  # CREATE_NO_WINDOW
-                )
-                self._link_save_proc = proc
-
+                # ── yt-dlp 실행 헬퍼 ─────────────────────────────────────────
+                # stdout 스트리밍·진행률 업데이트·파일 경로 추적을 캡슐화.
+                # Facebook 2차 재시도에서 코드 중복 없이 재사용한다.
                 dest_file = None
-                for line in proc.stdout:
-                    # 취소 신호 감지 시 stdout 읽기 중단 (proc는 이미 kill됨)
-                    if getattr(self, "_link_save_cancelled", False):
-                        break
 
-                    m = re.search(r'\[download\]\s+([\d.]+)%', line)
-                    if m:
-                        pct = float(m.group(1))
-                        self.root.after(0, lambda p=pct: self._dl_progress_update(p))
+                def _exec_ytdlp(ytdlp_cmd):
+                    """yt-dlp 를 실행하고 진행 상황을 업데이트한다.
+                    반환: (returncode: int, captured_lines: list[str])
+                    """
+                    nonlocal dest_file
+                    _p = subprocess.Popen(
+                        ytdlp_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        creationflags=0x08000000,  # CREATE_NO_WINDOW
+                    )
+                    self._link_save_proc = _p
+                    _lines = []
+                    for _ln in _p.stdout:
+                        # 취소 신호 감지 시 stdout 읽기 중단 (proc는 이미 kill됨)
+                        if getattr(self, "_link_save_cancelled", False):
+                            break
+                        _m = re.search(r'\[download\]\s+([\d.]+)%', _ln)
+                        if _m:
+                            _pct = float(_m.group(1))
+                            self.root.after(
+                                0, lambda p=_pct: self._dl_progress_update(p))
+                        # ── 파일 경로 추적 (모든 패턴 누적) ──────────────────
+                        # yt-dlp가 생성하는 파일 종류:
+                        #   [download] Destination: path/title.f137.mp4    (video fragment)
+                        #   [download] Destination: path/title.f140.m4a    (audio fragment)
+                        #   [Merger]   Merging formats into: "path/title.mp4"  (병합 결과)
+                        #   [ffmpeg]   Merging formats into "path/title.mp4"   (동일 패턴)
+                        # 단일 변수 덮어쓰기 → set에 누적 (fragment 누락 방지)
+                        _mf = re.search(
+                            r'\[(?:download|Merger|ffmpeg)\]\s+'
+                            r'(?:Destination|Merging formats into):?\s+"?([^"\n]+\.\w+)"?',
+                            _ln)
+                        if _mf:
+                            _tp = _mf.group(1).strip().strip('"')
+                            self._link_save_tracked_files.add(_tp)
+                            dest_file = _tp
+                        _lines.append(_ln)
+                    _p.wait()
+                    self._link_save_proc = None
+                    return _p.returncode, _lines
 
-                    # ── 파일 경로 추적 (모든 패턴 누적) ────────────────────
-                    # yt-dlp가 생성하는 파일 종류:
-                    #   [download] Destination: path/title.f137.mp4    (video fragment)
-                    #   [download] Destination: path/title.f140.m4a    (audio fragment)
-                    #   [Merger]   Merging formats into: "path/title.mp4"  (병합 결과)
-                    #   [ffmpeg]   Merging formats into "path/title.mp4"   (동일 패턴)
-                    # 단일 변수 덮어쓰기 → set에 누적 (fragment 누락 방지)
-                    mf = re.search(
-                        r'\[(?:download|Merger|ffmpeg)\]\s+'
-                        r'(?:Destination|Merging formats into):?\s+"?([^"\n]+\.\w+)"?',
-                        line)
-                    if mf:
-                        tracked_path = mf.group(1).strip().strip('"')
-                        self._link_save_tracked_files.add(tracked_path)
-                        dest_file = tracked_path   # 최종 완성 파일명 갱신
-
-                proc.wait()
-                self._link_save_proc = None
+                # ── 1차 실행 ─────────────────────────────────────────────────
+                _rc, _captured_lines = _exec_ytdlp(cmd)
 
                 # ── 취소된 경우 → _link_save_cancel 이 파일 정리를 담당하므로 여기서 종료
                 if getattr(self, "_link_save_cancelled", False):
                     return
 
-                if proc.returncode == 0:
+                # [버그3 수정] Facebook 인증 오류 감지 → 쿠키로 2차 재시도
+                #   1차 시도 실패 후 출력에 인증 관련 키워드가 있으면
+                #   --cookies-from-browser 를 추가해 한 번 더 실행한다.
+                if _is_facebook and _rc != 0:
+                    _fb_auth_kws = (
+                        "login", "cookie", "private", "sign in",
+                        "not available", "requires authentication",
+                        "could not extract", "unable to extract",
+                        "need to log", "authentication", "restricted",
+                        "unavailable",
+                    )
+                    _needs_retry = any(
+                        kw in _ln.lower()
+                        for _ln in _captured_lines
+                        for kw in _fb_auth_kws
+                    )
+                    if _needs_retry:
+                        for _fb_browser in ("chrome", "firefox", "edge", "chromium"):
+                            _browser_hint = _fb_browser
+                            break
+                        # cmd 마지막 원소는 url 이므로 제거 후 쿠키 옵션 삽입
+                        _cmd_retry = cmd[:-1] + [
+                            "--cookies-from-browser", _browser_hint,
+                            "--extractor-retries", "3",
+                            url,
+                        ]
+                        self.root.after(0, lambda bh=_browser_hint: self._link_status(
+                            f"⏳ Facebook 재시도 중 ({bh} 쿠키 사용)…"))
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ Facebook 비로그인 실패 "
+                            f"→ {_browser_hint} 쿠키로 재시도")
+                        _rc, _ = _exec_ytdlp(_cmd_retry)
+
+                        if getattr(self, "_link_save_cancelled", False):
+                            return
+
+                if _rc == 0:
                     self._link_save_dest_glob = None
                     self.root.after(0, lambda: self._dl_progress_update(100.0))
                     self.root.after(0, lambda: self._link_status(
@@ -975,14 +1040,15 @@ class LipSyncGUILogic:
                     if _is_facebook:
                         self.root.after(0, lambda: self._link_status(
                             "❌ Facebook 저장 실패. "
-                            "브라우저에서 Facebook에 로그인되어 있는지 확인하세요.",
+                            "공개 콘텐츠인지 확인하거나, "
+                            "브라우저에서 Facebook에 로그인 후 다시 시도하세요.",
                             warn=True))
                     else:
                         self.root.after(0, lambda: self._link_status(
                             "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
                     self.root.after(0, self._dl_progress_hide)
                     self._log_lines.append(
-                        f"[{ts}] ❌ yt-dlp 저장 실패 (code {proc.returncode}): {url}")
+                        f"[{ts}] ❌ yt-dlp 저장 실패 (code {_rc}): {url}")
 
             except Exception as e:
                 self._link_save_proc = None

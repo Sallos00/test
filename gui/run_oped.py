@@ -159,6 +159,10 @@ class OpedMonitorMixin:
 
     # ── OP/ED 스킵 팝업 ──────────────────────────────────────────────────────
     def _show_oped_skip_popup(self, prompt_info: dict, use_om_queue: bool = False):
+        # [수정] 링크 재생 모드 중에는 OP/ED 스킵 팝업 차단
+        # (omed 블록·메인 싱크 블록 양쪽에서 호출되므로 여기서 일괄 차단)
+        if getattr(self, "_link_play_mode", False):
+            return
         if getattr(self, "_oped_popup_open", False):
             return
 

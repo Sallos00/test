@@ -859,12 +859,12 @@ class LipSyncGUILogic:
             return
 
         import pathlib
-        # 저장 위치: 링크 탭 저장 경로 (녹화/캡처 탭과 연동)
+        # 저장 위치: 링크 탭 저장 경로 (녹화/캡처 탭과 연동) → 설정폴더/Video/Download
         _rec_dir = getattr(self, "_record_save_dir", None)
         if not _rec_dir:
             _rec_dir = self._load_setting("record_save_dir", "")
         if _rec_dir and os.path.isdir(_rec_dir):
-            dl_dir = _rec_dir
+            dl_dir = os.path.join(_rec_dir, "Video", "Download")
         else:
             dl_dir = str(pathlib.Path.home() / "Downloads")
         try:

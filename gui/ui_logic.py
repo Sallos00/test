@@ -1034,15 +1034,29 @@ class LipSyncGUILogic:
                     )
                     self._link_save_proc = _p
                     _lines = []
+                    _pl_cur   = 0   # 현재 다운로드 중인 재생목록 항목 번호
+                    _pl_total = 0   # 재생목록 전체 항목 수
                     for _ln in _p.stdout:
                         # 취소 신호 감지 시 stdout 읽기 중단 (proc는 이미 kill됨)
                         if getattr(self, "_link_save_cancelled", False):
                             break
+                        # ── 재생목록 카운터 파싱 ─────────────────────────────
+                        # yt-dlp 출력 예: "[download] Downloading item 3 of 25"
+                        _pm = re.search(
+                            r'\[download\]\s+Downloading item\s+(\d+)\s+of\s+(\d+)',
+                            _ln)
+                        if _pm:
+                            _pl_cur   = int(_pm.group(1))
+                            _pl_total = int(_pm.group(2))
+                        # ── 진행률 파싱 + 레이블 업데이트 ──────────────────
                         _m = re.search(r'\[download\]\s+([\d.]+)%', _ln)
                         if _m:
-                            _pct = float(_m.group(1))
+                            _pct  = float(_m.group(1))
+                            _info = (f"({_pl_cur}/{_pl_total})"
+                                     if _pl_total > 1 else "")
                             self.root.after(
-                                0, lambda p=_pct: self._dl_progress_update(p))
+                                0, lambda p=_pct, i=_info:
+                                    self._dl_progress_update(p, i))
                         # ── 파일 경로 추적 (모든 패턴 누적) ──────────────────
                         # yt-dlp가 생성하는 파일 종류:
                         #   [download] Destination: path/title.f137.mp4    (video fragment)
@@ -1063,8 +1077,168 @@ class LipSyncGUILogic:
                     self._link_save_proc = None
                     return _p.returncode, _lines
 
+                # ── 재생목록 항목별 병렬 다운로드 + 백그라운드 병합 헬퍼 ─────────
+                def _playlist_parallel_dl():
+                    """재생목록을 항목별로 처리한다.
+                    각 항목: 비디오·오디오 동시 다운로드 → 완료 즉시 백그라운드 ffmpeg 병합
+                    → 병합 중에 다음 항목 다운로드 시작 (파이프라인).
+                    """
+                    import threading as _threading
+                    from concurrent.futures import ThreadPoolExecutor as _TPE
+                    nonlocal dest_file
+
+                    entries = _meta.get("entries") or []
+                    total   = len(entries)
+                    if total == 0:
+                        return 1, []
+                    all_ok     = True
+                    merge_pool = _TPE(max_workers=total)  # 병합은 모두 동시 진행
+                    merge_futs = []
+
+                    # cmd 에서 -f / -o / --merge-output-format / --postprocessor-args 제거
+                    # → 스트림별로 개별 지정하기 위해
+                    _skip_next = False
+                    _pl_base   = []
+                    _strip_keys = {"-f", "-o", "--merge-output-format",
+                                   "--postprocessor-args"}
+                    for _item in cmd[:-1]:   # 마지막 url 제외
+                        if _skip_next:
+                            _skip_next = False
+                            continue
+                        if _item in _strip_keys:
+                            _skip_next = True
+                            continue
+                        _pl_base.append(_item)
+
+                    for idx in range(1, total + 1):
+                        if getattr(self, "_link_save_cancelled", False):
+                            break
+
+                        # 진행 카운터 초기화
+                        self.root.after(0, lambda i=idx, t=total:
+                            self._dl_progress_update(0.0, f"({i}/{t})"))
+
+                        # 임시 출력 템플릿 (비디오/오디오 구분 접미사)
+                        _tmpl_vid = os.path.join(
+                            dl_dir, "%(title)s.%(id)s.__vid.%(ext)s")
+                        _tmpl_aud = os.path.join(
+                            dl_dir, "%(title)s.%(id)s.__aud.%(ext)s")
+
+                        _vid_file = [None]
+                        _aud_file = [None]
+                        _vid_rc   = [1]
+                        _aud_rc   = [1]
+
+                        def _dl_stream(stream_cmd, file_ref, rc_ref,
+                                       show_prog, _i=idx, _t=total):
+                            _sp = subprocess.Popen(
+                                stream_cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8",
+                                errors="replace",
+                                creationflags=0x08000000)
+                            self._link_save_proc = _sp
+                            for _sln in _sp.stdout:
+                                if getattr(self, "_link_save_cancelled", False):
+                                    _sp.kill()
+                                    break
+                                if show_prog:
+                                    _sm = re.search(
+                                        r'\[download\]\s+([\d.]+)%', _sln)
+                                    if _sm:
+                                        _pct = float(_sm.group(1))
+                                        self.root.after(
+                                            0, lambda p=_pct, i=_i, t=_t:
+                                            self._dl_progress_update(
+                                                p, f"({i}/{t})"))
+                                _df = re.search(
+                                    r'\[download\]\s+Destination:\s+(.+)',
+                                    _sln)
+                                if _df:
+                                    _fp = _df.group(1).strip()
+                                    file_ref[0] = _fp
+                                    self._link_save_tracked_files.add(_fp)
+                            _sp.wait()
+                            rc_ref[0] = _sp.returncode
+
+                        _vcmd = [*_pl_base,
+                                 "--playlist-items", str(idx),
+                                 "-f", "bestvideo",
+                                 "--no-post-overwrites",
+                                 "-o", _tmpl_vid, url]
+                        _acmd = [*_pl_base,
+                                 "--playlist-items", str(idx),
+                                 "-f", "bestaudio",
+                                 "--no-post-overwrites",
+                                 "-o", _tmpl_aud, url]
+
+                        _vt = _threading.Thread(
+                            target=_dl_stream,
+                            args=(_vcmd, _vid_file, _vid_rc, True))
+                        _at = _threading.Thread(
+                            target=_dl_stream,
+                            args=(_acmd, _aud_file, _aud_rc, False))
+                        _vt.start(); _at.start()
+                        _vt.join();  _at.join()
+
+                        if getattr(self, "_link_save_cancelled", False):
+                            break
+
+                        if _vid_rc[0] != 0 or _aud_rc[0] != 0:
+                            all_ok = False
+                            continue
+
+                        _vf = _vid_file[0]
+                        _af = _aud_file[0]
+                        if not _vf or not _af:
+                            all_ok = False
+                            continue
+
+                        # 최종 출력명: 비디오 파일에서 __vid.ext 제거 후 .mp4
+                        _out_mp4 = re.sub(r'\.__vid\.[^.]+$', '.mp4', _vf)
+                        self._link_save_tracked_files.add(_out_mp4)
+                        dest_file = _out_mp4
+
+                        # 백그라운드 병합 제출 (즉시 다음 항목 다운로드로 진행)
+                        def _merge(_v=_vf, _a=_af, _o=_out_mp4):
+                            try:
+                                subprocess.run(
+                                    [ffmpeg, "-y",
+                                     "-i", _v, "-i", _a,
+                                     "-c:v", "copy",
+                                     "-c:a", "aac", "-b:a", "192k",
+                                     _o],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    creationflags=0x08000000)
+                            finally:
+                                for _tf in (_v, _a):
+                                    try:
+                                        if os.path.isfile(_tf):
+                                            os.remove(_tf)
+                                    except Exception:
+                                        pass
+                        merge_futs.append(merge_pool.submit(_merge))
+
+                    # 모든 백그라운드 병합 완료 대기
+                    if merge_futs:
+                        self.root.after(0, lambda: self._link_status(
+                            "⏳ 백그라운드 병합 완료 대기 중…"))
+                        for _fut in merge_futs:
+                            try:
+                                _fut.result()
+                            except Exception:
+                                all_ok = False
+
+                    merge_pool.shutdown(wait=False)
+                    return (0 if all_ok else 1), []
+
                 # ── 1차 실행 ─────────────────────────────────────────────────
-                _rc, _captured_lines = _exec_ytdlp(cmd)
+                if _is_playlist:
+                    _rc, _captured_lines = _playlist_parallel_dl()
+                else:
+                    _rc, _captured_lines = _exec_ytdlp(cmd)
 
                 # ── 취소된 경우 → _link_save_cancel 이 파일 정리를 담당하므로 여기서 종료
                 if getattr(self, "_link_save_cancelled", False):
@@ -1260,8 +1434,10 @@ class LipSyncGUILogic:
             except Exception:
                 pass
 
-    def _dl_progress_update(self, pct: float):
-        """다운로드 진행률(0–100) 업데이트."""
+    def _dl_progress_update(self, pct: float, playlist_info: str = ""):
+        """다운로드 진행률(0–100) 업데이트.
+        playlist_info: 재생목록일 때 '(현재/전체)' 문자열, 단일 영상이면 빈 문자열.
+        """
         bar_bg = getattr(self, "_dl_bar_bg", None)
         bar    = getattr(self, "_dl_bar",    None)
         lbl    = getattr(self, "_dl_pct_lbl", None)
@@ -1275,7 +1451,10 @@ class LipSyncGUILogic:
                 pass
         if lbl:
             try:
-                lbl.config(text=f"{pct:.1f}%")
+                txt = f"{pct:.1f}%"
+                if playlist_info:
+                    txt += f"  {playlist_info}"
+                lbl.config(text=txt)
             except Exception:
                 pass
 

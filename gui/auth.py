@@ -24,9 +24,6 @@ class LipSyncGUIAuth:
                 if s == _auth.AuthStatus.REVOKED:
                     _auth.save_local_status(_auth.AuthStatus.REVOKED)
                     self.root.after(0, self._show_auth_blocked_popup)
-                elif s == _auth.AuthStatus.PENDING:
-                    _auth.save_local_status(_auth.AuthStatus.PENDING)
-                    self.root.after(0, self._show_auth_pending_popup)
             import threading as _t
             _t.Thread(target=_verify, daemon=True).start()
         elif status == _auth.AuthStatus.PENDING:
@@ -39,19 +36,19 @@ class LipSyncGUIAuth:
     def _after_auth_ok(self):
         """인증 완료 후 버전 체크 → 정상 실행 흐름 시작.
 
-        [추가] 인증 OK 직후 백그라운드에서 서버 업데이트 시트 버전을 확인한다.
+        백그라운드에서 서버 업데이트 시트 버전을 확인한다.
         - 버전 일치 또는 확인 실패 → 바로 _do_start_app() 호출
-        - 버전 불일치               → 업데이트 안내 팝업 후 _do_start_app() 호출
-        기존 실행 흐름은 모두 _do_start_app() 으로 유지된다.
+        - 버전 불일치 + G열 비차단  → 업데이트 팝업 후 _do_start_app() 호출
+        - 버전 불일치 + G열 차단    → 팝업 없이 바로 _do_start_app() 호출
+        기존 실행 흐름은 모두 _do_start_app()으로 유지된다.
         """
         self._auth_ok = True
-        # [추가] 버전 체크를 백그라운드 스레드에서 수행 (UI 블로킹 방지)
         threading.Thread(
             target=self._check_version_and_start,
             daemon=True).start()
 
     def _do_start_app(self):
-        """실제 앱 시작 로직 — 기존 _after_auth_ok 의 실행 흐름을 그대로 유지."""
+        """실제 앱 시작 로직 — 기존 _after_auth_ok의 실행 흐름을 그대로 유지."""
         if self._autostart_var.get():
             self.root.after(500, self._toggle)
         else:
@@ -64,30 +61,28 @@ class LipSyncGUIAuth:
         # 5분마다 차단 여부 백그라운드 확인
         threading.Thread(target=self._monitor_auth, daemon=True).start()
 
-    # ── [추가] 버전 체크 ────────────────────────────────────────────────────
-
     def _check_version_and_start(self):
         """백그라운드: 서버 업데이트 시트 버전 확인 → 결과에 따라 팝업 또는 바로 시작.
 
         - 서버 응답 실패 / 예외 발생 시 → 프로그램 종료 없이 바로 시작
-        - 버전 일치   → 바로 시작
-        - 버전 불일치 → G열 건너뛰기 여부 추가 확인 후 팝업 또는 바로 시작
+        - 버전 일치                      → 바로 시작
+        - 버전 불일치 + G열 '차단'       → 팝업 생략, 바로 시작
+        - 버전 불일치 + G열 비차단       → 업데이트 팝업 표시
         """
         import logging as _log
         try:
             resp    = _auth_module.check_version()
             latest  = resp.get("latest", "").strip()
-            current = _auth_module.APP_VERSION
+            current = _auth_module.APP_VERSION.strip()
             if latest and latest != current:
-                # G열 '차단' 여부 확인 — 차단이면 팝업 생략하고 바로 시작
+                # G열 '차단' 여부 확인 — 문자열 공백/케이스 방어
                 pc_id   = _auth_module.get_pc_id()
                 skipped = _auth_module.check_update_skipped(pc_id)
                 _log.debug(
-                    "[update_skip] latest=%s current=%s skipped=%s",
+                    "[version_check] latest=%s current=%s skipped=%s",
                     latest, current, skipped)
-                # skipped가 명시적으로 True일 때만 팝업 억제 (None/False/오류 → 팝업 표시)
                 if skipped is True:
-                    # G열 차단 확정 → 바로 시작
+                    # G열 차단 확정 → 팝업 없이 바로 시작
                     self.root.after(0, self._do_start_app)
                     return
                 # 차단 아님 → 업데이트 팝업 표시
@@ -107,9 +102,10 @@ class LipSyncGUIAuth:
         - 팝업 강제 종료(X 버튼) 시에도 앱은 정상 시작된다.
         - 예외 발생 시 팝업 없이 바로 시작한다.
         """
-        # [수정] Bug 2: 팝업 진입 시점에 G열 '차단' 여부를 재확인한다.
+        # 팝업 진입 시점에 G열 '차단' 여부를 재확인한다.
         # _check_version_and_start()의 확인과 root.after() 스케줄 사이의
-        # 타이밍 차이로 팝업이 노출될 수 있는 경로를 방어한다.
+        # 타이밍 간격에서 팝업이 노출될 수 있는 경로를 방어한다.
+        # 확인 실패(네트워크 오류 등) 시에는 기존대로 팝업을 표시한다.
         try:
             if _auth_module.check_update_skipped(_auth_module.get_pc_id()):
                 self._do_start_app()
@@ -124,10 +120,9 @@ class LipSyncGUIAuth:
             popup.grab_set()
 
             r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-            # [수정] 높이를 200→250으로 확장하여 체크박스·버튼 잘림 방지
             self._place_popup(popup, round(300 * r), round(250 * r))
 
-            PAD     = round(10 * r)   # [수정] 20→10: 구분선 위쪽(10*r)과 동일하게 맞춤
+            PAD     = round(10 * r)
             F_TITLE = max(9,  round(11 * r))
             F_BODY  = max(8,  round(9  * r))
             F_SMALL = max(7,  round(8  * r))
@@ -181,7 +176,7 @@ class LipSyncGUIAuth:
             tk.Frame(popup, bg=self.BORDER, height=1).pack(
                 fill="x", padx=round(16 * r), pady=(round(12 * r), 0))
 
-            # ── [추가] 버전 건너뛰기 체크박스 ──
+            # ── 버전 건너뛰기 체크박스 ──
             skip_var = tk.BooleanVar(value=False)
             tk.Checkbutton(popup, text="해당 버전 업데이트 건너뛰기",
                            variable=skip_var,
@@ -200,17 +195,16 @@ class LipSyncGUIAuth:
                        relief="flat", cursor="hand2",
                        padx=round(14 * r), pady=round(5 * r))
 
-            # [수정] Bug 1: "나중에" 핸들러.
+            # "나중에" 핸들러:
             # skip 스레드를 _close_and_start() 이전에 기동한다.
-            # 기존 순서(_close_and_start → 스레드 기동)에서는 _do_start_app() 내부
-            # 예외가 전파될 경우 이후 블록이 실행되지 않아 G열이 갱신되지 않는다.
-            # 스레드를 먼저 기동해 서버 요청을 독립적으로 보장한 뒤 팝업을 닫는다.
-            # daemon=False: 앱 종료 시에도 HTTP 요청 완료 보장.
+            # _do_start_app() 내부 예외 전파와 무관하게 G열 갱신을 보장하기 위해
+            # 서버 요청 스레드를 먼저 띄운 뒤 팝업을 닫는다.
+            # daemon=False: 앱 종료 시에도 HTTP 요청 완료를 보장한다.
             def _on_later():
-                should_skip = skip_var.get()   # popup 파괴 전에 값 확정 저장
+                should_skip = skip_var.get()   # popup 파괴 전에 값 확정
                 if should_skip:
-                    pc_id = _auth_module.get_pc_id()
                     import logging as _log
+                    pc_id = _auth_module.get_pc_id()
                     _log.debug("[update_skip] skip_update_version 요청 시작: %s", pc_id)
                     threading.Thread(
                         target=_auth_module.skip_update_version,
@@ -218,7 +212,7 @@ class LipSyncGUIAuth:
                         daemon=False).start()
                 _close_and_start()             # 팝업 닫기 + 앱 시작
 
-            # [추가] 업데이트 버튼 참조 보관 → 체크박스 비활성 연동에 사용
+            # 업데이트 버튼 참조 보관 → 체크박스 비활성 연동
             update_btn = tk.Button(btn_f, text="업데이트",
                                    bg=self.BG3, fg=self.ACCENT,
                                    activebackground=self.BORDER,
@@ -231,7 +225,7 @@ class LipSyncGUIAuth:
                       command=_on_later, **BTN).pack(
                 side="left", padx=round(6 * r))
 
-            # [추가] 체크박스 상태에 따라 업데이트 버튼 활성/비활성 전환
+            # 체크박스 상태에 따라 업데이트 버튼 활성/비활성 전환
             def _on_skip_toggle(*_):
                 try:
                     update_btn.configure(

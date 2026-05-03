@@ -71,21 +71,24 @@ class LipSyncGUIAuth:
 
         - 서버 응답 실패 / 예외 발생 시 → 프로그램 종료 없이 바로 시작
         - 버전 일치   → 바로 시작
-        - 버전 불일치 → 업데이트 안내 팝업 표시 (팝업 닫으면 시작)
+        - 버전 불일치 → G열 건너뛰기 여부 추가 확인 후 팝업 또는 바로 시작
         """
         try:
             resp    = _auth_module.check_version()
             latest  = resp.get("latest", "").strip()
             current = _auth_module.APP_VERSION
             if latest and latest != current:
-                # 버전 불일치 → 메인 스레드에서 팝업 표시
-                self.root.after(
-                    0, lambda: self._show_update_popup(current, latest))
-                return
+                # [수정] G열 '차단' 여부 확인 → 차단이면 팝업 생략하고 바로 시작
+                pc_id   = _auth_module.get_pc_id()
+                skipped = _auth_module.check_update_skipped(pc_id)
+                if not skipped:
+                    self.root.after(
+                        0, lambda: self._show_update_popup(current, latest))
+                    return
         except Exception:
             # 서버 응답 오류, 인터넷 미연결 등 → 무시하고 바로 시작
             pass
-        # 버전 일치 또는 체크 실패 → 바로 시작
+        # 버전 일치 / 건너뛰기 상태 / 체크 실패 → 바로 시작
         self.root.after(0, self._do_start_app)
 
     def _show_update_popup(self, current: str, latest: str):
@@ -179,7 +182,17 @@ class LipSyncGUIAuth:
                        relief="flat", cursor="hand2",
                        padx=round(14 * r), pady=round(5 * r))
 
-            # [추가] 업데이트 버튼 참조 보관 → 체크박스 연동에 사용
+            # [추가] "나중에" 핸들러: 체크 시 백그라운드로 G열 차단 요청 후 시작
+            def _on_later():
+                if skip_var.get():
+                    pc_id = _auth_module.get_pc_id()
+                    threading.Thread(
+                        target=_auth_module.skip_update_version,
+                        args=(pc_id,),
+                        daemon=True).start()
+                _close_and_start()
+
+            # [추가] 업데이트 버튼 참조 보관 → 체크박스 비활성 연동에 사용
             update_btn = tk.Button(btn_f, text="업데이트",
                                    bg=self.BG3, fg=self.ACCENT,
                                    activebackground=self.BORDER,
@@ -189,7 +202,7 @@ class LipSyncGUIAuth:
             tk.Button(btn_f, text="나중에",
                       bg=self.BG3, fg=self.TEXT,
                       activebackground=self.BORDER,
-                      command=_close_and_start, **BTN).pack(
+                      command=_on_later, **BTN).pack(
                 side="left", padx=round(6 * r))
 
             # [추가] 체크박스 상태에 따라 업데이트 버튼 활성/비활성 전환

@@ -85,9 +85,11 @@ class LipSyncGUIAuth:
                     # G열 차단 확정 → 팝업 없이 바로 시작
                     self.root.after(0, self._do_start_app)
                     return
-                # 차단 아님 → 업데이트 팝업 표시
+                # 차단 아님 → 업데이트 팝업 표시 (서버 B2 다운로드 URL도 전달)
+                download_url = resp.get("url", "").strip()
                 self.root.after(
-                    0, lambda: self._show_update_popup(current, latest))
+                    0, lambda: self._show_update_popup(current, latest,
+                                                       download_url=download_url))
                 return
         except Exception:
             # 서버 응답 오류, 인터넷 미연결 등 → 무시하고 바로 시작
@@ -95,7 +97,7 @@ class LipSyncGUIAuth:
         # 버전 일치 / 체크 실패 → 바로 시작
         self.root.after(0, self._do_start_app)
 
-    def _show_update_popup(self, current: str, latest: str, on_close=None):
+    def _show_update_popup(self, current: str, latest: str, on_close=None, download_url: str = ""):
         """버전 불일치 시 업데이트 안내 팝업.
 
         - "업데이트" / "나중에" 모두 팝업을 닫고 앱을 정상 시작한다.
@@ -219,11 +221,110 @@ class LipSyncGUIAuth:
                         daemon=False).start()
                 _close_and_start()             # 팝업 닫기 + 앱 시작
 
+            # ── 업데이트 버튼 핸들러 ──────────────────────────────────────────
+            # 서버 업데이트 시트 B2 URL로 설치 파일을 내려받은 뒤 실행한다.
+            # - URL 없음 / 다운로드 실패 → 오류 메시지 표시, 앱 비정상 종료 없음
+            # - 다운로드는 백그라운드 스레드에서 수행 → UI 멈춤 없음
+            # - 성공 시: 설치 파일 실행 → 앱 정상 종료 (_on_close 흐름 유지)
+            def _on_update():
+                if not download_url:
+                    import tkinter.messagebox as _mb
+                    _mb.showerror(
+                        "업데이트 오류",
+                        "다운로드 URL을 가져올 수 없습니다.\n나중에 다시 시도해 주세요.",
+                        parent=popup,
+                    )
+                    return
+
+                # 중복 클릭 방지
+                update_btn.configure(state="disabled", text="다운로드 중…")
+
+                def _do_download():
+                    import os as _os, tempfile, urllib.request, logging as _log
+                    tmp = None
+                    try:
+                        # URL 끝에서 파일명 추출 (빈 경우 기본값 사용)
+                        fname = download_url.rstrip("/").split("/")[-1] or "AutoSync_setup.exe"
+                        dest  = _os.path.join(tempfile.gettempdir(), fname)
+                        tmp   = dest + ".tmp"
+
+                        # 이전 임시파일 잔재 정리
+                        if _os.path.exists(tmp):
+                            try:
+                                _os.remove(tmp)
+                            except Exception:
+                                pass
+
+                        def _hook(block_num, block_size, total_size):
+                            if total_size > 0:
+                                pct = min(100, int(
+                                    block_num * block_size * 100 / total_size))
+                                self.root.after(
+                                    0,
+                                    lambda p=pct: _set_btn_text(f"다운로드 중… {p}%"),
+                                )
+
+                        urllib.request.urlretrieve(download_url, tmp, reporthook=_hook)
+                        _os.replace(tmp, dest)   # 원자적 이동 (기존 _download_file 패턴 동일)
+                        _log.debug("[update_download] 다운로드 완료: %s", dest)
+                        self.root.after(0, lambda: _launch_and_close(dest))
+
+                    except Exception as exc:
+                        import logging as _log2
+                        _log2.warning("[update_download] 다운로드 실패: %s", exc)
+                        # 임시파일 잔재 정리
+                        if tmp:
+                            try:
+                                import os as _os2
+                                if _os2.path.exists(tmp):
+                                    _os2.remove(tmp)
+                            except Exception:
+                                pass
+                        self.root.after(0, lambda e=str(exc): _on_download_error(e))
+
+                def _set_btn_text(text: str):
+                    try:
+                        update_btn.configure(text=text)
+                    except Exception:
+                        pass
+
+                def _on_download_error(msg: str):
+                    try:
+                        update_btn.configure(state="normal", text="업데이트")
+                    except Exception:
+                        pass
+                    try:
+                        import tkinter.messagebox as _mb
+                        _mb.showerror(
+                            "다운로드 실패",
+                            f"업데이트 파일을 다운로드할 수 없습니다.\n{msg}",
+                            parent=popup,
+                        )
+                    except Exception:
+                        pass
+
+                def _launch_and_close(installer: str):
+                    import subprocess as _sp, logging as _log
+                    try:
+                        _sp.Popen([installer], shell=False)
+                        _log.debug("[update_download] 설치 파일 실행: %s", installer)
+                    except Exception as exc:
+                        _log.warning("[update_download] 설치 파일 실행 실패: %s", exc)
+                    # 팝업 닫기 → 기존 앱 종료 흐름(_on_close) 유지
+                    try:
+                        popup.destroy()
+                    except Exception:
+                        pass
+                    self._on_close()
+
+                # 다운로드는 백그라운드 스레드에서 수행 (UI 차단 방지)
+                threading.Thread(target=_do_download, daemon=True).start()
+
             # 업데이트 버튼 참조 보관 → 체크박스 비활성 연동
             update_btn = tk.Button(btn_f, text="업데이트",
                                    bg=self.BG3, fg=self.ACCENT,
                                    activebackground=self.BORDER,
-                                   command=_close_and_start, **BTN)
+                                   command=_on_update, **BTN)
             update_btn.pack(side="left", padx=round(6 * r))
 
             tk.Button(btn_f, text="나중에",

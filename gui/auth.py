@@ -273,13 +273,12 @@ class LipSyncGUIAuth:
                         dest  = None
                         tmp   = None
 
-                        # [수정] 실행 중인 exe 와 파일 충돌(WinError 5)을 방지하기 위해
-                        # 다운로드 대상을 시스템 임시 디렉토리로 변경한다.
-                        # os.replace() 호출 시 대상이 현재 잠긴 exe 와 겹치지 않도록 함.
-                        import sys as _sys, tempfile as _tmpmod
-                        _save_dir = _tmpmod.gettempdir()
-                        # 재실행에 사용할 원본 exe 경로 보존
-                        _orig_exe_path = _sys.executable if getattr(_sys, "frozen", False) else None
+                        # exe 위치 기준 저장 경로 (main.py 의 frozen 패턴 동일)
+                        import sys as _sys
+                        if getattr(_sys, "frozen", False):
+                            _save_dir = _os.path.dirname(_sys.executable)
+                        else:
+                            _save_dir = _os.path.dirname(_os.path.abspath(__file__))
 
                         req = urllib.request.Request(
                             resolved_url,
@@ -331,9 +330,12 @@ class LipSyncGUIAuth:
                                             lambda p=pct: _set_btn_text(f"다운로드 중… {p}%"),
                                         )
 
-                        _os.replace(tmp, dest)   # 원자적 이동 (기존 _download_file 패턴 동일)
-                        _log.debug("[update_download] 다운로드 완료: %s", dest)
-                        self.root.after(0, lambda: _launch_and_close(dest))
+                        # [수정] os.replace(tmp, dest) 를 여기서 하지 않는다.
+                        # 앱이 실행 중인 상태에서 자기 자신(dest)을 덮어쓰면 WinError 5 발생.
+                        # 대신 tmp 경로를 그대로 배치 스크립트에 전달하고,
+                        # 앱 종료 후 배치가 이름 변경(tmp -> dest) + 재실행을 처리한다.
+                        _log.debug("[update_download] 다운로드 완료(tmp): %s", tmp)
+                        self.root.after(0, lambda: _launch_and_close(tmp, dest))
 
                     except Exception as exc:
                         import logging as _log2
@@ -369,55 +371,39 @@ class LipSyncGUIAuth:
                     except Exception:
                         pass
 
-                def _launch_and_close(installer: str):
-                    # [수정] 업데이트 처리 순서 변경:
-                    #   기존: 설치 파일 실행 -> 앱 종료  (실행 중 파일 잠금 충돌)
-                    #   변경: 배치 스크립트 기동 -> 앱 종료 -> 배치가 PID 소멸 확인 -> 설치 실행
-                    import subprocess as _sp, logging as _log, os as _os2, tempfile as _tmp2, sys as _sys2
+                def _launch_and_close(tmp_path: str, dest_path: str):
+                    # [수정] 업데이트 처리 순서:
+                    #   1. 배치 스크립트 기동 (detached)
+                    #   2. 앱 정상 종료 (_on_close)
+                    #   3. 배치: 현재 PID 소멸 대기
+                    #   4. 배치: tmp -> dest 이름 변경 (앱 종료 후라 잠금 없음)
+                    #   5. 배치: 새 exe 실행 -> 자기 삭제
+                    import subprocess as _sp, logging as _log, os as _os2, tempfile as _tmp2
 
                     try:
                         pid      = _os2.getpid()
                         bat_path = _os2.path.join(_tmp2.gettempdir(), "autosinc_update_launcher.bat")
 
-                        # 다운로드 파일명이 원본 exe 와 같으면 "자기 교체" 케이스
-                        is_self_replace = (
-                            _orig_exe_path is not None
-                            and _os2.path.basename(installer).lower()
-                                == _os2.path.basename(_orig_exe_path).lower()
-                        )
+                        # 경로 내 큰따옴표 제거 (배치 파일 구문 오류 방지)
+                        src  = tmp_path.replace('"', '')
+                        dst  = dest_path.replace('"', '')
 
-                        def _esc(p: str) -> str:
-                            return p.replace('"', '')
-
-                        if is_self_replace:
-                            orig = _esc(_orig_exe_path)
-                            src  = _esc(installer)
-                            bat_lines = [
-                                "@echo off",
-                                ":loop",
-                                f'tasklist /FI "PID eq {pid}" 2>nul | find /I "{pid}" > nul',
-                                "if errorlevel 1 goto :run",
-                                "timeout /t 1 /nobreak > nul",
-                                "goto :loop",
-                                ":run",
-                                f'copy /Y "{src}" "{orig}"',
-                                f'if exist "{orig}" start "" "{orig}"',
-                                f'del "{src}" 2>nul',
-                                'del "%~f0"',
-                            ]
-                        else:
-                            src = _esc(installer)
-                            bat_lines = [
-                                "@echo off",
-                                ":loop",
-                                f'tasklist /FI "PID eq {pid}" 2>nul | find /I "{pid}" > nul',
-                                "if errorlevel 1 goto :run",
-                                "timeout /t 1 /nobreak > nul",
-                                "goto :loop",
-                                ":run",
-                                f'start "" "{src}"',
-                                'del "%~f0"',
-                            ]
+                        bat_lines = [
+                            "@echo off",
+                            # 현재 PID 가 완전히 종료될 때까지 1초 간격으로 대기
+                            ":loop",
+                            f'tasklist /FI "PID eq {pid}" 2>nul | find /I "{pid}" > nul',
+                            "if errorlevel 1 goto :run",
+                            "timeout /t 1 /nobreak > nul",
+                            "goto :loop",
+                            ":run",
+                            # 앱 종료 후 tmp -> 실제 exe 로 이름 변경 (잠금 해제 상태)
+                            f'move /Y "{src}" "{dst}"',
+                            # 새 exe 실행
+                            f'if exist "{dst}" start "" "{dst}"',
+                            # 배치 자기 삭제
+                            'del "%~f0"',
+                        ]
 
                         with open(bat_path, "w", encoding="mbcs") as _bf:
                             _bf.write("\r\n".join(bat_lines))
@@ -431,12 +417,12 @@ class LipSyncGUIAuth:
 
                     except Exception as exc:
                         _log.warning("[update_download] 런처 배치 실행 실패: %s", exc)
-                        # 배치 방식 실패 시 기존 방식 fallback
+                        # fallback: tmp 파일이라도 직접 실행
                         try:
-                            _sp.Popen([installer], shell=False)
-                            _log.debug("[update_download] fallback - 설치 파일 직접 실행: %s", installer)
+                            _sp.Popen([tmp_path], shell=False)
+                            _log.debug("[update_download] fallback - tmp 파일 직접 실행: %s", tmp_path)
                         except Exception as exc2:
-                            _log.warning("[update_download] 설치 파일 직접 실행 실패: %s", exc2)
+                            _log.warning("[update_download] 직접 실행도 실패: %s", exc2)
 
                     # 팝업 닫기 -> 기존 앱 종료 흐름(_on_close) 유지
                     try:

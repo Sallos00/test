@@ -189,6 +189,32 @@ def check_version() -> dict:
     return _api({"action": "version"}, timeout=6)
 
 
+def check_update_skipped(pc_id: str) -> bool:
+    """인증목록 시트 G열이 '차단'인지 확인한다.
+
+    True  → 업데이트 팝업 미표시 (사용자가 건너뛰기를 선택한 상태)
+    False → 팝업 정상 표시 (G열 없음 / 빈 값 / 서버 오류 포함)
+    """
+    try:
+        resp = _api({"action": "check_skip", "pc_id": pc_id}, timeout=6)
+        return bool(resp.get("skipped", False))
+    except Exception:
+        return False
+
+
+def skip_update_version(pc_id: str) -> bool:
+    """인증목록 시트 G열을 '차단'으로 설정한다 (업데이트 건너뛰기).
+
+    - 이미 '차단'인 경우 서버에서 중복 처리를 막으므로 재요청해도 무해하다.
+    - 네트워크 오류 시 False 반환, 예외는 호출자로 전파하지 않는다.
+    """
+    try:
+        resp = _api({"action": "skip_update", "pc_id": pc_id}, timeout=8)
+        return bool(resp.get("ok", False))
+    except Exception:
+        return False
+
+
 def poll_until_approved(pc_id: str, on_approved, on_revoked, on_error, stop_event):
     """
     허가될 때까지 POLL_INTERVAL 초마다 서버 확인.

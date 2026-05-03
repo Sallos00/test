@@ -103,7 +103,7 @@ class LipSyncGUIAuth:
             # [수정] 높이를 200→250으로 확장하여 체크박스·버튼 잘림 방지
             self._place_popup(popup, round(300 * r), round(250 * r))
 
-            PAD     = round(14 * r)   # [수정] 20→14: 상단 여백 축소로 내부 공간 확보
+            PAD     = round(10 * r)   # [수정] 20→10: 구분선 위쪽(10*r)과 동일하게 맞춤
             F_TITLE = max(9,  round(11 * r))
             F_BODY  = max(8,  round(9  * r))
             F_SMALL = max(7,  round(8  * r))

@@ -324,42 +324,66 @@ class LipSyncGUILogic2:
         tk.Checkbutton(version_frame, text="자동 업데이트", variable=tau,
                        fg=self.TEXT, **CHK).pack(anchor="w", pady=round(4*r))
 
-        # 업데이트 버튼 — 팝업 없이 바로 다운로드 → 앱 종료
+        # 업데이트 버튼 — 검증 후 다운로드 → 앱 종료
         def _on_update_click():
             latest = _latest_ver[0]
             dl_url = _download_url[0]
 
-            # 자동 업데이트 설정 저장
-            if hasattr(self, "_auto_update_var"):
-                self._auto_update_var.set(tau.get())
-            self._save_settings()
-            popup.destroy()
-
-            # URL 없음 — 아직 버전 확인 전이거나 서버 오류
+            # URL 없음 — 아직 버전 확인 전이거나 서버 오류 (팝업 유지)
             if not dl_url:
                 import tkinter.messagebox as _mb
                 _mb.showerror(
                     "업데이트 오류",
                     "다운로드 URL을 가져올 수 없습니다.\n잠시 후 다시 시도해 주세요.",
+                    parent=popup,
                 )
                 return
 
-            # 최신 버전과 동일하면 안내 후 종료
+            # 최신 버전과 동일하면 안내 후 종료 (팝업 유지)
             if not (latest and latest not in ("—", "") and latest != _current_ver):
                 import tkinter.messagebox as _mb
-                _mb.showinfo("업데이트", "현재 최신 버전입니다.")
+                _mb.showinfo("업데이트", "현재 최신 버전입니다.", parent=popup)
                 return
 
-            # 바로 다운로드 시작 (업데이트 팝업의 업데이트 버튼과 동일 흐름)
-            self._start_update_download(dl_url)
+            # 자동 업데이트 설정 저장
+            if hasattr(self, "_auto_update_var"):
+                self._auto_update_var.set(tau.get())
+            self._save_settings()
 
-        tk.Button(version_frame, text="업데이트",
-                  font=("Consolas", FM, "bold"),
-                  bg=self.BG3, fg=self.ACCENT,
-                  activebackground=self.BORDER,
-                  relief="flat", cursor="hand2",
-                  padx=round(14*r), pady=round(5*r),
-                  command=_on_update_click).pack(pady=(round(8*r), 0))
+            # 버튼 비활성화 + 진행률 표시
+            update_btn.configure(state="disabled", text="다운로드 중…")
+
+            def _on_progress(pct: int):
+                try:
+                    update_btn.configure(text=f"다운로드 중… {pct}%")
+                except Exception:
+                    pass
+
+            def _on_error(msg: str):
+                try:
+                    update_btn.configure(state="normal", text="업데이트")
+                except Exception:
+                    pass
+                try:
+                    import tkinter.messagebox as _mb2
+                    _mb2.showerror(
+                        "다운로드 실패",
+                        f"업데이트 파일을 다운로드할 수 없습니다.\n{msg}",
+                        parent=popup,
+                    )
+                except Exception:
+                    pass
+
+            self._start_update_download(dl_url, on_progress=_on_progress, on_error=_on_error)
+
+        update_btn = tk.Button(version_frame, text="업데이트",
+                               font=("Consolas", FM, "bold"),
+                               bg=self.BG3, fg=self.ACCENT,
+                               activebackground=self.BORDER,
+                               relief="flat", cursor="hand2",
+                               padx=round(14*r), pady=round(5*r),
+                               command=_on_update_click)
+        update_btn.pack(pady=(round(8*r), 0))
 
         # ── 초기 탭: 셋팅 ─────────────────────────────────────────────────────
         _switch_inner_tab("settings")

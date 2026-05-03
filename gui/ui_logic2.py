@@ -139,11 +139,15 @@ class LipSyncGUILogic2:
         # grab_set은 withdraw 이후에 호출해야 순간 노출이 없음
         popup.withdraw()
         r  = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-        pw = round(300*r); ph = round(370*r)
+        pw = round(300*r); ph = round(405*r)   # 탭 바 높이(~35px) 반영
         FT = max(9, round(11*r)); FM = max(8, round(9*r)); FB = FM
         P  = round(14*r); P2 = round(18*r); PV = round(10*r)
-        tk.Label(popup, text="⚙ 설정", font=("Segoe UI", FT, "bold"), bg=self.BG, fg=self.TEXT).pack(pady=(P, 0))
+
+        tk.Label(popup, text="⚙ 설정", font=("Segoe UI", FT, "bold"),
+                 bg=self.BG, fg=self.TEXT).pack(pady=(P, 0))
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", pady=(round(12*r), 0))
+
+        # ── 설정값 로컬 변수 (기존과 동일) ────────────────────────────────────
         ts  = tk.BooleanVar(value=self._startup_var.get())
         ta  = tk.BooleanVar(value=self._autostart_var.get())
         td  = tk.BooleanVar(value=self._darkmode_var.get())
@@ -151,46 +155,249 @@ class LipSyncGUILogic2:
         to  = tk.BooleanVar(value=self._oped_auto_var.get())
         te  = tk.StringVar( value=self._oped_skip_sec_var.get())
         tcp = tk.BooleanVar(value=getattr(self, "_close_pot_var", tk.BooleanVar(value=False)).get())
-        CHK = dict(font=("Consolas", FM), bg=self.BG2, selectcolor=self.BG3, activebackground=self.BG2, activeforeground=self.TEXT, relief="flat", cursor="hand2")
+        tau = tk.BooleanVar(value=getattr(self, "_auto_update_var", tk.BooleanVar(value=True)).get())
+
+        CHK = dict(font=("Consolas", FM), bg=self.BG2, selectcolor=self.BG3,
+                   activebackground=self.BG2, activeforeground=self.TEXT,
+                   relief="flat", cursor="hand2")
+
+        # ── 카드 프레임 (기존 BG2 영역) ───────────────────────────────────────
         card = tk.Frame(popup, bg=self.BG2, padx=P2, pady=P)
         card.pack(fill="x", padx=P, pady=(PV, 0))
-        for text, var in [("Windows 시작 시 자동 실행", ts), ("프로그램 실행 시 자동 시작", ta), ("종료 시 팟플레이어 종료", tcp), ("다크 모드", td), ("OP/ED 자동 스킵", to)]:
-            tk.Checkbutton(card, text=text, variable=var, fg=self.TEXT, **CHK).pack(anchor="w", pady=round(4*r))
-        sr = tk.Frame(card, bg=self.BG2)
+
+        # ── 탭 바 (카드 내부) ──────────────────────────────────────────────────
+        tab_bar = tk.Frame(card, bg=self.BG2)
+        tab_bar.pack(fill="x", pady=(0, round(4*r)))
+
+        _tab_content = {}
+        _tab_btns    = {}
+        _active_tab  = [None]
+
+        TAB_BTN = dict(font=("Consolas", FM), relief="flat", cursor="hand2",
+                       padx=round(8*r), pady=round(3*r))
+
+        def _switch_inner_tab(name):
+            if _active_tab[0] == name:
+                return
+            _active_tab[0] = name
+            for n, frm in _tab_content.items():
+                if n == name:
+                    frm.pack(fill="x")
+                else:
+                    frm.pack_forget()
+            for n, btn in _tab_btns.items():
+                if n == name:
+                    btn.config(bg=self.BG3, fg=self.ACCENT)
+                else:
+                    btn.config(bg=self.BG2, fg=self.TEXT_MID)
+            if name == "version":
+                _load_version_info()
+
+        btn_settings = tk.Button(tab_bar, text="셋팅",
+                                 bg=self.BG3, fg=self.ACCENT,
+                                 activebackground=self.BG3, activeforeground=self.ACCENT,
+                                 command=lambda: _switch_inner_tab("settings"), **TAB_BTN)
+        btn_settings.pack(side="left")
+        _tab_btns["settings"] = btn_settings
+
+        btn_version = tk.Button(tab_bar, text="버전 확인",
+                                bg=self.BG2, fg=self.TEXT_MID,
+                                activebackground=self.BG3, activeforeground=self.ACCENT,
+                                command=lambda: _switch_inner_tab("version"), **TAB_BTN)
+        btn_version.pack(side="left")
+        _tab_btns["version"] = btn_version
+
+        # 탭 바 아래 구분선
+        tk.Frame(card, bg=self.BORDER, height=1).pack(fill="x", pady=(0, round(6*r)))
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 탭 1: 셋팅 — 기존 설정 항목을 그대로 이동, 로직/이벤트 변경 없음
+        # ══════════════════════════════════════════════════════════════════════
+        settings_frame = tk.Frame(card, bg=self.BG2)
+        _tab_content["settings"] = settings_frame
+
+        for text, var in [("Windows 시작 시 자동 실행", ts),
+                           ("프로그램 실행 시 자동 시작", ta),
+                           ("종료 시 팟플레이어 종료", tcp),
+                           ("다크 모드", td),
+                           ("OP/ED 자동 스킵", to)]:
+            tk.Checkbutton(settings_frame, text=text, variable=var,
+                           fg=self.TEXT, **CHK).pack(anchor="w", pady=round(4*r))
+
+        sr = tk.Frame(settings_frame, bg=self.BG2)
         sr.pack(anchor="w", pady=(round(6*r), 0))
-        tk.Label(sr, text="스킵 초", font=("Consolas", FM), bg=self.BG2, fg=self.TEXT_MID).pack(side="left", padx=(0, round(8*r)))
+        tk.Label(sr, text="스킵 초", font=("Consolas", FM), bg=self.BG2,
+                 fg=self.TEXT_MID).pack(side="left", padx=(0, round(8*r)))
         vcmd = (popup.register(lambda s: s.isdigit() or s == ""), "%P")
-        tk.Spinbox(sr, from_=10, to=600, textvariable=te, width=5, font=("Consolas", FM), bg=self.BG3, fg=self.TEXT, buttonbackground=self.BG3, relief="flat", validate="key", validatecommand=vcmd).pack(side="left")
-        tk.Label(sr, text="초  (10~600)", font=("Consolas", max(7, FM-1)), bg=self.BG2, fg=self.TEXT_DIM).pack(side="left", padx=(round(6*r), 0))
-        tk.Frame(card, bg=self.BORDER, height=1).pack(fill="x", pady=(round(8*r), round(4*r)))
-        szr = tk.Frame(card, bg=self.BG2)
+        tk.Spinbox(sr, from_=10, to=600, textvariable=te, width=5,
+                   font=("Consolas", FM), bg=self.BG3, fg=self.TEXT,
+                   buttonbackground=self.BG3, relief="flat",
+                   validate="key", validatecommand=vcmd).pack(side="left")
+        tk.Label(sr, text="초  (10~600)", font=("Consolas", max(7, FM-1)),
+                 bg=self.BG2, fg=self.TEXT_DIM).pack(side="left", padx=(round(6*r), 0))
+
+        tk.Frame(settings_frame, bg=self.BORDER, height=1).pack(
+            fill="x", pady=(round(8*r), round(4*r)))
+
+        szr = tk.Frame(settings_frame, bg=self.BG2)
         szr.pack(anchor="w")
-        tk.Label(szr, text="UI 크기", font=("Consolas", FM), bg=self.BG2, fg=self.TEXT_MID).pack(side="left", padx=(0, round(10*r)))
+        tk.Label(szr, text="UI 크기", font=("Consolas", FM), bg=self.BG2,
+                 fg=self.TEXT_MID).pack(side="left", padx=(0, round(10*r)))
         for sz in ["소", "중", "대"]:
-            tk.Radiobutton(szr, text=sz, variable=tsc, value=sz, font=("Consolas", FM), bg=self.BG2, fg=self.TEXT, selectcolor=self.BG3, activebackground=self.BG2, activeforeground=self.TEXT, relief="flat", cursor="hand2").pack(side="left", padx=round(4*r))
+            tk.Radiobutton(szr, text=sz, variable=tsc, value=sz,
+                           font=("Consolas", FM), bg=self.BG2, fg=self.TEXT,
+                           selectcolor=self.BG3, activebackground=self.BG2,
+                           activeforeground=self.TEXT, relief="flat",
+                           cursor="hand2").pack(side="left", padx=round(4*r))
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 탭 2: 버전 확인
+        # ══════════════════════════════════════════════════════════════════════
+        version_frame = tk.Frame(card, bg=self.BG2)
+        _tab_content["version"] = version_frame
+
+        F_SMALL     = max(7, round(8*r))
+        _latest_ver = [""]   # 업데이트 버튼에서 읽기 위한 mutable reference
+
+        def _ver_row(label, init_text):
+            """버전 정보 행(레이블 + 값) 생성 후 값 라벨 반환."""
+            row = tk.Frame(version_frame, bg=self.BG2)
+            row.pack(fill="x", pady=round(2*r))
+            tk.Label(row, text=label, font=("Consolas", F_SMALL),
+                     bg=self.BG2, fg=self.TEXT_MID,
+                     width=8, anchor="e").pack(side="left")
+            val_lbl = tk.Label(row, text=init_text,
+                               font=("Consolas", F_SMALL, "bold"),
+                               bg=self.BG2, fg=self.TEXT)
+            val_lbl.pack(side="left", padx=(round(6*r), 0))
+            return val_lbl
+
+        try:
+            import auth as _auth_mod
+            _current_ver = _auth_mod.APP_VERSION
+        except Exception:
+            _current_ver = "—"
+
+        _ver_row("현재 버전", _current_ver)
+        _latest_lbl = _ver_row("최신 버전", "...")
+
+        def _load_version_info():
+            """버전 확인 탭이 열릴 때 서버에서 최신 버전을 조회한다."""
+            try:
+                if not _latest_lbl.winfo_exists():
+                    return
+            except Exception:
+                return
+            _latest_lbl.config(text="확인 중...", fg=self.TEXT_MID)
+
+            def _fetch():
+                try:
+                    import auth as _am
+                    resp   = _am.check_version()
+                    latest = resp.get("latest", "").strip() or "—"
+                except Exception:
+                    latest = "—"
+                _latest_ver[0] = latest
+                try:
+                    if popup.winfo_exists():
+                        fg = (self.ACCENT3
+                              if (latest not in ("—", "") and latest != _current_ver)
+                              else self.TEXT)
+                        self.root.after(0, lambda l=latest, c=fg: (
+                            _latest_lbl.config(text=l, fg=c)
+                            if popup.winfo_exists() else None
+                        ))
+                except Exception:
+                    pass
+
+            import threading as _thr
+            _thr.Thread(target=_fetch, daemon=True,
+                        name="settings-ver-check").start()
+
+        # 구분선
+        tk.Frame(version_frame, bg=self.BORDER, height=1).pack(
+            fill="x", pady=(round(8*r), round(4*r)))
+
+        # 자동 업데이트 체크박스 — 기존 CHK 스타일 그대로 사용
+        tk.Checkbutton(version_frame, text="자동 업데이트", variable=tau,
+                       fg=self.TEXT, **CHK).pack(anchor="w", pady=round(4*r))
+
+        # 업데이트 버튼 — _show_update_popup 의 업데이트 버튼과 동일 스타일/기능
+        def _on_update_click():
+            latest = _latest_ver[0]
+            # 자동 업데이트 설정 반영 후 팝업 닫기
+            if hasattr(self, "_auto_update_var"):
+                self._auto_update_var.set(tau.get())
+            self._save_settings()
+            popup.destroy()
+            # 신버전이 확인된 경우에만 업데이트 팝업 표시
+            # on_close=lambda: None → 이미 앱이 실행 중이므로 _do_start_app() 호출 생략
+            if latest and latest not in ("—", "") and latest != _current_ver:
+                try:
+                    self._show_update_popup(_current_ver, latest,
+                                            on_close=lambda: None)
+                except Exception:
+                    pass
+
+        tk.Button(version_frame, text="업데이트",
+                  font=("Consolas", FM, "bold"),
+                  bg=self.BG3, fg=self.ACCENT,
+                  activebackground=self.BORDER,
+                  relief="flat", cursor="hand2",
+                  padx=round(14*r), pady=round(5*r),
+                  command=_on_update_click).pack(pady=(round(8*r), 0))
+
+        # ── 초기 탭: 셋팅 ─────────────────────────────────────────────────────
+        _switch_inner_tab("settings")
+
+        # ── 구분선 + 저장/닫기 버튼 (기존과 동일) ────────────────────────────
         tk.Frame(popup, bg=self.BORDER, height=1).pack(fill="x", padx=P, pady=(round(12*r), 0))
+
         def on_save():
-            self._startup_var.set(ts.get()); self._autostart_var.set(ta.get())
+            self._startup_var.set(ts.get())
+            self._autostart_var.set(ta.get())
             dc = td.get() != self._darkmode_var.get()
             sc = tsc.get() != self._scale_var.get()
-            self._darkmode_var.set(td.get()); self._scale_var.set(tsc.get())
+            self._darkmode_var.set(td.get())
+            self._scale_var.set(tsc.get())
             self._oped_auto_var.set(to.get())
             if hasattr(self, "_close_pot_var"):
                 self._close_pot_var.set(tcp.get())
-            try: sec = max(10, min(600, int(te.get())))
-            except ValueError: sec = 90
+            if hasattr(self, "_auto_update_var"):
+                self._auto_update_var.set(tau.get())
+            try:
+                sec = max(10, min(600, int(te.get())))
+            except ValueError:
+                sec = 90
             self._oped_skip_sec_var.set(str(sec))
-            self._toggle_startup(); self._save_settings(); popup.destroy()
+            self._toggle_startup()
+            self._save_settings()
+            popup.destroy()
             if not self._running:
-                try: self._stop_oped_monitor(); self._start_oped_monitor()
-                except Exception: pass
+                try:
+                    self._stop_oped_monitor()
+                    self._start_oped_monitor()
+                except Exception:
+                    pass
             self._update_oped_btn()
-            if dc: self._toggle_darkmode()
-            if sc: self._toggle_scale(tsc.get())
+            if dc:
+                self._toggle_darkmode()
+            if sc:
+                self._toggle_scale(tsc.get())
+
         bf = tk.Frame(popup, bg=self.BG)
         bf.pack(pady=PV)
-        tk.Button(bf, text="💾 저장", font=("Consolas", FB, "bold"), bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(16*r), pady=round(6*r), command=on_save).pack(side="left", padx=(0, round(8*r)))
-        tk.Button(bf, text="닫기",   font=("Consolas", FB, "bold"), bg=self.BG3, fg=self.TEXT,   activebackground=self.BORDER, relief="flat", cursor="hand2", padx=round(16*r), pady=round(6*r), command=popup.destroy).pack(side="left")
+        tk.Button(bf, text="💾 저장", font=("Consolas", FB, "bold"),
+                  bg=self.BG3, fg=self.ACCENT, activebackground=self.BORDER,
+                  relief="flat", cursor="hand2",
+                  padx=round(16*r), pady=round(6*r),
+                  command=on_save).pack(side="left", padx=(0, round(8*r)))
+        tk.Button(bf, text="닫기", font=("Consolas", FB, "bold"),
+                  bg=self.BG3, fg=self.TEXT, activebackground=self.BORDER,
+                  relief="flat", cursor="hand2",
+                  padx=round(16*r), pady=round(6*r),
+                  command=popup.destroy).pack(side="left")
+
         # 위젯 구성 완료 후 배치/표시 (grab_set은 deiconify 직전에 호출해야 깜빡임 없음)
         popup.grab_set()
         self._place_popup(popup, pw, ph)

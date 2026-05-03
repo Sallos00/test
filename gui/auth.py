@@ -100,9 +100,10 @@ class LipSyncGUIAuth:
             popup.grab_set()
 
             r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-            self._place_popup(popup, round(300 * r), round(200 * r))
+            # [수정] 높이를 200→250으로 확장하여 체크박스·버튼 잘림 방지
+            self._place_popup(popup, round(300 * r), round(250 * r))
 
-            PAD     = round(20 * r)
+            PAD     = round(14 * r)   # [수정] 20→14: 상단 여백 축소로 내부 공간 확보
             F_TITLE = max(9,  round(11 * r))
             F_BODY  = max(8,  round(9  * r))
             F_SMALL = max(7,  round(8  * r))
@@ -156,25 +157,47 @@ class LipSyncGUIAuth:
             tk.Frame(popup, bg=self.BORDER, height=1).pack(
                 fill="x", padx=round(16 * r), pady=(round(12 * r), 0))
 
+            # ── [추가] 버전 건너뛰기 체크박스 ──
+            skip_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(popup, text="해당 버전 업데이트 건너뛰기",
+                           variable=skip_var,
+                           font=("Segoe UI", F_SMALL),
+                           bg=self.BG, fg=self.TEXT_MID,
+                           activebackground=self.BG,
+                           selectcolor=self.BG2,
+                           relief="flat", cursor="hand2").pack(
+                pady=(round(4 * r), 0))
+
             # ── 버튼 ──
             btn_f = tk.Frame(popup, bg=self.BG)
-            btn_f.pack(pady=round(10 * r))
+            btn_f.pack(pady=round(8 * r))
 
             BTN = dict(font=("Consolas", F_BTN, "bold"),
                        relief="flat", cursor="hand2",
                        padx=round(14 * r), pady=round(5 * r))
 
-            tk.Button(btn_f, text="업데이트",
-                      bg=self.BG3, fg=self.ACCENT,
-                      activebackground=self.BORDER,
-                      command=_close_and_start, **BTN).pack(
-                side="left", padx=round(6 * r))
+            # [추가] 업데이트 버튼 참조 보관 → 체크박스 연동에 사용
+            update_btn = tk.Button(btn_f, text="업데이트",
+                                   bg=self.BG3, fg=self.ACCENT,
+                                   activebackground=self.BORDER,
+                                   command=_close_and_start, **BTN)
+            update_btn.pack(side="left", padx=round(6 * r))
 
             tk.Button(btn_f, text="나중에",
                       bg=self.BG3, fg=self.TEXT,
                       activebackground=self.BORDER,
                       command=_close_and_start, **BTN).pack(
                 side="left", padx=round(6 * r))
+
+            # [추가] 체크박스 상태에 따라 업데이트 버튼 활성/비활성 전환
+            def _on_skip_toggle(*_):
+                try:
+                    update_btn.configure(
+                        state="disabled" if skip_var.get() else "normal")
+                except Exception:
+                    pass
+
+            skip_var.trace_add("write", _on_skip_toggle)
 
         except Exception:
             # 팝업 생성 실패 시에도 앱은 정상 시작

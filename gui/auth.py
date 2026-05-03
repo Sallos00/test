@@ -107,6 +107,15 @@ class LipSyncGUIAuth:
         - 팝업 강제 종료(X 버튼) 시에도 앱은 정상 시작된다.
         - 예외 발생 시 팝업 없이 바로 시작한다.
         """
+        # [수정] Bug 2: 팝업 진입 시점에 G열 '차단' 여부를 재확인한다.
+        # _check_version_and_start()의 확인과 root.after() 스케줄 사이의
+        # 타이밍 차이로 팝업이 노출될 수 있는 경로를 방어한다.
+        try:
+            if _auth_module.check_update_skipped(_auth_module.get_pc_id()):
+                self._do_start_app()
+                return
+        except Exception:
+            pass
         try:
             popup = tk.Toplevel(self.root)
             popup.title("Auto Sync — 업데이트")
@@ -191,14 +200,14 @@ class LipSyncGUIAuth:
                        relief="flat", cursor="hand2",
                        padx=round(14 * r), pady=round(5 * r))
 
-            # [수정] "나중에" 핸들러: popup 파괴 전에 skip_var 값을 저장하고,
-            # _close_and_start() 먼저 실행 후 daemon=False Thread로 서버 요청.
-            # daemon=True 였을 때 popup.destroy()의 Tkinter 이벤트 처리가 Thread
-            # 실행을 선점하거나, 앱 종료 시 HTTP 요청 완료 전에 Thread가 강제 종료
-            # 되는 문제를 방지한다.
+            # [수정] Bug 1: "나중에" 핸들러.
+            # skip 스레드를 _close_and_start() 이전에 기동한다.
+            # 기존 순서(_close_and_start → 스레드 기동)에서는 _do_start_app() 내부
+            # 예외가 전파될 경우 이후 블록이 실행되지 않아 G열이 갱신되지 않는다.
+            # 스레드를 먼저 기동해 서버 요청을 독립적으로 보장한 뒤 팝업을 닫는다.
+            # daemon=False: 앱 종료 시에도 HTTP 요청 완료 보장.
             def _on_later():
                 should_skip = skip_var.get()   # popup 파괴 전에 값 확정 저장
-                _close_and_start()             # 팝업 닫기 + 앱 시작 먼저 수행
                 if should_skip:
                     pc_id = _auth_module.get_pc_id()
                     import logging as _log
@@ -206,7 +215,8 @@ class LipSyncGUIAuth:
                     threading.Thread(
                         target=_auth_module.skip_update_version,
                         args=(pc_id,),
-                        daemon=False).start()  # daemon=False: 앱 종료 시에도 요청 완료 보장
+                        daemon=False).start()
+                _close_and_start()             # 팝업 닫기 + 앱 시작
 
             # [추가] 업데이트 버튼 참조 보관 → 체크박스 비활성 연동에 사용
             update_btn = tk.Button(btn_f, text="업데이트",

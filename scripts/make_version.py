@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 content = """VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 4, 0, 0),
-    prodvers=(1, 4, 0, 0),
+    filevers=(1, 5, 0, 0),
+    prodvers=(1, 5, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ content = """VSVersionInfo(
         [
           StringStruct(u'CompanyName',      u''),
           StringStruct(u'FileDescription',  u'Auto Sinc'),
-          StringStruct(u'FileVersion',      u'1.4.0.0'),
+          StringStruct(u'FileVersion',      u'1.5.0.0'),
           StringStruct(u'InternalName',     u'AutoSinc'),
           StringStruct(u'LegalCopyright',   u'Sinamon'),
           StringStruct(u'OriginalFilename', u'Auto Sinc.exe'),
           StringStruct(u'ProductName',      u'Auto Sinc'),
-          StringStruct(u'ProductVersion',   u'1.4.0.0'),
+          StringStruct(u'ProductVersion',   u'1.5.0.0'),
         ]
       )
     ]),

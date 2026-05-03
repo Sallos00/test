@@ -422,6 +422,7 @@ class LipSyncGUIAuth:
                     "  goto :delloop",
                     ")",
                     f'move /Y "{src}" "{dst}"',
+                    "set _MEIPASS2=",
                     f'if exist "{dst}" start "" "{dst}"',
                     'del "%~f0"',
                 ]

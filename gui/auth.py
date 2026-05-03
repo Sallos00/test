@@ -24,6 +24,9 @@ class LipSyncGUIAuth:
                 if s == _auth.AuthStatus.REVOKED:
                     _auth.save_local_status(_auth.AuthStatus.REVOKED)
                     self.root.after(0, self._show_auth_blocked_popup)
+                elif s == _auth.AuthStatus.PENDING:
+                    _auth.save_local_status(_auth.AuthStatus.PENDING)
+                    self.root.after(0, self._show_auth_pending_popup)
             import threading as _t
             _t.Thread(target=_verify, daemon=True).start()
         elif status == _auth.AuthStatus.PENDING:

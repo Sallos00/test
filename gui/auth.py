@@ -240,31 +240,89 @@ class LipSyncGUIAuth:
                 update_btn.configure(state="disabled", text="다운로드 중…")
 
                 def _do_download():
-                    import os as _os, tempfile, urllib.request, logging as _log
+                    import os as _os, re as _re, tempfile, urllib.request, logging as _log
                     tmp = None
                     try:
-                        # URL 끝에서 파일명 추출 (빈 경우 기본값 사용)
-                        fname = download_url.rstrip("/").split("/")[-1] or "AutoSync_setup.exe"
-                        dest  = _os.path.join(tempfile.gettempdir(), fname)
-                        tmp   = dest + ".tmp"
+                        # ── Google Drive URL 자동 변환 ──────────────────────
+                        # 공유 링크(file/d/...) 및 uc?id= 형식을 모두 감지해
+                        # drive.usercontent.google.com + confirm=t 로 변환한다.
+                        # 100MB 초과 파일의 바이러스 확인 경고 페이지를 우회한다.
+                        def _resolve_gdrive(url: str) -> str:
+                            for pat in (
+                                r'drive\.google\.com/file/d/([^/?]+)',
+                                r'drive\.google\.com/open\?id=([^&]+)',
+                                r'drive\.google\.com/uc[?&].*?id=([^&]+)',
+                                r'drive\.usercontent\.google\.com/download.*?[?&]id=([^&]+)',
+                            ):
+                                m = _re.search(pat, url)
+                                if m:
+                                    fid = m.group(1)
+                                    _log.debug("[update_download] Drive ID 감지: %s", fid)
+                                    return (
+                                        "https://drive.usercontent.google.com/download"
+                                        f"?id={fid}&export=download&confirm=t"
+                                    )
+                            return url  # Drive URL이 아니면 원본 그대로
 
-                        # 이전 임시파일 잔재 정리
-                        if _os.path.exists(tmp):
-                            try:
-                                _os.remove(tmp)
-                            except Exception:
-                                pass
+                        resolved_url = _resolve_gdrive(download_url)
 
-                        def _hook(block_num, block_size, total_size):
-                            if total_size > 0:
-                                pct = min(100, int(
-                                    block_num * block_size * 100 / total_size))
-                                self.root.after(
-                                    0,
-                                    lambda p=pct: _set_btn_text(f"다운로드 중… {p}%"),
-                                )
+                        # ── 파일명 결정 ─────────────────────────────────────
+                        # Content-Disposition 헤더가 있으면 그 값 우선,
+                        # 없으면 URL 끝 세그먼트, 그것도 없으면 기본값 사용.
+                        fname = None
+                        dest  = None
+                        tmp   = None
 
-                        urllib.request.urlretrieve(download_url, tmp, reporthook=_hook)
+                        req = urllib.request.Request(
+                            resolved_url,
+                            headers={"User-Agent": "Mozilla/5.0"},
+                        )
+                        with urllib.request.urlopen(req, timeout=60) as resp:
+                            # Content-Disposition에서 파일명 추출 시도
+                            cd = resp.headers.get("Content-Disposition", "")
+                            m_cd = _re.search(
+                                r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)',
+                                cd, _re.IGNORECASE,
+                            )
+                            if m_cd:
+                                import urllib.parse as _up
+                                fname = _up.unquote(m_cd.group(1).strip())
+
+                            if not fname:
+                                seg = resolved_url.rstrip("/").split("/")[-1].split("?")[0]
+                                fname = seg if seg and seg != "download" else None
+
+                            if not fname:
+                                fname = "AutoSync_setup.exe"
+
+                            dest = _os.path.join(tempfile.gettempdir(), fname)
+                            tmp  = dest + ".tmp"
+
+                            # 이전 임시파일 잔재 정리
+                            if _os.path.exists(tmp):
+                                try:
+                                    _os.remove(tmp)
+                                except Exception:
+                                    pass
+
+                            # ── 청크 스트리밍 다운로드 (대용량 대응) ────────
+                            total      = int(resp.headers.get("Content-Length", 0))
+                            downloaded = 0
+                            CHUNK      = 65536   # 64 KB
+                            with open(tmp, "wb") as f:
+                                while True:
+                                    chunk = resp.read(CHUNK)
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if total > 0:
+                                        pct = min(100, int(downloaded * 100 / total))
+                                        self.root.after(
+                                            0,
+                                            lambda p=pct: _set_btn_text(f"다운로드 중… {p}%"),
+                                        )
+
                         _os.replace(tmp, dest)   # 원자적 이동 (기존 _download_file 패턴 동일)
                         _log.debug("[update_download] 다운로드 완료: %s", dest)
                         self.root.after(0, lambda: _launch_and_close(dest))

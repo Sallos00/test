@@ -273,7 +273,7 @@ class LipSyncGUILayout:
                                       bg=self.BG2, fg=self.TEXT_DIM),
                              bg="BG2", fg="TEXT_DIM")
         self._proc_dot.pack(side="left", anchor="center")
-        self._proc_lbl = reg(tk.Label(pr, text="대기 중", font=MONO,
+        self._proc_lbl = reg(tk.Label(pr, text="-", font=MONO,
                                       bg=self.BG2, fg=self.TEXT_MID),
                              bg="BG2", fg="TEXT_MID")
         self._proc_lbl.pack(side="left", padx=4, anchor="center")
@@ -310,7 +310,7 @@ class LipSyncGUILayout:
                      bg=self.BG, fg=self.TEXT_DIM),
             bg="BG", fg="TEXT_DIM").pack(side="left")
         self._badge = reg(
-            tk.Label(tp, text=" 대기 중 ",
+            tk.Label(tp, text=" — ",
                      font=("Consolas", max(7, round(8*r)), "bold"),
                      bg=self.BG3, fg=self.TEXT, padx=round(6*r), pady=2),
             bg="BG3", fg="TEXT")

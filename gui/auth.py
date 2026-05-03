@@ -222,10 +222,8 @@ class LipSyncGUIAuth:
                 _close_and_start()             # 팝업 닫기 + 앱 시작
 
             # ── 업데이트 버튼 핸들러 ──────────────────────────────────────────
-            # 서버 업데이트 시트 B2 URL로 설치 파일을 내려받은 뒤 실행한다.
-            # - URL 없음 / 다운로드 실패 → 오류 메시지 표시, 앱 비정상 종료 없음
-            # - 다운로드는 백그라운드 스레드에서 수행 → UI 멈춤 없음
-            # - 성공 시: 설치 파일 실행 → 앱 정상 종료 (_on_close 흐름 유지)
+            # _start_update_download() 공용 메서드에 위임한다.
+            # progress 콜백 → 버튼 텍스트 갱신, error 콜백 → 버튼 복원 + 팝업 오류 표시
             def _on_update():
                 if not download_url:
                     import tkinter.messagebox as _mb
@@ -236,134 +234,22 @@ class LipSyncGUIAuth:
                     )
                     return
 
-                # 중복 클릭 방지
                 update_btn.configure(state="disabled", text="다운로드 중…")
 
-                def _do_download():
-                    import os as _os, re as _re, tempfile, urllib.request, logging as _log
-                    tmp = None
+                def _on_progress(pct: int):
                     try:
-                        # ── Google Drive URL 자동 변환 ──────────────────────
-                        # 공유 링크(file/d/...) 및 uc?id= 형식을 모두 감지해
-                        # drive.usercontent.google.com + confirm=t 로 변환한다.
-                        # 100MB 초과 파일의 바이러스 확인 경고 페이지를 우회한다.
-                        def _resolve_gdrive(url: str) -> str:
-                            for pat in (
-                                r'drive\.google\.com/file/d/([^/?]+)',
-                                r'drive\.google\.com/open\?id=([^&]+)',
-                                r'drive\.google\.com/uc[?&].*?id=([^&]+)',
-                                r'drive\.usercontent\.google\.com/download.*?[?&]id=([^&]+)',
-                            ):
-                                m = _re.search(pat, url)
-                                if m:
-                                    fid = m.group(1)
-                                    _log.debug("[update_download] Drive ID 감지: %s", fid)
-                                    return (
-                                        "https://drive.usercontent.google.com/download"
-                                        f"?id={fid}&export=download&confirm=t"
-                                    )
-                            return url  # Drive URL이 아니면 원본 그대로
-
-                        resolved_url = _resolve_gdrive(download_url)
-
-                        # ── 파일명 결정 ─────────────────────────────────────
-                        # Content-Disposition 헤더가 있으면 그 값 우선,
-                        # 없으면 URL 끝 세그먼트, 그것도 없으면 기본값 사용.
-                        fname = None
-                        dest  = None
-                        tmp   = None
-
-                        # exe 위치 기준 저장 경로 (main.py 의 frozen 패턴 동일)
-                        import sys as _sys
-                        if getattr(_sys, "frozen", False):
-                            _save_dir = _os.path.dirname(_sys.executable)
-                        else:
-                            _save_dir = _os.path.dirname(_os.path.abspath(__file__))
-
-                        req = urllib.request.Request(
-                            resolved_url,
-                            headers={"User-Agent": "Mozilla/5.0"},
-                        )
-                        with urllib.request.urlopen(req, timeout=60) as resp:
-                            # Content-Disposition에서 파일명 추출 시도
-                            cd = resp.headers.get("Content-Disposition", "")
-                            m_cd = _re.search(
-                                r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)',
-                                cd, _re.IGNORECASE,
-                            )
-                            if m_cd:
-                                import urllib.parse as _up
-                                fname = _up.unquote(m_cd.group(1).strip())
-
-                            if not fname:
-                                seg = resolved_url.rstrip("/").split("/")[-1].split("?")[0]
-                                fname = seg if seg and seg != "download" else None
-
-                            if not fname:
-                                fname = "AutoSync_setup.exe"
-
-                            dest = _os.path.join(_save_dir, fname)
-                            tmp  = dest + ".tmp"
-
-                            # 이전 임시파일 잔재 정리
-                            if _os.path.exists(tmp):
-                                try:
-                                    _os.remove(tmp)
-                                except Exception:
-                                    pass
-
-                            # ── 청크 스트리밍 다운로드 (대용량 대응) ────────
-                            total      = int(resp.headers.get("Content-Length", 0))
-                            downloaded = 0
-                            CHUNK      = 65536   # 64 KB
-                            with open(tmp, "wb") as f:
-                                while True:
-                                    chunk = resp.read(CHUNK)
-                                    if not chunk:
-                                        break
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    if total > 0:
-                                        pct = min(100, int(downloaded * 100 / total))
-                                        self.root.after(
-                                            0,
-                                            lambda p=pct: _set_btn_text(f"다운로드 중… {p}%"),
-                                        )
-
-                        # [수정] os.replace(tmp, dest) 를 여기서 하지 않는다.
-                        # 앱이 실행 중인 상태에서 자기 자신(dest)을 덮어쓰면 WinError 5 발생.
-                        # 대신 tmp 경로를 그대로 배치 스크립트에 전달하고,
-                        # 앱 종료 후 배치가 이름 변경(tmp -> dest) + 재실행을 처리한다.
-                        _log.debug("[update_download] 다운로드 완료(tmp): %s", tmp)
-                        self.root.after(0, lambda: _launch_and_close(tmp, dest))
-
-                    except Exception as exc:
-                        import logging as _log2
-                        _log2.warning("[update_download] 다운로드 실패: %s", exc)
-                        # 임시파일 잔재 정리
-                        if tmp:
-                            try:
-                                import os as _os2
-                                if _os2.path.exists(tmp):
-                                    _os2.remove(tmp)
-                            except Exception:
-                                pass
-                        self.root.after(0, lambda e=str(exc): _on_download_error(e))
-
-                def _set_btn_text(text: str):
-                    try:
-                        update_btn.configure(text=text)
+                        update_btn.configure(text=f"다운로드 중… {pct}%")
                     except Exception:
                         pass
 
-                def _on_download_error(msg: str):
+                def _on_error(msg: str):
                     try:
                         update_btn.configure(state="normal", text="업데이트")
                     except Exception:
                         pass
                     try:
-                        import tkinter.messagebox as _mb
-                        _mb.showerror(
+                        import tkinter.messagebox as _mb2
+                        _mb2.showerror(
                             "다운로드 실패",
                             f"업데이트 파일을 다운로드할 수 없습니다.\n{msg}",
                             parent=popup,
@@ -371,68 +257,11 @@ class LipSyncGUIAuth:
                     except Exception:
                         pass
 
-                def _launch_and_close(tmp_path: str, dest_path: str):
-                    # [수정] 업데이트 처리 순서:
-                    #   1. 배치 스크립트 기동 (detached)
-                    #   2. 앱 정상 종료 (_on_close)
-                    #   3. 배치: 현재 PID 소멸 대기
-                    #   4. 배치: tmp -> dest 이름 변경 (앱 종료 후라 잠금 없음)
-                    #   5. 배치: 새 exe 실행 -> 자기 삭제
-                    import subprocess as _sp, logging as _log, os as _os2, tempfile as _tmp2
-
-                    try:
-                        pid      = _os2.getpid()
-                        bat_path = _os2.path.join(_tmp2.gettempdir(), "autosinc_update_launcher.bat")
-
-                        # 경로 내 큰따옴표 제거 (배치 파일 구문 오류 방지)
-                        src  = tmp_path.replace('"', '')
-                        dst  = dest_path.replace('"', '')
-
-                        bat_lines = [
-                            "@echo off",
-                            # 현재 PID 가 완전히 종료될 때까지 1초 간격으로 대기
-                            ":loop",
-                            f'tasklist /FI "PID eq {pid}" 2>nul | find /I "{pid}" > nul',
-                            "if errorlevel 1 goto :run",
-                            "timeout /t 1 /nobreak > nul",
-                            "goto :loop",
-                            ":run",
-                            # 앱 종료 후 tmp -> 실제 exe 로 이름 변경 (잠금 해제 상태)
-                            f'move /Y "{src}" "{dst}"',
-                            # 새 exe 실행
-                            f'if exist "{dst}" start "" "{dst}"',
-                            # 배치 자기 삭제
-                            'del "%~f0"',
-                        ]
-
-                        with open(bat_path, "w", encoding="mbcs") as _bf:
-                            _bf.write("\r\n".join(bat_lines))
-
-                        _sp.Popen(
-                            ["cmd.exe", "/c", bat_path],
-                            creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
-                            close_fds=True,
-                        )
-                        _log.debug("[update_download] 업데이트 런처 배치 실행: %s", bat_path)
-
-                    except Exception as exc:
-                        _log.warning("[update_download] 런처 배치 실행 실패: %s", exc)
-                        # fallback: tmp 파일이라도 직접 실행
-                        try:
-                            _sp.Popen([tmp_path], shell=False)
-                            _log.debug("[update_download] fallback - tmp 파일 직접 실행: %s", tmp_path)
-                        except Exception as exc2:
-                            _log.warning("[update_download] 직접 실행도 실패: %s", exc2)
-
-                    # 팝업 닫기 -> 기존 앱 종료 흐름(_on_close) 유지
-                    try:
-                        popup.destroy()
-                    except Exception:
-                        pass
-                    self._on_close()
-
-                # 다운로드는 백그라운드 스레드에서 수행 (UI 차단 방지)
-                threading.Thread(target=_do_download, daemon=True).start()
+                self._start_update_download(
+                    download_url,
+                    on_progress=_on_progress,
+                    on_error=_on_error,
+                )
 
             # 업데이트 버튼 참조 보관 → 체크박스 비활성 연동
             update_btn = tk.Button(btn_f, text="업데이트",
@@ -460,6 +289,152 @@ class LipSyncGUIAuth:
         except Exception:
             # 팝업 생성 실패 시에도 앱은 정상 시작
             self._do_start_app()
+
+    def _start_update_download(self, download_url: str, on_progress=None, on_error=None):
+        """업데이트 파일 다운로드 → 배치 런처 기동 → 앱 종료.
+
+        업데이트 팝업과 설정 팝업 업데이트 버튼이 공용으로 사용한다.
+
+        on_progress(pct: int) : 진행률(0-100) 콜백, 선택
+        on_error(msg: str)    : 오류 콜백, 선택. 미전달 시 messagebox 표시
+        """
+        import threading as _thr
+
+        def _do_download():
+            import os as _os, re as _re, sys as _sys, urllib.request, logging as _log
+            tmp = None
+            try:
+                # ── Google Drive URL 자동 변환 ──────────────────────────────
+                def _resolve_gdrive(url: str) -> str:
+                    for pat in (
+                        r'drive\.google\.com/file/d/([^/?]+)',
+                        r'drive\.google\.com/open\?id=([^&]+)',
+                        r'drive\.google\.com/uc[?&].*?id=([^&]+)',
+                        r'drive\.usercontent\.google\.com/download.*?[?&]id=([^&]+)',
+                    ):
+                        m = _re.search(pat, url)
+                        if m:
+                            fid = m.group(1)
+                            _log.debug("[update_download] Drive ID 감지: %s", fid)
+                            return (
+                                "https://drive.usercontent.google.com/download"
+                                f"?id={fid}&export=download&confirm=t"
+                            )
+                    return url
+
+                resolved_url = _resolve_gdrive(download_url)
+
+                # ── exe 위치 기준 저장 경로 ─────────────────────────────────
+                if getattr(_sys, "frozen", False):
+                    _save_dir = _os.path.dirname(_sys.executable)
+                else:
+                    _save_dir = _os.path.dirname(_os.path.abspath(__file__))
+
+                fname = None
+                dest  = None
+                tmp   = None
+
+                req = urllib.request.Request(
+                    resolved_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    # Content-Disposition에서 파일명 추출
+                    cd    = resp.headers.get("Content-Disposition", "")
+                    m_cd  = _re.search(
+                        r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)',
+                        cd, _re.IGNORECASE)
+                    if m_cd:
+                        import urllib.parse as _up
+                        fname = _up.unquote(m_cd.group(1).strip())
+                    if not fname:
+                        seg   = resolved_url.rstrip("/").split("/")[-1].split("?")[0]
+                        fname = seg if seg and seg != "download" else None
+                    if not fname:
+                        fname = "AutoSync_setup.exe"
+
+                    dest = _os.path.join(_save_dir, fname)
+                    tmp  = dest + ".tmp"
+
+                    # 이전 임시파일 잔재 정리
+                    if _os.path.exists(tmp):
+                        try: _os.remove(tmp)
+                        except Exception: pass
+
+                    # ── 청크 스트리밍 다운로드 ──────────────────────────────
+                    total      = int(resp.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    CHUNK      = 65536
+                    with open(tmp, "wb") as f:
+                        while True:
+                            chunk = resp.read(CHUNK)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total > 0 and on_progress:
+                                pct = min(100, int(downloaded * 100 / total))
+                                self.root.after(0, lambda p=pct: on_progress(p))
+
+                _log.debug("[update_download] 다운로드 완료(tmp): %s", tmp)
+                self.root.after(0, lambda: _launch_and_close(tmp, dest))
+
+            except Exception as exc:
+                _log.warning("[update_download] 다운로드 실패: %s", exc)
+                if tmp:
+                    try:
+                        if _os.path.exists(tmp): _os.remove(tmp)
+                    except Exception: pass
+                msg = str(exc)
+                if on_error:
+                    self.root.after(0, lambda m=msg: on_error(m))
+                else:
+                    self.root.after(0, lambda m=msg: _default_error(m))
+
+        def _default_error(msg: str):
+            try:
+                import tkinter.messagebox as _mb
+                _mb.showerror(
+                    "다운로드 실패",
+                    f"업데이트 파일을 다운로드할 수 없습니다.\n{msg}",
+                )
+            except Exception:
+                pass
+
+        def _launch_and_close(tmp_path: str, dest_path: str):
+            import subprocess as _sp, logging as _log, os as _os2, tempfile as _tmp2
+            try:
+                pid      = _os2.getpid()
+                bat_path = _os2.path.join(_tmp2.gettempdir(), "autosinc_update_launcher.bat")
+                src = tmp_path.replace('"', '')
+                dst = dest_path.replace('"', '')
+                bat_lines = [
+                    "@echo off",
+                    ":loop",
+                    f'tasklist /FI "PID eq {pid}" 2>nul | find /I "{pid}" > nul',
+                    "if errorlevel 1 goto :run",
+                    "timeout /t 1 /nobreak > nul",
+                    "goto :loop",
+                    ":run",
+                    f'move /Y "{src}" "{dst}"',
+                    f'if exist "{dst}" start "" "{dst}"',
+                    'del "%~f0"',
+                ]
+                with open(bat_path, "w", encoding="mbcs") as bf:
+                    bf.write("\r\n".join(bat_lines))
+                _sp.Popen(
+                    ["cmd.exe", "/c", bat_path],
+                    creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
+                    close_fds=True,
+                )
+                _log.debug("[update_download] 런처 배치 실행: %s", bat_path)
+            except Exception as exc:
+                _log.warning("[update_download] 런처 실패: %s", exc)
+                try:
+                    _sp.Popen([tmp_path], shell=False)
+                except Exception as exc2:
+                    _log.warning("[update_download] 직접 실행 실패: %s", exc2)
+            self._on_close()
+
+        _thr.Thread(target=_do_download, daemon=True).start()
 
     def _monitor_auth(self):
         """5분마다 서버에서 차단 여부 확인. 차단 시 싱크 중지 + 차단 팝업."""

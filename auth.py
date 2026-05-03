@@ -91,13 +91,19 @@ def clear_local_auth():
 
 # ── 서버 통신 ─────────────────────────────────────────────────────
 def _api(params: dict, timeout: int = 8) -> dict:
-    """Apps Script API 호출. 실패 시 빈 dict 반환."""
     try:
-        url  = SERVER_URL + "?" + urllib.parse.urlencode(params, encoding="utf-8")
-        req  = urllib.request.Request(url, headers={"User-Agent": "AutoSync/1.0"})
+        url = SERVER_URL + "?" + urllib.parse.urlencode(params, encoding="utf-8")
+        print("[AUTH API]", url)
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "AutoSync/1.0"}
+        )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception:
+            text = resp.read().decode("utf-8")
+            print("[AUTH RESP]", text)
+            return json.loads(text)
+    except Exception as e:
+        print("[AUTH ERROR]", repr(e))
         return {}
 
 def request_auth(pc_id: str, username: str = "") -> dict:

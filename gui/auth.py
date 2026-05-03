@@ -34,8 +34,21 @@ class LipSyncGUIAuth:
             self.root.after(0, self._show_auth_request_popup)
 
     def _after_auth_ok(self):
-        """인증 완료 후 정상 실행 흐름 시작."""
+        """인증 완료 후 버전 체크 → 정상 실행 흐름 시작.
+
+        [추가] 인증 OK 직후 백그라운드에서 서버 업데이트 시트 버전을 확인한다.
+        - 버전 일치 또는 확인 실패 → 바로 _do_start_app() 호출
+        - 버전 불일치               → 업데이트 안내 팝업 후 _do_start_app() 호출
+        기존 실행 흐름은 모두 _do_start_app() 으로 유지된다.
+        """
         self._auth_ok = True
+        # [추가] 버전 체크를 백그라운드 스레드에서 수행 (UI 블로킹 방지)
+        threading.Thread(
+            target=self._check_version_and_start,
+            daemon=True).start()
+
+    def _do_start_app(self):
+        """실제 앱 시작 로직 — 기존 _after_auth_ok 의 실행 흐름을 그대로 유지."""
         if self._autostart_var.get():
             self.root.after(500, self._toggle)
         else:
@@ -47,6 +60,125 @@ class LipSyncGUIAuth:
             daemon=True).start()
         # 5분마다 차단 여부 백그라운드 확인
         threading.Thread(target=self._monitor_auth, daemon=True).start()
+
+    # ── [추가] 버전 체크 ────────────────────────────────────────────────────
+
+    def _check_version_and_start(self):
+        """백그라운드: 서버 업데이트 시트 버전 확인 → 결과에 따라 팝업 또는 바로 시작.
+
+        - 서버 응답 실패 / 예외 발생 시 → 프로그램 종료 없이 바로 시작
+        - 버전 일치   → 바로 시작
+        - 버전 불일치 → 업데이트 안내 팝업 표시 (팝업 닫으면 시작)
+        """
+        try:
+            resp    = _auth_module.check_version()
+            latest  = resp.get("latest", "").strip()
+            current = _auth_module.APP_VERSION
+            if latest and latest != current:
+                # 버전 불일치 → 메인 스레드에서 팝업 표시
+                self.root.after(
+                    0, lambda: self._show_update_popup(current, latest))
+                return
+        except Exception:
+            # 서버 응답 오류, 인터넷 미연결 등 → 무시하고 바로 시작
+            pass
+        # 버전 일치 또는 체크 실패 → 바로 시작
+        self.root.after(0, self._do_start_app)
+
+    def _show_update_popup(self, current: str, latest: str):
+        """버전 불일치 시 업데이트 안내 팝업.
+
+        - "업데이트" / "나중에" 모두 팝업을 닫고 앱을 정상 시작한다.
+        - 팝업 강제 종료(X 버튼) 시에도 앱은 정상 시작된다.
+        - 예외 발생 시 팝업 없이 바로 시작한다.
+        """
+        try:
+            popup = tk.Toplevel(self.root)
+            popup.title("Auto Sync — 업데이트")
+            popup.resizable(False, False)
+            popup.configure(bg=self.BG)
+            popup.grab_set()
+
+            r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+            self._place_popup(popup, round(300 * r), round(200 * r))
+
+            PAD     = round(20 * r)
+            F_TITLE = max(9,  round(11 * r))
+            F_BODY  = max(8,  round(9  * r))
+            F_SMALL = max(7,  round(8  * r))
+            F_BTN   = max(8,  round(9  * r))
+
+            # 팝업 닫기 + 앱 시작 (X 버튼 포함 모든 닫기 경로)
+            def _close_and_start():
+                try:
+                    popup.destroy()
+                except Exception:
+                    pass
+                self._do_start_app()
+
+            popup.protocol("WM_DELETE_WINDOW", _close_and_start)
+
+            # ── 제목 ──
+            tk.Label(popup, text="업데이트 알림",
+                     font=("Segoe UI", F_TITLE, "bold"),
+                     bg=self.BG, fg=self.TEXT).pack(pady=(PAD, 0))
+            tk.Frame(popup, bg=self.BORDER, height=1).pack(
+                fill="x", pady=(round(10 * r), 0))
+
+            # ── 버전 정보 ──
+            info_f = tk.Frame(popup, bg=self.BG2,
+                              padx=round(14 * r), pady=round(10 * r))
+            info_f.pack(fill="x", padx=round(16 * r),
+                        pady=(round(12 * r), 0))
+
+            def _row(label, value, fg=None):
+                row = tk.Frame(info_f, bg=self.BG2)
+                row.pack(fill="x", pady=round(2 * r))
+                tk.Label(row, text=label,
+                         font=("Consolas", F_SMALL),
+                         bg=self.BG2, fg=self.TEXT_MID,
+                         width=8, anchor="e").pack(side="left")
+                tk.Label(row, text=value,
+                         font=("Consolas", F_SMALL, "bold"),
+                         bg=self.BG2, fg=fg or self.TEXT).pack(
+                    side="left", padx=(round(6 * r), 0))
+
+            _row("현재 버전", current)
+            _row("최신 버전", latest, fg=self.ACCENT3)
+
+            # ── 안내 문구 ──
+            tk.Label(popup,
+                     text="새 버전이 있습니다.",
+                     font=("Segoe UI", F_BODY),
+                     bg=self.BG, fg=self.TEXT_MID).pack(
+                pady=(round(8 * r), 0))
+
+            tk.Frame(popup, bg=self.BORDER, height=1).pack(
+                fill="x", padx=round(16 * r), pady=(round(12 * r), 0))
+
+            # ── 버튼 ──
+            btn_f = tk.Frame(popup, bg=self.BG)
+            btn_f.pack(pady=round(10 * r))
+
+            BTN = dict(font=("Consolas", F_BTN, "bold"),
+                       relief="flat", cursor="hand2",
+                       padx=round(14 * r), pady=round(5 * r))
+
+            tk.Button(btn_f, text="업데이트",
+                      bg=self.BG3, fg=self.ACCENT,
+                      activebackground=self.BORDER,
+                      command=_close_and_start, **BTN).pack(
+                side="left", padx=round(6 * r))
+
+            tk.Button(btn_f, text="나중에",
+                      bg=self.BG3, fg=self.TEXT,
+                      activebackground=self.BORDER,
+                      command=_close_and_start, **BTN).pack(
+                side="left", padx=round(6 * r))
+
+        except Exception:
+            # 팝업 생성 실패 시에도 앱은 정상 시작
+            self._do_start_app()
 
     def _monitor_auth(self):
         """5분마다 서버에서 차단 여부 확인. 차단 시 싱크 중지 + 차단 팝업."""

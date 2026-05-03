@@ -95,7 +95,7 @@ class LipSyncGUIAuth:
         # 버전 일치 / 체크 실패 → 바로 시작
         self.root.after(0, self._do_start_app)
 
-    def _show_update_popup(self, current: str, latest: str):
+    def _show_update_popup(self, current: str, latest: str, on_close=None):
         """버전 불일치 시 업데이트 안내 팝업.
 
         - "업데이트" / "나중에" 모두 팝업을 닫고 앱을 정상 시작한다.
@@ -129,12 +129,19 @@ class LipSyncGUIAuth:
             F_BTN   = max(8,  round(9  * r))
 
             # 팝업 닫기 + 앱 시작 (X 버튼 포함 모든 닫기 경로)
+            # on_close 가 지정된 경우(설정 팝업에서 호출) _do_start_app() 대신 콜백 실행
             def _close_and_start():
                 try:
                     popup.destroy()
                 except Exception:
                     pass
-                self._do_start_app()
+                if on_close is not None:
+                    try:
+                        on_close()
+                    except Exception:
+                        pass
+                else:
+                    self._do_start_app()
 
             popup.protocol("WM_DELETE_WINDOW", _close_and_start)
 

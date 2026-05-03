@@ -197,16 +197,16 @@ class LipSyncGUIAuth:
             # 실행을 선점하거나, 앱 종료 시 HTTP 요청 완료 전에 Thread가 강제 종료
             # 되는 문제를 방지한다.
             def _on_later():
-    should_skip = skip_var.get()
-
-    if should_skip:
-        try:
-            pc_id = _auth_module.get_pc_id()
-            _auth_module.skip_update_version(pc_id)
-        except Exception:
-            pass
-
-    _close_and_start()  # daemon=False: 앱 종료 시에도 요청 완료 보장
+                should_skip = skip_var.get()   # popup 파괴 전에 값 확정 저장
+                _close_and_start()             # 팝업 닫기 + 앱 시작 먼저 수행
+                if should_skip:
+                    pc_id = _auth_module.get_pc_id()
+                    import logging as _log
+                    _log.debug("[update_skip] skip_update_version 요청 시작: %s", pc_id)
+                    threading.Thread(
+                        target=_auth_module.skip_update_version,
+                        args=(pc_id,),
+                        daemon=False).start()  # daemon=False: 앱 종료 시에도 요청 완료 보장
 
             # [추가] 업데이트 버튼 참조 보관 → 체크박스 비활성 연동에 사용
             update_btn = tk.Button(btn_f, text="업데이트",

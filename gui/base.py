@@ -74,6 +74,8 @@ class LipSyncGUIBase:
             value=str(self._load_setting("oped_skip_sec", 90)))
         self._close_pot_var     = tk.BooleanVar(
             value=self._load_setting("close_potplayer_on_exit", False))
+        self._auto_update_var   = tk.BooleanVar(
+            value=self._load_setting("auto_update",             True))
         self._apply_scale()
         self._apply_theme()
         self._build_window()
@@ -234,6 +236,7 @@ class LipSyncGUIBase:
                 "oped_auto_skip": self._oped_auto_var.get(),
                 "oped_skip_sec":  skip_sec,
                 "close_potplayer_on_exit": self._close_pot_var.get(),
+                "auto_update":    self._auto_update_var.get(),
                 "pip_on":         getattr(self, "_pip_on", False),
                 "record_save_dir": getattr(self, "_record_save_dir", None) or existing.get("record_save_dir", ""),
                 "history_video_dir": getattr(self, "_hist_video_dir", None) or existing.get("history_video_dir", ""),

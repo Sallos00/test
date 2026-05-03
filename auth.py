@@ -23,6 +23,11 @@ AUTH_FILE    = os.path.join(
 )
 POLL_INTERVAL = 10   # 인증 확인 주기 (초)
 
+# ── [추가] 현재 프로그램 버전 ─────────────────────────────
+# 업데이트 시트 B1 값과 비교하는 기준 버전.
+# 새 버전 배포 시 이 값을 함께 변경한다.
+APP_VERSION   = "1.4.0.0"
+
 # ── PC 고유 ID 생성 ───────────────────────────────────────────────
 def get_pc_id() -> str:
     """MAC 주소 + 컴퓨터 이름 + OS 정보를 조합한 고유 ID 생성."""
@@ -167,6 +172,22 @@ def verify(on_approved, on_revoked, on_error, on_pending=None):
 
     threading.Thread(target=_check, daemon=True).start()
     return pc_id
+
+
+# ── [추가] 업데이트 버전 체크 ─────────────────────────────
+def check_version() -> dict:
+    """서버 업데이트 시트(B1)의 최신 버전과 현재 버전을 비교한다.
+
+    반환 예시:
+        {"ok": True,  "latest": "1.5.0.0"}   ← 서버 응답 성공
+        {"ok": False, "msg":   "..."}          ← 응답 실패 / 시트 없음
+
+    예외 발생 없이 빈 dict({})를 반환하는 경우도 있으므로
+    호출자는 반드시 .get() 으로 키를 접근해야 한다.
+    버전 일치 여부는 호출자(gui/auth.py)에서 APP_VERSION 과 비교한다.
+    """
+    return _api({"action": "version"}, timeout=6)
+
 
 def poll_until_approved(pc_id: str, on_approved, on_revoked, on_error, stop_event):
     """

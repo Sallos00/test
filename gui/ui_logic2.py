@@ -258,6 +258,7 @@ class LipSyncGUILogic2:
 
         F_SMALL     = max(7, round(8*r))
         _latest_ver = [""]   # 업데이트 버튼에서 읽기 위한 mutable reference
+        _download_url = [""]  # 업데이트 버튼에서 읽기 위한 다운로드 URL
 
         def _ver_row(label, init_text):
             """버전 정보 행(레이블 + 값) 생성 후 값 라벨 반환."""
@@ -295,6 +296,7 @@ class LipSyncGUILogic2:
                     import auth as _am
                     resp   = _am.check_version()
                     latest = resp.get("latest", "").strip() or "—"
+                    _download_url[0] = resp.get("url", "").strip()
                 except Exception:
                     latest = "—"
                 _latest_ver[0] = latest
@@ -322,22 +324,34 @@ class LipSyncGUILogic2:
         tk.Checkbutton(version_frame, text="자동 업데이트", variable=tau,
                        fg=self.TEXT, **CHK).pack(anchor="w", pady=round(4*r))
 
-        # 업데이트 버튼 — _show_update_popup 의 업데이트 버튼과 동일 스타일/기능
+        # 업데이트 버튼 — 팝업 없이 바로 다운로드 → 앱 종료
         def _on_update_click():
             latest = _latest_ver[0]
-            # 자동 업데이트 설정 반영 후 팝업 닫기
+            dl_url = _download_url[0]
+
+            # 자동 업데이트 설정 저장
             if hasattr(self, "_auto_update_var"):
                 self._auto_update_var.set(tau.get())
             self._save_settings()
             popup.destroy()
-            # 신버전이 확인된 경우에만 업데이트 팝업 표시
-            # on_close=lambda: None → 이미 앱이 실행 중이므로 _do_start_app() 호출 생략
-            if latest and latest not in ("—", "") and latest != _current_ver:
-                try:
-                    self._show_update_popup(_current_ver, latest,
-                                            on_close=lambda: None)
-                except Exception:
-                    pass
+
+            # URL 없음 — 아직 버전 확인 전이거나 서버 오류
+            if not dl_url:
+                import tkinter.messagebox as _mb
+                _mb.showerror(
+                    "업데이트 오류",
+                    "다운로드 URL을 가져올 수 없습니다.\n잠시 후 다시 시도해 주세요.",
+                )
+                return
+
+            # 최신 버전과 동일하면 안내 후 종료
+            if not (latest and latest not in ("—", "") and latest != _current_ver):
+                import tkinter.messagebox as _mb
+                _mb.showinfo("업데이트", "현재 최신 버전입니다.")
+                return
+
+            # 바로 다운로드 시작 (업데이트 팝업의 업데이트 버튼과 동일 흐름)
+            self._start_update_download(dl_url)
 
         tk.Button(version_frame, text="업데이트",
                   font=("Consolas", FM, "bold"),

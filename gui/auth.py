@@ -273,6 +273,13 @@ class LipSyncGUIAuth:
                         dest  = None
                         tmp   = None
 
+                        # exe 위치 기준 저장 경로 (main.py 의 frozen 패턴 동일)
+                        import sys as _sys
+                        if getattr(_sys, "frozen", False):
+                            _save_dir = _os.path.dirname(_sys.executable)
+                        else:
+                            _save_dir = _os.path.dirname(_os.path.abspath(__file__))
+
                         req = urllib.request.Request(
                             resolved_url,
                             headers={"User-Agent": "Mozilla/5.0"},
@@ -295,7 +302,7 @@ class LipSyncGUIAuth:
                             if not fname:
                                 fname = "AutoSync_setup.exe"
 
-                            dest = _os.path.join(tempfile.gettempdir(), fname)
+                            dest = _os.path.join(_save_dir, fname)
                             tmp  = dest + ".tmp"
 
                             # 이전 임시파일 잔재 정리

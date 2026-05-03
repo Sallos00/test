@@ -414,6 +414,7 @@ class LipSyncGUIAuth:
                     "timeout /t 1 /nobreak > nul",
                     "goto :loop",
                     ":run",
+                    f'del /F /Q "{dst}" 2>nul',
                     f'move /Y "{src}" "{dst}"',
                     f'if exist "{dst}" start "" "{dst}"',
                     'del "%~f0"',
@@ -422,7 +423,8 @@ class LipSyncGUIAuth:
                     bf.write("\r\n".join(bat_lines))
                 _sp.Popen(
                     ["cmd.exe", "/c", bat_path],
-                    creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
+                    creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP
+                                  | _sp.CREATE_NO_WINDOW,
                     close_fds=True,
                 )
                 _log.debug("[update_download] 런처 배치 실행: %s", bat_path)

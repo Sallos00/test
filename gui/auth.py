@@ -237,23 +237,35 @@ class LipSyncGUIAuth:
                 update_btn.configure(state="disabled", text="다운로드 중…")
 
                 def _on_progress(pct: int):
+                    # 백그라운드 스레드 → root.after() 로 UI 스레드 전달
+                    def _ui():
+                        try:
+                            update_btn.configure(text=f"다운로드 중… {pct}%")
+                        except Exception:
+                            pass
                     try:
-                        update_btn.configure(text=f"다운로드 중… {pct}%")
+                        self.root.after(0, _ui)
                     except Exception:
                         pass
 
                 def _on_error(msg: str):
+                    # 백그라운드 스레드 → root.after() 로 UI 스레드 전달
+                    def _ui():
+                        try:
+                            update_btn.configure(state="normal", text="업데이트")
+                        except Exception:
+                            pass
+                        try:
+                            import tkinter.messagebox as _mb2
+                            _mb2.showerror(
+                                "다운로드 실패",
+                                f"업데이트 파일을 다운로드할 수 없습니다.\n{msg}",
+                                parent=popup,
+                            )
+                        except Exception:
+                            pass
                     try:
-                        update_btn.configure(state="normal", text="업데이트")
-                    except Exception:
-                        pass
-                    try:
-                        import tkinter.messagebox as _mb2
-                        _mb2.showerror(
-                            "다운로드 실패",
-                            f"업데이트 파일을 다운로드할 수 없습니다.\n{msg}",
-                            parent=popup,
-                        )
+                        self.root.after(0, _ui)
                     except Exception:
                         pass
 
@@ -291,214 +303,25 @@ class LipSyncGUIAuth:
             self._do_start_app()
 
     def _start_update_download(self, download_url: str, on_progress=None, on_error=None):
-        """업데이트 파일 다운로드 → 배치 런처 기동 → 앱 종료.
+        """업데이트 파일 다운로드 → AutoSincUpDate.bat 생성·실행 → 앱 종료.
 
         업데이트 팝업과 설정 팝업 업데이트 버튼이 공용으로 사용한다.
+        실제 다운로드·배치 생성 로직은 루트의 updater.py 에 위임한다.
 
         on_progress(pct: int) : 진행률(0-100) 콜백, 선택
         on_error(msg: str)    : 오류 콜백, 선택. 미전달 시 messagebox 표시
         """
-        import threading as _thr
+        import updater as _updater
 
-        def _do_download():
-            import os as _os, re as _re, sys as _sys, urllib.request, logging as _log
-            tmp = None
-            try:
-                # ── Google Drive URL 자동 변환 ──────────────────────────────
-                def _resolve_gdrive(url: str) -> str:
-                    for pat in (
-                        r'drive\.google\.com/file/d/([^/?]+)',
-                        r'drive\.google\.com/open\?id=([^&]+)',
-                        r'drive\.google\.com/uc[?&].*?id=([^&]+)',
-                        r'drive\.usercontent\.google\.com/download.*?[?&]id=([^&]+)',
-                    ):
-                        m = _re.search(pat, url)
-                        if m:
-                            fid = m.group(1)
-                            _log.debug("[update_download] Drive ID 감지: %s", fid)
-                            return (
-                                "https://drive.usercontent.google.com/download"
-                                f"?id={fid}&export=download&confirm=t"
-                            )
-                    return url
-
-                resolved_url = _resolve_gdrive(download_url)
-
-                # ── exe 위치 기준 저장 경로 ─────────────────────────────────
-                if getattr(_sys, "frozen", False):
-                    _save_dir = _os.path.dirname(_sys.executable)
-                else:
-                    _save_dir = _os.path.dirname(_os.path.abspath(__file__))
-
-                fname = None
-                dest  = None
-                tmp   = None
-
-                req = urllib.request.Request(
-                    resolved_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    # Content-Disposition에서 파일명 추출
-                    cd    = resp.headers.get("Content-Disposition", "")
-                    m_cd  = _re.search(
-                        r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)',
-                        cd, _re.IGNORECASE)
-                    if m_cd:
-                        import urllib.parse as _up
-                        fname = _up.unquote(m_cd.group(1).strip())
-                    if not fname:
-                        seg   = resolved_url.rstrip("/").split("/")[-1].split("?")[0]
-                        fname = seg if seg and seg != "download" else None
-                    if not fname:
-                        fname = "AutoSync_setup.exe"
-
-                    dest = _os.path.join(_save_dir, fname)
-                    tmp  = dest + ".tmp"
-
-                    # 이전 임시파일 잔재 정리
-                    if _os.path.exists(tmp):
-                        try: _os.remove(tmp)
-                        except Exception: pass
-
-                    # ── 청크 스트리밍 다운로드 ──────────────────────────────
-                    total      = int(resp.headers.get("Content-Length", 0))
-                    downloaded = 0
-                    CHUNK      = 65536
-                    with open(tmp, "wb") as f:
-                        while True:
-                            chunk = resp.read(CHUNK)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if total > 0 and on_progress:
-                                pct = min(100, int(downloaded * 100 / total))
-                                self.root.after(0, lambda p=pct: on_progress(p))
-
-                _log.debug("[update_download] 다운로드 완료(tmp): %s", tmp)
-                self.root.after(0, lambda: _launch_and_close(tmp, dest))
-
-            except Exception as exc:
-                _log.warning("[update_download] 다운로드 실패: %s", exc)
-                if tmp:
-                    try:
-                        if _os.path.exists(tmp): _os.remove(tmp)
-                    except Exception: pass
-                msg = str(exc)
-                if on_error:
-                    self.root.after(0, lambda m=msg: on_error(m))
-                else:
-                    self.root.after(0, lambda m=msg: _default_error(m))
-
-        def _default_error(msg: str):
-            try:
-                import tkinter.messagebox as _mb
-                _mb.showerror(
-                    "다운로드 실패",
-                    f"업데이트 파일을 다운로드할 수 없습니다.\n{msg}",
-                )
-            except Exception:
-                pass
-
-        def _launch_and_close(tmp_path: str, dest_path: str):
-            import subprocess as _sp, logging as _log, os as _os2, tempfile as _tmp2
-            try:
-                pid      = _os2.getpid()
-                bat_path = _os2.path.join(_tmp2.gettempdir(), "autosinc_update_launcher.bat")
-                src = tmp_path.replace('"', '')
-                dst = dest_path.replace('"', '')
-
-                workdir = _os2.path.dirname(dst) or "C:\\"
-
-                # ── 배치 파일 구성 ────────────────────────────────────────────
-                # [환경 상속 전략]
-                # _MEIPASS2 / TCL_LIBRARY / TK_LIBRARY 는 아래 _clean_env 에서
-                # 제거한 뒤 cmd.exe 에 전달된다.
-                # cmd.exe 의 start 명령은 현재 cmd 환경을 그대로 상속하므로
-                # _MEIPASS2 가 없고 APPDATA 는 보존된 상태로 새 EXE 가 기동된다.
-                #
-                # ※ PowerShell Start-Process 는 ShellExecuteEx 기반으로 내부적으로
-                #   새 환경 블록을 구성해 _clean_env 를 우회한다.
-                #   - -UseNewEnvironment : APPDATA(Volatile Env) 유실 → 인증 초기화
-                #   - 없음              : _MEIPASS2 복원 → 구 _MEI 경로 DLL 오류
-                #   두 경우 모두 문제가 되므로 PowerShell 을 완전히 제거한다.
-                exe_name = _os2.path.basename(dst)  # ex) AutoSinc.exe
-
-                bat_lines = [
-                    "@echo off",
-                    # ── 1단계: PID 기반 대기 ──────────────────────────────────
-                    ":wait_pid",
-                    f'tasklist /FI "PID eq {pid}" 2>nul | find /I "{pid}" > nul',
-                    "if errorlevel 1 goto :wait_name",
-                    "timeout /t 1 /nobreak > nul",
-                    "goto :wait_pid",
-                    # ── 2단계: 이름 기반 재확인 (완전 종료 보장) ─────────────
-                    # PID 소멸 후에도 같은 이름 프로세스가 남아있으면 대기 유지.
-                    ":wait_name",
-                    f'tasklist /FI "IMAGENAME eq {exe_name}" 2>nul | find /I "{exe_name}" > nul',
-                    "if errorlevel 1 goto :replace",
-                    "timeout /t 1 /nobreak > nul",
-                    "goto :wait_name",
-                    # ── 3단계: 파일 교체 ──────────────────────────────────────
-                    ":replace",
-                    ":delloop",
-                    f'del /F /Q "{dst}" 2>nul',
-                    f'if exist "{dst}" (',
-                    "  timeout /t 1 /nobreak > nul",
-                    "  goto :delloop",
-                    ")",
-                    f'move /Y "{src}" "{dst}"',
-                    "timeout /t 2 /nobreak > nul",
-                    # ── PyInstaller 잔류 변수 배치 레벨 강제 삭제 ────────────────
-                    # _clean_env 로 이미 제거했지만 PyInstaller 부트로더가
-                    # CRT(_putenv)와 Win32(SetEnvironmentVariable) 양쪽에
-                    # 기록할 경우 os.environ 이 CRT 블록만 보므로 Win32 상속
-                    # 블록에 잔류할 수 있다. 배치에서 직접 삭제해 완전 차단한다.
-                    "set _MEIPASS2=",
-                    "set TCL_LIBRARY=",
-                    "set TK_LIBRARY=",
-                    # ── 새 EXE 실행 ───────────────────────────────────────────
-                    # cmd start 는 현재 cmd.exe 환경을 그대로 상속한다.
-                    #   · _MEIPASS2 삭제됨 → PyInstaller 가 새 _MEI 폴더 생성 ✓
-                    #   · APPDATA 보존     → settings.json 정상 로드 ✓
-                    f'if exist "{dst}" (',
-                    f'  start "" /D "{workdir}" "{dst}"',
-                    ")",
-                    'del "%~f0"',
-                ]
-                with open(bat_path, "w", encoding="mbcs") as bf:
-                    bf.write("\r\n".join(bat_lines))
-
-                # ── PyInstaller 잔류 변수 제거 후 cmd.exe 에 전달 ─────────────
-                # APPDATA 등 사용자 환경변수는 보존, 부트로더 전용 키만 제거.
-                # 이 _clean_env 가 cmd.exe → start → 새 EXE 로 상속된다.
-                _PIE_KEYS = {"_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY"}
-                _clean_env = {k: v for k, v in _os2.environ.items()
-                              if k not in _PIE_KEYS}
-                _si = _sp.STARTUPINFO()
-                _si.dwFlags |= _sp.STARTF_USESHOWWINDOW
-                _si.wShowWindow = 0  # SW_HIDE
-                _sp.Popen(
-                    ["cmd.exe", "/c", bat_path],
-                    creationflags=_sp.CREATE_NEW_PROCESS_GROUP | _sp.CREATE_NO_WINDOW,
-                    startupinfo=_si,
-                    stdin=_sp.DEVNULL,
-                    stdout=_sp.DEVNULL,
-                    stderr=_sp.DEVNULL,
-                    env=_clean_env,
-                    close_fds=True,
-                )
-                _log.debug("[update_download] 런처 배치 실행: %s", bat_path)
-            except Exception as exc:
-                _log.warning("[update_download] 런처 실패: %s", exc)
-                try:
-                    # 폴백: os.startfile은 ShellExecuteEx를 직접 호출하므로
-                    # 부모 환경 비상속 + 탐색기 동일 컨텍스트로 실행된다.
-                    _os2.startfile(tmp_path)
-                except Exception as exc2:
-                    _log.warning("[update_download] startfile 폴백 실패: %s", exc2)
-            self._on_close()
-
-        _thr.Thread(target=_do_download, daemon=True).start()
+        # on_progress / on_error 는 백그라운드 스레드에서 직접 호출되므로
+        # tkinter 위젯 조작이 필요하면 호출자(ui_logic2.py 등)가 root.after() 로
+        # 이미 감싸서 전달한다. on_close 는 root.after() 로 감싸 전달한다.
+        _updater.start_update_download(
+            download_url=download_url,
+            on_progress=on_progress,
+            on_error=on_error,
+            on_close=lambda: self.root.after(0, self._on_close),
+        )
 
     def _monitor_auth(self):
         """5분마다 서버에서 차단 여부 확인. 차단 시 싱크 중지 + 차단 팝업."""

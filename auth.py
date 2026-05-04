@@ -16,11 +16,24 @@ import threading
 import urllib.request
 import urllib.parse
 
+def _get_appdata() -> str:
+    """APPDATA 환경변수가 없을 때(업데이트 후 재실행 등) 레지스트리에서 직접 읽는다."""
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        return appdata
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+        ) as k:
+            return winreg.QueryValueEx(k, "AppData")[0]
+    except Exception:
+        return os.path.expanduser(r"~\AppData\Roaming")
+
 # ── 설정 ─────────────────────────────────────────────────────────
 SERVER_URL   = os.environ.get("AUTH_SERVER_URL", "")
-AUTH_FILE    = os.path.join(
-    os.environ.get("APPDATA", ""), "AutoSync", "settings.json"
-)
+AUTH_FILE    = os.path.join(_get_appdata(), "AutoSync", "settings.json")
 POLL_INTERVAL = 10   # 인증 확인 주기 (초)
 
 # ── [추가] 현재 프로그램 버전 ─────────────────────────────

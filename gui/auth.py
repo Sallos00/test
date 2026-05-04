@@ -422,7 +422,7 @@ class LipSyncGUIAuth:
                     "  goto :delloop",
                     ")",
                     f'move /Y "{src}" "{dst}"',
-                    f'if exist "{dst}" powershell -WindowStyle Hidden -NonInteractive -Command "Start-Process \'"{dst}"\'"',
+                    f"if exist \"{dst}\" powershell -NonInteractive -WindowStyle Hidden -Command \"Start-Process -FilePath '{dst}' -UseNewEnvironment\"",
                     'del "%~f0"',
                 ]
                 with open(bat_path, "w", encoding="mbcs") as bf:

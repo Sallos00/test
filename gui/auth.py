@@ -421,17 +421,25 @@ class LipSyncGUIAuth:
                 #   - -UseNewEnvironment : APPDATA(Volatile Env) 유실 → 인증 초기화
                 #   - 없음              : _MEIPASS2 복원 → 구 _MEI 경로 DLL 오류
                 #   두 경우 모두 문제가 되므로 PowerShell 을 완전히 제거한다.
+                exe_name = _os2.path.basename(dst)  # ex) AutoSinc.exe
+
                 bat_lines = [
                     "@echo off",
-                    # ── 구 프로세스 종료 대기 ──────────────────────────────────
-                    ":loop",
+                    # ── 1단계: PID 기반 대기 ──────────────────────────────────
+                    ":wait_pid",
                     f'tasklist /FI "PID eq {pid}" 2>nul | find /I "{pid}" > nul',
+                    "if errorlevel 1 goto :wait_name",
+                    "timeout /t 1 /nobreak > nul",
+                    "goto :wait_pid",
+                    # ── 2단계: 이름 기반 재확인 (완전 종료 보장) ─────────────
+                    # PID 소멸 후에도 같은 이름 프로세스가 남아있으면 대기 유지.
+                    ":wait_name",
+                    f'tasklist /FI "IMAGENAME eq {exe_name}" 2>nul | find /I "{exe_name}" > nul',
                     "if errorlevel 1 goto :replace",
                     "timeout /t 1 /nobreak > nul",
-                    "goto :loop",
-                    # ── 파일 교체 ─────────────────────────────────────────────
+                    "goto :wait_name",
+                    # ── 3단계: 파일 교체 ──────────────────────────────────────
                     ":replace",
-                    "timeout /t 2 /nobreak > nul",
                     ":delloop",
                     f'del /F /Q "{dst}" 2>nul',
                     f'if exist "{dst}" (',

@@ -64,7 +64,21 @@ def _get_potplayer_rect():
 # ── ffmpeg 런타임 관리 ────────────────────────────────────────────────────────
 
 # APP_DIR: gui/base.py 의 APP_DIR 와 동일 경로 (%APPDATA%\AutoSync)
-_APP_DIR = os.path.join(os.environ.get("APPDATA", ""), "AutoSync")
+def _get_appdata() -> str:
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        return appdata
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+        ) as k:
+            return winreg.QueryValueEx(k, "AppData")[0]
+    except Exception:
+        return os.path.expanduser(r"~\AppData\Roaming")
+
+_APP_DIR = os.path.join(_get_appdata(), "AutoSync")
 
 # ffmpeg 다운로드 URL (yt-dlp 공식 권장 빌드, Windows x64 GPL)
 _FFMPEG_ZIP_URL = (

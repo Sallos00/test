@@ -422,15 +422,26 @@ class LipSyncGUIAuth:
                     "  goto :delloop",
                     ")",
                     f'move /Y "{src}" "{dst}"',
+                    # PyInstaller 부트로더가 구(舊) 임시 경로(_MEI...)를
+                    # 환경변수에서 읽어 재사용하지 못하도록 배치 수준에서도
+                    # 명시적으로 초기화한다.
+                    # (_clean_env 에서 제거해도 cmd.exe 내부 환경에
+                    #  잔류할 수 있으므로 이중 방어선으로 SET 명령 추가)
+                    "SET _MEIPASS2=",
+                    "SET TCL_LIBRARY=",
+                    "SET TK_LIBRARY=",
                     f'if exist "{dst}" start "" "{dst}"',
                     'del "%~f0"',
                 ]
                 with open(bat_path, "w", encoding="mbcs") as bf:
                     bf.write("\r\n".join(bat_lines))
-                # _MEIPASS2 를 환경변수에서 완전히 제거한 뒤 bat 에 전달
-                # (set _MEIPASS2= 은 빈 문자열로 설정할 뿐 삭제가 아님)
+                # PyInstaller 관련 환경변수를 모두 제거한 뒤 bat 에 전달.
+                # _MEIPASS2   : 구 임시 추출 경로 (부트로더가 이 값을 우선 사용)
+                # TCL_LIBRARY : 구 임시 경로 내 Tcl 경로
+                # TK_LIBRARY  : 구 임시 경로 내 Tk 경로
+                _PYINSTALLER_ENV_KEYS = {"_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY"}
                 _clean_env = {k: v for k, v in _os2.environ.items()
-                              if k != "_MEIPASS2"}
+                              if k not in _PYINSTALLER_ENV_KEYS}
                 _si = _sp.STARTUPINFO()
                 _si.dwFlags |= _sp.STARTF_USESHOWWINDOW
                 _si.wShowWindow = 0  # SW_HIDE

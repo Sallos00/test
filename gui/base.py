@@ -15,6 +15,21 @@ from app_icon import apply_to_toplevel, pil_image_for_tray
 from win32_utils import find_potplayer_hwnd, CFG
 
 
+def _get_appdata() -> str:
+    """APPDATA 환경변수가 없을 때(업데이트 후 재실행 등) 레지스트리에서 직접 읽는다."""
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        return appdata
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+        ) as k:
+            return winreg.QueryValueEx(k, "AppData")[0]
+    except Exception:
+        return os.path.expanduser(r"~\AppData\Roaming")
+
+
 class LipSyncGUIBase:
 
     DARK = dict(
@@ -36,7 +51,7 @@ class LipSyncGUIBase:
         "중": dict(w=408, h=570, scale=1.2),
         "대": dict(w=476, h=660, scale=1.4),
     }
-    APP_DIR      = os.path.join(os.environ.get("APPDATA", ""), "AutoSync")
+    APP_DIR      = os.path.join(_get_appdata(), "AutoSync")
     CFG_FILE     = os.path.join(APP_DIR, "settings.json")
     STARTUP_REG  = r"Software\Microsoft\Windows\CurrentVersion\Run"
     STARTUP_NAME = "AutoSync"

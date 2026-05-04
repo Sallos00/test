@@ -354,23 +354,35 @@ class LipSyncGUILogic2:
             update_btn.configure(state="disabled", text="다운로드 중…")
 
             def _on_progress(pct: int):
+                # 백그라운드 스레드 → root.after() 로 UI 스레드 전달
+                def _ui():
+                    try:
+                        update_btn.configure(text=f"다운로드 중… {pct}%")
+                    except Exception:
+                        pass
                 try:
-                    update_btn.configure(text=f"다운로드 중… {pct}%")
+                    self.root.after(0, _ui)
                 except Exception:
                     pass
 
             def _on_error(msg: str):
+                # 백그라운드 스레드 → root.after() 로 UI 스레드 전달
+                def _ui():
+                    try:
+                        update_btn.configure(state="normal", text="업데이트")
+                    except Exception:
+                        pass
+                    try:
+                        import tkinter.messagebox as _mb2
+                        _mb2.showerror(
+                            "다운로드 실패",
+                            f"업데이트 파일을 다운로드할 수 없습니다.\n{msg}",
+                            parent=popup,
+                        )
+                    except Exception:
+                        pass
                 try:
-                    update_btn.configure(state="normal", text="업데이트")
-                except Exception:
-                    pass
-                try:
-                    import tkinter.messagebox as _mb2
-                    _mb2.showerror(
-                        "다운로드 실패",
-                        f"업데이트 파일을 다운로드할 수 없습니다.\n{msg}",
-                        parent=popup,
-                    )
+                    self.root.after(0, _ui)
                 except Exception:
                     pass
 

@@ -422,7 +422,12 @@ class LipSyncGUIAuth:
                     "  goto :delloop",
                     ")",
                     f'move /Y "{src}" "{dst}"',
-                    f"if exist \"{dst}\" powershell -NonInteractive -WindowStyle Hidden -Command \"[Environment]::SetEnvironmentVariable('_MEIPASS2',$null,'Process'); Start-Process '{dst}'\"",
+                    # _MEIPASS2를 cmd.exe 환경에서 명시적으로 제거한 뒤 새 exe 실행.
+                    # PowerShell Start-Process 경유 시 cmd.exe 따옴표 파싱 오류로
+                    # SetEnvironmentVariable 호출이 건너뛰어질 수 있으므로,
+                    # bat 내에서 직접 set으로 제거하고 start ""로 실행한다.
+                    "set \"_MEIPASS2=\"",
+                    f'if exist \"{dst}\" start \"\" \"{dst}"',
                     'del "%~f0"',
                 ]
                 with open(bat_path, "w", encoding="mbcs") as bf:
@@ -448,7 +453,7 @@ class LipSyncGUIAuth:
             except Exception as exc:
                 _log.warning("[update_download] 런처 실패: %s", exc)
                 try:
-                    _sp.Popen([tmp_path], shell=False)
+                    _sp.Popen([tmp_path], shell=False, env=_clean_env)
                 except Exception as exc2:
                     _log.warning("[update_download] 직접 실행 실패: %s", exc2)
             self._on_close()

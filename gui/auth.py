@@ -439,6 +439,7 @@ class LipSyncGUIAuth:
                     "  goto :delloop",
                     ")",
                     f'move /Y "{src}" "{dst}"',
+                    "timeout /t 1 /nobreak > nul",
                     # ── PyInstaller 잔류 변수 배치 레벨 강제 삭제 ────────────────
                     # _clean_env 로 이미 제거했지만 PyInstaller 부트로더가
                     # CRT(_putenv)와 Win32(SetEnvironmentVariable) 양쪽에

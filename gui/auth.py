@@ -413,18 +413,15 @@ class LipSyncGUIAuth:
                 work_ps = _os2.path.dirname(dst).replace("'", "''") or "C:\\"
 
                 # ── 배치 파일 구성 ────────────────────────────────────────────
-                # [업계 표준 해결책]
-                # Chrome, VS Code, Slack 등의 자가 업데이트는 모두
-                # ShellExecute 계열(탐색기 더블클릭과 동일)로 새 EXE를 실행한다.
+                # [환경 상속 전략]
+                # _MEIPASS2 / TCL_LIBRARY / TK_LIBRARY 는 아래 _clean_env 에서
+                # 이미 제거한 뒤 cmd.exe 에 전달된다.
+                # cmd.exe → PowerShell → 새 EXE 순서로 _clean_env 가 그대로
+                # 상속되므로 APPDATA 등 사용자 환경변수는 정상 유지된다.
                 #
-                # 문제: cmd.exe `start "" exe` 는 CreateProcess 계열이므로
-                #   부모 프로세스의 환경을 상속한다. PyInstaller onefile 부트로더가
-                #   구(舊) 임시 경로(_MEI...)에서 DLL을 찾으려다 실패하는 원인.
-                #
-                # 해결: PowerShell `Start-Process -UseNewEnvironment` 를 사용하면
-                #   Windows 사용자 프로파일의 환경변수만 가진 완전히 독립된 프로세스를
-                #   생성한다 → PyInstaller 부트로더가 _MEIPASS2 등의 잔류 변수 없이
-                #   새 임시 폴더를 정상 생성·로드한다.
+                # ※ -UseNewEnvironment 를 사용하면 HKCU\Volatile Environment
+                #   (APPDATA 등이 저장된 키)를 읽지 못해 새 프로세스에서
+                #   APPDATA 가 빈 문자열이 되어 settings.json 을 찾지 못한다.
                 bat_lines = [
                     "@echo off",
                     # ── 구 프로세스 종료 대기 ──────────────────────────────────
@@ -444,24 +441,22 @@ class LipSyncGUIAuth:
                     ")",
                     f'move /Y "{src}" "{dst}"',
                     # ── 새 EXE 실행 ───────────────────────────────────────────
-                    # PowerShell Start-Process -UseNewEnvironment:
-                    #   · 사용자 프로파일 환경변수만 사용 (부모 환경 비상속)
-                    #   · ShellExecute 기반 → 탐색기 더블클릭과 동일한 컨텍스트
-                    #   · PyInstaller 관련 잔류 환경변수(_MEIPASS2 등) 완전 차단
+                    # PowerShell Start-Process (환경 상속):
+                    #   · _MEIPASS2 등은 _clean_env 단계에서 이미 제거됨
+                    #   · 부모(cmd.exe)의 _clean_env 를 그대로 상속 → APPDATA 정상
                     f'if exist "{dst}" (',
                     f'  powershell -NonInteractive -NoProfile -Command'
                     f'  "Start-Process -FilePath \'{dst_ps}\''
-                    f'  -WorkingDirectory \'{work_ps}\''
-                    f'  -UseNewEnvironment"',
+                    f'  -WorkingDirectory \'{work_ps}\'"',
                     ")",
                     'del "%~f0"',
                 ]
                 with open(bat_path, "w", encoding="mbcs") as bf:
                     bf.write("\r\n".join(bat_lines))
 
-                # ── cmd.exe 기동 환경에서도 PyInstaller 변수 제거 ────────────
-                # (배치 내 PowerShell이 -UseNewEnvironment 로 차단하지만
-                #  cmd.exe 단계에서도 이중으로 제거해 안전성 확보)
+                # ── PyInstaller 잔류 변수 제거 후 cmd.exe 에 전달 ─────────────
+                # APPDATA 등 사용자 환경변수는 보존, 부트로더 전용 키만 제거.
+                # 이 _clean_env 가 cmd.exe → PowerShell → 새 EXE 로 상속된다.
                 _PIE_KEYS = {"_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY"}
                 _clean_env = {k: v for k, v in _os2.environ.items()
                               if k not in _PIE_KEYS}

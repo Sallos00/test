@@ -32,9 +32,24 @@ import tkinter as tk
 
 from win32_utils import CFG
 
+def _get_appdata() -> str:
+    """APPDATA 환경변수가 없을 때(업데이트 후 재실행 등) 레지스트리에서 직접 읽는다."""
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        return appdata
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+        ) as k:
+            return winreg.QueryValueEx(k, "AppData")[0]
+    except Exception:
+        return os.path.expanduser(r"~\AppData\Roaming")
+
 # ── oped_db.json 초기화: 앱 시작 시 파일이 없으면 빈 JSON으로 생성 ──────────
 try:
-    _appdata = os.environ.get("APPDATA", "")
+    _appdata = _get_appdata()
     if _appdata:
         _db_dir  = os.path.join(_appdata, "AutoSync")
         _db_path = os.path.join(_db_dir, "oped_db.json")
@@ -89,7 +104,7 @@ if __name__ == "__main__":
         import traceback
         import datetime
         try:
-            _appdata = os.environ.get("APPDATA", "")
+            _appdata = _get_appdata()
             _err_dir = os.path.join(_appdata, "AutoSync") if _appdata else os.path.dirname(__file__)
             os.makedirs(_err_dir, exist_ok=True)
             _err_path = os.path.join(_err_dir, "startup_error.log")

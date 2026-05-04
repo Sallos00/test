@@ -116,6 +116,7 @@ jobs:
           --hidden-import="mem_utils"
           --hidden-import="processes"
           --hidden-import="win32_utils"
+          --hidden-import="updater"
           --hidden-import="auth"
           --hidden-import="db_manager"
           --hidden-import="video_hash"

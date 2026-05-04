@@ -439,10 +439,18 @@ class LipSyncGUIAuth:
                     "  goto :delloop",
                     ")",
                     f'move /Y "{src}" "{dst}"',
+                    # ── PyInstaller 잔류 변수 배치 레벨 강제 삭제 ────────────────
+                    # _clean_env 로 이미 제거했지만 PyInstaller 부트로더가
+                    # CRT(_putenv)와 Win32(SetEnvironmentVariable) 양쪽에
+                    # 기록할 경우 os.environ 이 CRT 블록만 보므로 Win32 상속
+                    # 블록에 잔류할 수 있다. 배치에서 직접 삭제해 완전 차단한다.
+                    "set _MEIPASS2=",
+                    "set TCL_LIBRARY=",
+                    "set TK_LIBRARY=",
                     # ── 새 EXE 실행 ───────────────────────────────────────────
-                    # cmd start 는 현재 cmd.exe 환경(_clean_env)을 그대로 상속한다.
-                    #   · _MEIPASS2 없음 → PyInstaller 가 새 _MEI 임시폴더 생성 ✓
-                    #   · APPDATA 보존   → settings.json 정상 로드 ✓
+                    # cmd start 는 현재 cmd.exe 환경을 그대로 상속한다.
+                    #   · _MEIPASS2 삭제됨 → PyInstaller 가 새 _MEI 폴더 생성 ✓
+                    #   · APPDATA 보존     → settings.json 정상 로드 ✓
                     f'if exist "{dst}" (',
                     f'  start "" /D "{workdir}" "{dst}"',
                     ")",

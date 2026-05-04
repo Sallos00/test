@@ -167,9 +167,6 @@ def _write_bat(bat_path: str, exe_path: str, tmp_path: str, pid: int) -> None:
         # 5단계: PyInstaller 잔류 환경 변수 배치 레벨 강제 제거
         # _clean_env 로 이미 제거했지만 Win32 환경 블록에 잔류할 수 있으므로
         # 배치에서도 직접 삭제해 완전 차단한다.
-        "set _MEIPASS2=",
-        "set TCL_LIBRARY=",
-        "set TK_LIBRARY=",
         # 6단계: 새 EXE 실행
         # cmd.exe start 는 현재 cmd 환경(위에서 정리됨)을 그대로 상속한다.
         #   · _MEIPASS2 없음 → PyInstaller 가 새 _MEI 폴더 생성 ✓

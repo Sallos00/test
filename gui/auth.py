@@ -422,12 +422,15 @@ class LipSyncGUIAuth:
                     "  goto :delloop",
                     ")",
                     f'move /Y "{src}" "{dst}"',
-                    "set _MEIPASS2=",
-                    f'if exist "{dst}" start "" "{dst}"',
+                    f'if exist "{dst}" powershell -WindowStyle Hidden -NonInteractive -Command "Start-Process \'"{dst}"\'"',
                     'del "%~f0"',
                 ]
                 with open(bat_path, "w", encoding="mbcs") as bf:
                     bf.write("\r\n".join(bat_lines))
+                # _MEIPASS2 를 환경변수에서 완전히 제거한 뒤 bat 에 전달
+                # (set _MEIPASS2= 은 빈 문자열로 설정할 뿐 삭제가 아님)
+                _clean_env = {k: v for k, v in _os2.environ.items()
+                              if k != "_MEIPASS2"}
                 _si = _sp.STARTUPINFO()
                 _si.dwFlags |= _sp.STARTF_USESHOWWINDOW
                 _si.wShowWindow = 0  # SW_HIDE
@@ -438,6 +441,7 @@ class LipSyncGUIAuth:
                     stdin=_sp.DEVNULL,
                     stdout=_sp.DEVNULL,
                     stderr=_sp.DEVNULL,
+                    env=_clean_env,
                     close_fds=True,
                 )
                 _log.debug("[update_download] 런처 배치 실행: %s", bat_path)

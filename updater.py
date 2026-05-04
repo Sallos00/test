@@ -167,6 +167,9 @@ def _write_bat(bat_path: str, exe_path: str, tmp_path: str, pid: int) -> None:
         # 5단계: PyInstaller 잔류 환경 변수 배치 레벨 강제 제거
         # _clean_env 로 이미 제거했지만 Win32 환경 블록에 잔류할 수 있으므로
         # 배치에서도 직접 삭제해 완전 차단한다.
+        "set _MEIPASS2=",
+        "set TCL_LIBRARY=",
+        "set TK_LIBRARY=",
         # 6단계: 새 EXE 실행
         # cmd.exe start 는 현재 cmd 환경(위에서 정리됨)을 그대로 상속한다.
         #   · _MEIPASS2 없음 → PyInstaller 가 새 _MEI 폴더 생성 ✓
@@ -190,11 +193,30 @@ def _launch_bat(bat_path: str) -> None:
     CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW 플래그로 현재 프로세스
     종료 후에도 배치가 계속 동작하도록 보장한다.
 
-    PyInstaller 부트로더 전용 환경 변수(_MEIPASS2 등)는 새 프로세스에
-    전달되지 않도록 clean_env 를 구성한다.
+    PyInstaller 부트로더는 _MEIPASS2 를 CRT(_putenv)와 Win32
+    (SetEnvironmentVariableW) 두 레이어에 모두 기록한다.
+    Python os.environ 은 CRT 레이어만 보므로 dict 필터링만으로는
+    Win32 레이어 잔류분을 제거할 수 없다.
+    → ctypes 로 Win32 API 를 직접 호출해 현재 프로세스 환경 블록에서
+      완전히 삭제한 뒤 clean_env 를 구성한다.
     """
-    _PIE_KEYS  = {"_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY"}
-    clean_env  = {k: v for k, v in os.environ.items() if k not in _PIE_KEYS}
+    _PIE_KEYS = ("_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY")
+
+    # ── Win32 레이어에서 직접 삭제 ──────────────────────────────────────────
+    # SetEnvironmentVariableW(name, NULL) 은 해당 변수를 프로세스 환경 블록에서
+    # 완전히 제거한다. 이후 CreateProcess 가 생성하는 자식 환경 블록에도
+    # 해당 변수가 포함되지 않는다.
+    try:
+        import ctypes
+        _k32 = ctypes.windll.kernel32
+        for _key in _PIE_KEYS:
+            _k32.SetEnvironmentVariableW(_key, None)
+            log.debug("[updater] Win32 env 삭제: %s", _key)
+    except Exception as _e:
+        log.debug("[updater] Win32 env 삭제 실패(무시): %s", _e)
+
+    # ── CRT 레이어에서도 제거 (os.environ 기준 clean_env 구성) ─────────────
+    clean_env = {k: v for k, v in os.environ.items() if k not in _PIE_KEYS}
 
     si = subprocess.STARTUPINFO()
     si.dwFlags    |= subprocess.STARTF_USESHOWWINDOW

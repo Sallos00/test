@@ -407,21 +407,20 @@ class LipSyncGUIAuth:
                 src = tmp_path.replace('"', '')
                 dst = dest_path.replace('"', '')
 
-                # PowerShell Start-Process 경로용 단일 인용부호 이스케이프
-                # (배치→PowerShell 문자열에서 '' = 리터럴 ' )
-                dst_ps  = dst.replace("'", "''")
-                work_ps = _os2.path.dirname(dst).replace("'", "''") or "C:\\"
+                workdir = _os2.path.dirname(dst) or "C:\\"
 
                 # ── 배치 파일 구성 ────────────────────────────────────────────
                 # [환경 상속 전략]
                 # _MEIPASS2 / TCL_LIBRARY / TK_LIBRARY 는 아래 _clean_env 에서
-                # 이미 제거한 뒤 cmd.exe 에 전달된다.
-                # cmd.exe → PowerShell → 새 EXE 순서로 _clean_env 가 그대로
-                # 상속되므로 APPDATA 등 사용자 환경변수는 정상 유지된다.
+                # 제거한 뒤 cmd.exe 에 전달된다.
+                # cmd.exe 의 start 명령은 현재 cmd 환경을 그대로 상속하므로
+                # _MEIPASS2 가 없고 APPDATA 는 보존된 상태로 새 EXE 가 기동된다.
                 #
-                # ※ -UseNewEnvironment 를 사용하면 HKCU\Volatile Environment
-                #   (APPDATA 등이 저장된 키)를 읽지 못해 새 프로세스에서
-                #   APPDATA 가 빈 문자열이 되어 settings.json 을 찾지 못한다.
+                # ※ PowerShell Start-Process 는 ShellExecuteEx 기반으로 내부적으로
+                #   새 환경 블록을 구성해 _clean_env 를 우회한다.
+                #   - -UseNewEnvironment : APPDATA(Volatile Env) 유실 → 인증 초기화
+                #   - 없음              : _MEIPASS2 복원 → 구 _MEI 경로 DLL 오류
+                #   두 경우 모두 문제가 되므로 PowerShell 을 완전히 제거한다.
                 bat_lines = [
                     "@echo off",
                     # ── 구 프로세스 종료 대기 ──────────────────────────────────
@@ -441,13 +440,11 @@ class LipSyncGUIAuth:
                     ")",
                     f'move /Y "{src}" "{dst}"',
                     # ── 새 EXE 실행 ───────────────────────────────────────────
-                    # PowerShell Start-Process (환경 상속):
-                    #   · _MEIPASS2 등은 _clean_env 단계에서 이미 제거됨
-                    #   · 부모(cmd.exe)의 _clean_env 를 그대로 상속 → APPDATA 정상
+                    # cmd start 는 현재 cmd.exe 환경(_clean_env)을 그대로 상속한다.
+                    #   · _MEIPASS2 없음 → PyInstaller 가 새 _MEI 임시폴더 생성 ✓
+                    #   · APPDATA 보존   → settings.json 정상 로드 ✓
                     f'if exist "{dst}" (',
-                    f'  powershell -NonInteractive -NoProfile -Command'
-                    f'  "Start-Process -FilePath \'{dst_ps}\''
-                    f'  -WorkingDirectory \'{work_ps}\'"',
+                    f'  start "" /D "{workdir}" "{dst}"',
                     ")",
                     'del "%~f0"',
                 ]
@@ -456,7 +453,7 @@ class LipSyncGUIAuth:
 
                 # ── PyInstaller 잔류 변수 제거 후 cmd.exe 에 전달 ─────────────
                 # APPDATA 등 사용자 환경변수는 보존, 부트로더 전용 키만 제거.
-                # 이 _clean_env 가 cmd.exe → PowerShell → 새 EXE 로 상속된다.
+                # 이 _clean_env 가 cmd.exe → start → 새 EXE 로 상속된다.
                 _PIE_KEYS = {"_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY"}
                 _clean_env = {k: v for k, v in _os2.environ.items()
                               if k not in _PIE_KEYS}

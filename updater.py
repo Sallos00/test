@@ -165,19 +165,28 @@ def _write_bat(bat_path: str, exe_path: str, tmp_path: str, pid: int) -> None:
         f'move /Y "{tmp_path}" "{exe_path}"',
         "timeout /t 2 /nobreak > nul",
         # 5단계: PyInstaller 잔류 환경 변수 배치 레벨 강제 제거
-        # _clean_env 로 이미 제거했지만 Win32 환경 블록에 잔류할 수 있으므로
-        # 배치에서도 직접 삭제해 완전 차단한다.
+        # Python(_launch_bat)에서 Win32 API로 이미 제거했지만
+        # 배치 레벨에서도 재차 삭제해 이중 차단한다.
         "set _MEIPASS2=",
         "set TCL_LIBRARY=",
         "set TK_LIBRARY=",
-        # 6단계: 새 EXE 실행
+        # 6단계: _MEIPASS2 완전 삭제 확인 루프 — 1초 간격으로 재확인
+        # "if defined VAR" 는 값이 빈 문자열("")이면 미정의로 판단하므로
+        # set VAR= 이후에는 항상 false 가 된다.
+        ":check_meipass2",
+        "if defined _MEIPASS2 (",
+        "  set _MEIPASS2=",
+        "  timeout /t 1 /nobreak > nul",
+        "  goto :check_meipass2",
+        ")",
+        # 7단계: 새 EXE 실행
         # cmd.exe start 는 현재 cmd 환경(위에서 정리됨)을 그대로 상속한다.
-        #   · _MEIPASS2 없음 → PyInstaller 가 새 _MEI 폴더 생성 ✓
-        #   · APPDATA 보존   → settings.json 정상 로드 ✓
+        #   · _MEIPASS2 없음 확인됨 → PyInstaller 가 새 _MEI 폴더 생성 ✓
+        #   · APPDATA 보존          → settings.json 정상 로드 ✓
         f'if exist "{exe_path}" (',
         f'  start "" /D "{workdir}" "{exe_path}"',
         ")",
-        # 7단계: 배치 자기 삭제
+        # 8단계: 배치 자기 삭제
         'del "%~f0"',
     ]
 
@@ -202,18 +211,30 @@ def _launch_bat(bat_path: str) -> None:
     """
     _PIE_KEYS = ("_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY")
 
-    # ── Win32 레이어에서 직접 삭제 ──────────────────────────────────────────
+    # ── Win32 레이어에서 직접 삭제 + 삭제 확인 ────────────────────────────
     # SetEnvironmentVariableW(name, NULL) 은 해당 변수를 프로세스 환경 블록에서
     # 완전히 제거한다. 이후 CreateProcess 가 생성하는 자식 환경 블록에도
     # 해당 변수가 포함되지 않는다.
+    # 삭제 후 GetEnvironmentVariableW 로 실제로 지워졌는지 검증한다.
+    # (반환값 0 + ERROR_ENVVAR_NOT_FOUND(203) → 삭제 확인)
     try:
         import ctypes
-        _k32 = ctypes.windll.kernel32
+        _k32   = ctypes.windll.kernel32
+        _ERROR_ENVVAR_NOT_FOUND = 203
+        _buf   = ctypes.create_unicode_buffer(32767)
         for _key in _PIE_KEYS:
             _k32.SetEnvironmentVariableW(_key, None)
-            log.debug("[updater] Win32 env 삭제: %s", _key)
+            # 삭제 확인: GetEnvironmentVariableW 가 0 을 반환하고
+            # GetLastError 가 203(ENVVAR_NOT_FOUND) 이면 완전 삭제됨
+            _ret = _k32.GetEnvironmentVariableW(_key, _buf, 32767)
+            if _ret == 0 and _k32.GetLastError() == _ERROR_ENVVAR_NOT_FOUND:
+                log.debug("[updater] Win32 env 삭제 확인: %s", _key)
+            else:
+                # 삭제 실패 — 값이 남아 있으면 빈 문자열로 덮어써서 무력화
+                log.warning("[updater] Win32 env 삭제 실패, 빈값으로 덮어씀: %s", _key)
+                _k32.SetEnvironmentVariableW(_key, "")
     except Exception as _e:
-        log.debug("[updater] Win32 env 삭제 실패(무시): %s", _e)
+        log.warning("[updater] Win32 env 처리 실패(계속 진행): %s", _e)
 
     # ── CRT 레이어에서도 제거 (os.environ 기준 clean_env 구성) ─────────────
     clean_env = {k: v for k, v in os.environ.items() if k not in _PIE_KEYS}

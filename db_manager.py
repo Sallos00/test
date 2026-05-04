@@ -37,7 +37,20 @@ def _resolve_db_path() -> str:
     """
     import sys
     # settings.json 저장 경로: %APPDATA%\AutoSync\
-    appdata = os.environ.get("APPDATA", "")
+    def _get_appdata() -> str:
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            return appdata
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+            ) as k:
+                return winreg.QueryValueEx(k, "AppData")[0]
+        except Exception:
+            return os.path.expanduser(r"~\AppData\Roaming")
+    appdata = _get_appdata()
     if appdata:
         candidate = os.path.join(appdata, "AutoSync", "oped_db.json")
         try:

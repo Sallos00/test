@@ -33,19 +33,42 @@ import tkinter as tk
 from win32_utils import CFG
 
 def _get_appdata() -> str:
-    """APPDATA 환경변수가 없을 때(업데이트 후 재실행 등) 레지스트리에서 직접 읽는다."""
-    appdata = os.environ.get("APPDATA", "")
-    if appdata:
-        return appdata
+    """환경변수 없이도 Win32 API / 레지스트리로 APPDATA 경로를 반환한다."""
+    # 1. 환경변수 (일반 실행)
+    v = os.environ.get("APPDATA", "")
+    if v:
+        return v
+    # 2. Win32 SHGetFolderPathW — 환경변수가 전혀 없어도 동작
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(260)
+        ok  = ctypes.windll.shell32.SHGetFolderPathW(0, 0x1a, 0, 0, buf)
+        if ok == 0 and buf.value:
+            return buf.value
+    except Exception:
+        pass
+    # 3. Volatile Environment 레지스트리
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Volatile Environment") as k:
+            v = winreg.QueryValueEx(k, "APPDATA")[0]
+            if v:
+                return v
+    except Exception:
+        pass
+    # 4. Shell Folders 레지스트리
     try:
         import winreg
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
         ) as k:
-            return winreg.QueryValueEx(k, "AppData")[0]
+            v = winreg.QueryValueEx(k, "AppData")[0]
+            if v:
+                return v
     except Exception:
-        return os.path.expanduser(r"~\AppData\Roaming")
+        pass
+    return ""
 
 # ── oped_db.json 초기화: 앱 시작 시 파일이 없으면 빈 JSON으로 생성 ──────────
 try:

@@ -28,9 +28,13 @@ def _get_save_dir() -> str:
 
     Nuitka onefile은 bootstrap이 temp에 압축 해제 후 child를 실행하므로
     child의 sys.executable은 temp 경로를 가리킨다.
-    NUITKA_ONEFILE_PARENT(bootstrap PID)로 원본 exe 위치를 역추적한다.
+    우선순위대로 원본 exe 위치를 역추적한다:
+      1차: NUITKA_ONEFILE_PARENT PID → QueryFullProcessImageNameW
+      2차: sys.argv[0] — bootstrap이 child에 전달한 원본 exe 경로
+      3차: sys.executable (onefile에서는 temp 경로일 수 있어 최후 수단)
     """
     if getattr(sys, "frozen", False):
+        # ── 1차: NUITKA_ONEFILE_PARENT PID로 bootstrap 경로 조회 ──────────
         parent_pid = os.environ.get("NUITKA_ONEFILE_PARENT", "")
         if parent_pid:
             try:
@@ -48,7 +52,22 @@ def _get_save_dir() -> str:
                         log.debug("[updater] bootstrap exe 경로: %s", buf.value)
                         return os.path.dirname(buf.value)
             except Exception as _e:
-                log.warning("[updater] bootstrap 경로 조회 실패, sys.executable 사용: %s", _e)
+                log.warning("[updater] bootstrap 경로 조회 실패, 다음 폴백 시도: %s", _e)
+
+        # ── 2차: sys.argv[0] — Nuitka onefile bootstrap이 child에 전달한 원본 경로 ──
+        # bootstrap은 child 실행 시 argv[0]에 원본 exe의 절대경로를 그대로 넘긴다.
+        # OpenProcess 실패(bootstrap 선종료) 또는 env 미설정 시 이 값이 신뢰할 수 있는 폴백이다.
+        if sys.argv and sys.argv[0]:
+            candidate = os.path.abspath(sys.argv[0])
+            if os.path.isfile(candidate):
+                tmp_root = (os.environ.get("TEMP") or os.environ.get("TMP") or "").rstrip("\\")
+                if not tmp_root or not candidate.lower().startswith(tmp_root.lower()):
+                    log.debug("[updater] sys.argv[0] 기반 원본 경로: %s", candidate)
+                    return os.path.dirname(candidate)
+
+        # ── 3차: sys.executable (onefile에서는 temp일 수 있음, 최후 수단) ──
+        log.warning("[updater] 원본 경로 특정 실패, sys.executable 사용(temp일 수 있음): %s",
+                    sys.executable)
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 

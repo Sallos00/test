@@ -16,7 +16,12 @@ class LipSyncGUIAuth:
         status = _auth.get_local_status()
 
         if local and status == _auth.AuthStatus.APPROVED:
-            # 허가 상태 → 즉시 실행, 백그라운드에서 차단 여부만 확인
+            # 허가 상태 → APPROVED 확인과 동시에 버전 체크를 병렬로 시작
+            # (기존: _after_auth_ok 호출 후 UI 스레드에서 시작 → 변경: 즉시 시작)
+            self._version_check_started_early = True
+            threading.Thread(
+                target=self._check_version_and_start,
+                daemon=True).start()
             self.root.after(0, self._after_auth_ok)
             def _verify():
                 resp = _auth.check_auth(local["pc_id"], local["token"])
@@ -43,9 +48,12 @@ class LipSyncGUIAuth:
         기존 실행 흐름은 모두 _do_start_app()으로 유지된다.
         """
         self._auth_ok = True
-        threading.Thread(
-            target=self._check_version_and_start,
-            daemon=True).start()
+        # _check_auth_on_start(APPROVED 경로)에서 이미 시작한 경우 중복 시작 방지
+        # PENDING→APPROVED, REVOKED→APPROVED 경로에서는 플래그 없으므로 정상 시작
+        if not getattr(self, "_version_check_started_early", False):
+            threading.Thread(
+                target=self._check_version_and_start,
+                daemon=True).start()
 
     def _do_start_app(self):
         """실제 앱 시작 로직 — 기존 _after_auth_ok의 실행 흐름을 그대로 유지."""

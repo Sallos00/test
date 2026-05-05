@@ -24,25 +24,36 @@ _BAT_FILENAME = "AutoSincUpDate.bat"  # 업데이트 배치 파일명
 # ── 내부 헬퍼 ────────────────────────────────────────────────────────────────
 
 def _get_save_dir() -> str:
-    """현재 실행 파일(frozen) 또는 스크립트 기준 디렉터리를 반환한다.
+    """현재 실행 파일(frozen) 또는 스크립트 기준 디렉터리를 반환한다."""
 
-    Nuitka onefile은 bootstrap이 %TEMP%에 압축 해제 후 child를 실행하므로
-    sys.executable은 temp 경로를 가리킨다.
+    # ── 디버그 로그: %TEMP%\autosinc_debug.log 에 진단 정보 기록 ──────────
+    # 문제 해결 후 이 블록(dbg_path 선언부터 dbg() 호출 전체)을 삭제할 것
+    import traceback as _tb
+    _dbg_path = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "autosinc_debug.log")
+    def _dbg(msg: str) -> None:
+        try:
+            with open(_dbg_path, "a", encoding="utf-8") as _f:
+                _f.write(msg + "\n")
+        except Exception:
+            pass
 
-    해결책: Nuitka bootstrap은 child 실행 시 원본 exe 경로를 argv[0]으로
-    그대로 전달하므로 sys.argv[0]이 가장 신뢰할 수 있는 원본 경로다.
-    bootstrap 생존 여부에 의존하는 NUITKA_ONEFILE_PARENT PID 방식은
-    bootstrap이 child 실행 직후 종료되면 실패하므로 보조 수단으로만 사용한다.
-    """
+    _dbg("=" * 60)
+    _dbg(f"[frozen]        {getattr(sys, 'frozen', False)}")
+    _dbg(f"[sys.executable]{sys.executable}")
+    _dbg(f"[sys.argv]      {sys.argv}")
+    _dbg(f"[NUITKA_ONEFILE_PARENT] {os.environ.get('NUITKA_ONEFILE_PARENT', '(없음)')}")
+    # ── 디버그 블록 끝 ──────────────────────────────────────────────────────
+
     if getattr(sys, "frozen", False):
         # 1순위: sys.argv[0] — bootstrap이 child에 전달한 원본 exe 경로
         if sys.argv and sys.argv[0]:
             candidate = os.path.abspath(sys.argv[0])
+            _dbg(f"[argv0 candidate]{candidate}  isfile={os.path.isfile(candidate)}")
             if os.path.isfile(candidate):
-                log.debug("[updater] sys.argv[0] 기반 원본 경로: %s", candidate)
+                _dbg(f"[결과] argv[0] 사용 → {os.path.dirname(candidate)}")
                 return os.path.dirname(candidate)
 
-        # 2순위: NUITKA_ONEFILE_PARENT PID — bootstrap이 살아있을 때만 유효
+        # 2순위: NUITKA_ONEFILE_PARENT PID
         parent_pid = os.environ.get("NUITKA_ONEFILE_PARENT", "")
         if parent_pid:
             try:
@@ -50,21 +61,27 @@ def _get_save_dir() -> str:
                 import ctypes.wintypes
                 _k32 = ctypes.windll.kernel32
                 h = _k32.OpenProcess(0x1000, False, int(parent_pid))
+                _dbg(f"[PID] OpenProcess handle={h}")
                 if h:
                     buf  = ctypes.create_unicode_buffer(32767)
                     size = ctypes.wintypes.DWORD(32767)
                     ok   = _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
                     _k32.CloseHandle(h)
-                    if ok and os.path.basename(buf.value).lower() == _EXE_FILENAME.lower():
-                        log.debug("[updater] bootstrap PID 기반 원본 경로: %s", buf.value)
+                    _dbg(f"[PID] QueryFullProcessImageName ok={ok} path={buf.value}")
+                    name_match = os.path.basename(buf.value).lower() == _EXE_FILENAME.lower()
+                    _dbg(f"[PID] 파일명 일치={name_match} (기대:{_EXE_FILENAME})")
+                    if ok and name_match:
+                        _dbg(f"[결과] PID 사용 → {os.path.dirname(buf.value)}")
                         return os.path.dirname(buf.value)
             except Exception as _e:
-                log.warning("[updater] bootstrap PID 조회 실패: %s", _e)
+                _dbg(f"[PID] 예외 발생: {_e}\n{_tb.format_exc()}")
 
-        # 3순위: sys.executable (frozen에서는 temp일 수 있음)
-        log.warning("[updater] 원본 경로 특정 실패, sys.executable 사용: %s", sys.executable)
+        _dbg(f"[결과] 폴백 sys.executable → {os.path.dirname(sys.executable)}")
         return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+
+    result = os.path.dirname(os.path.abspath(__file__))
+    _dbg(f"[결과] non-frozen __file__ → {result}")
+    return result
 
 
 def _resolve_gdrive(url: str) -> str:

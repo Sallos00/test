@@ -24,50 +24,8 @@ _BAT_FILENAME = "AutoSincUpDate.bat"  # 업데이트 배치 파일명
 # ── 내부 헬퍼 ────────────────────────────────────────────────────────────────
 
 def _get_save_dir() -> str:
-    """현재 실행 파일(frozen) 또는 스크립트 기준 디렉터리를 반환한다.
-
-    Nuitka onefile은 bootstrap이 temp에 압축 해제 후 child를 실행하므로
-    child의 sys.executable은 temp 경로를 가리킨다.
-    우선순위대로 원본 exe 위치를 역추적한다:
-      1차: NUITKA_ONEFILE_PARENT PID → QueryFullProcessImageNameW
-      2차: sys.argv[0] — bootstrap이 child에 전달한 원본 exe 경로
-      3차: sys.executable (onefile에서는 temp 경로일 수 있어 최후 수단)
-    """
+    """현재 실행 파일(frozen) 또는 스크립트 기준 디렉터리를 반환한다."""
     if getattr(sys, "frozen", False):
-        # ── 1차: NUITKA_ONEFILE_PARENT PID로 bootstrap 경로 조회 ──────────
-        parent_pid = os.environ.get("NUITKA_ONEFILE_PARENT", "")
-        if parent_pid:
-            try:
-                import ctypes
-                import ctypes.wintypes
-                _k32  = ctypes.windll.kernel32
-                # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-                h = _k32.OpenProcess(0x1000, False, int(parent_pid))
-                if h:
-                    buf  = ctypes.create_unicode_buffer(32767)
-                    size = ctypes.wintypes.DWORD(32767)
-                    ok   = _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
-                    _k32.CloseHandle(h)
-                    if ok:
-                        log.debug("[updater] bootstrap exe 경로: %s", buf.value)
-                        return os.path.dirname(buf.value)
-            except Exception as _e:
-                log.warning("[updater] bootstrap 경로 조회 실패, 다음 폴백 시도: %s", _e)
-
-        # ── 2차: sys.argv[0] — Nuitka onefile bootstrap이 child에 전달한 원본 경로 ──
-        # bootstrap은 child 실행 시 argv[0]에 원본 exe의 절대경로를 그대로 넘긴다.
-        # OpenProcess 실패(bootstrap 선종료) 또는 env 미설정 시 이 값이 신뢰할 수 있는 폴백이다.
-        if sys.argv and sys.argv[0]:
-            candidate = os.path.abspath(sys.argv[0])
-            if os.path.isfile(candidate):
-                tmp_root = (os.environ.get("TEMP") or os.environ.get("TMP") or "").rstrip("\\")
-                if not tmp_root or not candidate.lower().startswith(tmp_root.lower()):
-                    log.debug("[updater] sys.argv[0] 기반 원본 경로: %s", candidate)
-                    return os.path.dirname(candidate)
-
-        # ── 3차: sys.executable (onefile에서는 temp일 수 있음, 최후 수단) ──
-        log.warning("[updater] 원본 경로 특정 실패, sys.executable 사용(temp일 수 있음): %s",
-                    sys.executable)
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
@@ -174,7 +132,7 @@ def _write_bat(bat_path: str, exe_path: str, tmp_path: str, pid: int) -> None:
       2. 이름 기반 대기 — 동일 이름 프로세스 완전 종료 확인 (재시작 방어)
       3. 기존 exe 삭제  — 잠금 해제될 때까지 1초 간격 재시도
       4. tmp → exe 이름 변경
-      5. Nuitka onefile 환경변수 제거
+      5. Nuitka onefile 잔류 환경변수 제거
       6. 새 exe 실행
       7. 배치 자기 삭제
     """
@@ -207,6 +165,8 @@ def _write_bat(bat_path: str, exe_path: str, tmp_path: str, pid: int) -> None:
         f'move /Y "{tmp_path}" "{exe_path}"',
         "timeout /t 2 /nobreak > nul",
         # 5단계: Nuitka onefile 잔류 환경변수 제거
+        # Python(_launch_bat)에서 Win32 API로 이미 제거했지만
+        # 배치 레벨에서도 재차 삭제해 이중 차단한다.
         # bootstrap이 child 실행 전 설정한 NUITKA_ONEFILE_PARENT가 남아 있으면
         # 새 exe가 자신을 child로 착각해 압축 해제 없이 실행을 시도한다.
         "set NUITKA_ONEFILE_PARENT=",
@@ -230,24 +190,31 @@ def _launch_bat(bat_path: str) -> None:
     CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW 플래그로 현재 프로세스
     종료 후에도 배치가 계속 동작하도록 보장한다.
 
-    Nuitka onefile은 bootstrap이 child 실행 전 NUITKA_ONEFILE_PARENT 환경변수를
-    설정한다. cmd.exe가 이를 상속하면 배치가 실행하는 새 exe도 이를 물려받아
+    Nuitka onefile bootstrap은 child 실행 전 NUITKA_ONEFILE_PARENT 환경변수를
+    Win32(SetEnvironmentVariableW)와 CRT 두 레이어에 모두 기록한다.
+    cmd.exe가 이를 상속하면 배치가 실행하는 새 exe도 이를 물려받아
     자신을 child로 착각한다. Win32 API로 직접 삭제해 이를 방지한다.
     """
-    # Win32 레이어에서 Nuitka onefile 환경변수 제거
-    # (배치 파일 내 set 명령으로도 제거하지만 cmd.exe 실행 시점에 이미
-    #  상속되므로 Python 단에서도 미리 제거한다.)
     _NUITKA_KEYS = ("NUITKA_ONEFILE_PARENT",)
+
+    # ── Win32 레이어에서 직접 삭제 + 삭제 확인 ────────────────────────────
     try:
         import ctypes
-        _k32 = ctypes.windll.kernel32
+        _k32   = ctypes.windll.kernel32
+        _ERROR_ENVVAR_NOT_FOUND = 203
+        _buf   = ctypes.create_unicode_buffer(32767)
         for _key in _NUITKA_KEYS:
             _k32.SetEnvironmentVariableW(_key, None)
-            log.debug("[updater] Win32 env 삭제: %s", _key)
+            _ret = _k32.GetEnvironmentVariableW(_key, _buf, 32767)
+            if _ret == 0 and _k32.GetLastError() == _ERROR_ENVVAR_NOT_FOUND:
+                log.debug("[updater] Win32 env 삭제 확인: %s", _key)
+            else:
+                log.warning("[updater] Win32 env 삭제 실패, 빈값으로 덮어씀: %s", _key)
+                _k32.SetEnvironmentVariableW(_key, "")
     except Exception as _e:
         log.warning("[updater] Win32 env 처리 실패(계속 진행): %s", _e)
 
-    # CRT 레이어(os.environ)에서도 제거
+    # ── CRT 레이어에서도 제거 (os.environ 기준 clean_env 구성) ─────────────
     clean_env = {k: v for k, v in os.environ.items() if k not in _NUITKA_KEYS}
 
     si = subprocess.STARTUPINFO()

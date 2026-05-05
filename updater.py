@@ -24,8 +24,36 @@ _BAT_FILENAME = "AutoSincUpDate.bat"  # 업데이트 배치 파일명
 # ── 내부 헬퍼 ────────────────────────────────────────────────────────────────
 
 def _get_save_dir() -> str:
-    """현재 실행 파일(frozen) 또는 스크립트 기준 디렉터리를 반환한다."""
+    """현재 실행 파일(frozen) 또는 스크립트 기준 디렉터리를 반환한다.
+
+    Nuitka onefile은 bootstrap이 %TEMP%에 압축 해제 후 child를 실행하므로
+    child의 sys.executable은 temp 경로를 가리킨다.
+    NUITKA_ONEFILE_PARENT(bootstrap PID)로 원본 exe 위치를 역추적하고,
+    실패 시 sys.executable로 폴백한다.
+    """
     if getattr(sys, "frozen", False):
+        parent_pid = os.environ.get("NUITKA_ONEFILE_PARENT", "")
+        if parent_pid:
+            try:
+                import ctypes
+                import ctypes.wintypes
+                _k32 = ctypes.windll.kernel32
+                # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                h = _k32.OpenProcess(0x1000, False, int(parent_pid))
+                if h:
+                    buf  = ctypes.create_unicode_buffer(32767)
+                    size = ctypes.wintypes.DWORD(32767)
+                    ok   = _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+                    _k32.CloseHandle(h)
+                    if ok:
+                        # PID 재사용 방어: 반환 경로의 파일명이 exe와 일치할 때만 신뢰
+                        if os.path.basename(buf.value).lower() == _EXE_FILENAME.lower():
+                            log.debug("[updater] bootstrap exe 경로: %s", buf.value)
+                            return os.path.dirname(buf.value)
+                        log.warning("[updater] PID %s 경로 불일치(PID 재사용 의심): %s",
+                                    parent_pid, buf.value)
+            except Exception as _e:
+                log.warning("[updater] bootstrap 경로 조회 실패, sys.executable 사용: %s", _e)
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 

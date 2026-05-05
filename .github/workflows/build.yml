@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss nuitka ordered-set
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss nuitka ordered-set zstandard
 
       - name: 아이콘 생성
         run: python scripts/make_icon.py
@@ -41,6 +41,8 @@ jobs:
         run: >
           python -m nuitka
           --onefile
+          --assume-yes-for-downloads
+          --enable-plugin=tk-inter
           --windows-console-mode=disable
           --output-filename="Auto Sinc.exe"
           --output-dir=dist

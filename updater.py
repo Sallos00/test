@@ -27,33 +27,42 @@ def _get_save_dir() -> str:
     """현재 실행 파일(frozen) 또는 스크립트 기준 디렉터리를 반환한다.
 
     Nuitka onefile은 bootstrap이 %TEMP%에 압축 해제 후 child를 실행하므로
-    child의 sys.executable은 temp 경로를 가리킨다.
-    NUITKA_ONEFILE_PARENT(bootstrap PID)로 원본 exe 위치를 역추적하고,
-    실패 시 sys.executable로 폴백한다.
+    sys.executable은 temp 경로를 가리킨다.
+
+    해결책: Nuitka bootstrap은 child 실행 시 원본 exe 경로를 argv[0]으로
+    그대로 전달하므로 sys.argv[0]이 가장 신뢰할 수 있는 원본 경로다.
+    bootstrap 생존 여부에 의존하는 NUITKA_ONEFILE_PARENT PID 방식은
+    bootstrap이 child 실행 직후 종료되면 실패하므로 보조 수단으로만 사용한다.
     """
     if getattr(sys, "frozen", False):
+        # 1순위: sys.argv[0] — bootstrap이 child에 전달한 원본 exe 경로
+        if sys.argv and sys.argv[0]:
+            candidate = os.path.abspath(sys.argv[0])
+            if os.path.isfile(candidate):
+                log.debug("[updater] sys.argv[0] 기반 원본 경로: %s", candidate)
+                return os.path.dirname(candidate)
+
+        # 2순위: NUITKA_ONEFILE_PARENT PID — bootstrap이 살아있을 때만 유효
         parent_pid = os.environ.get("NUITKA_ONEFILE_PARENT", "")
         if parent_pid:
             try:
                 import ctypes
                 import ctypes.wintypes
                 _k32 = ctypes.windll.kernel32
-                # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
                 h = _k32.OpenProcess(0x1000, False, int(parent_pid))
                 if h:
                     buf  = ctypes.create_unicode_buffer(32767)
                     size = ctypes.wintypes.DWORD(32767)
                     ok   = _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
                     _k32.CloseHandle(h)
-                    if ok:
-                        # PID 재사용 방어: 반환 경로의 파일명이 exe와 일치할 때만 신뢰
-                        if os.path.basename(buf.value).lower() == _EXE_FILENAME.lower():
-                            log.debug("[updater] bootstrap exe 경로: %s", buf.value)
-                            return os.path.dirname(buf.value)
-                        log.warning("[updater] PID %s 경로 불일치(PID 재사용 의심): %s",
-                                    parent_pid, buf.value)
+                    if ok and os.path.basename(buf.value).lower() == _EXE_FILENAME.lower():
+                        log.debug("[updater] bootstrap PID 기반 원본 경로: %s", buf.value)
+                        return os.path.dirname(buf.value)
             except Exception as _e:
-                log.warning("[updater] bootstrap 경로 조회 실패, sys.executable 사용: %s", _e)
+                log.warning("[updater] bootstrap PID 조회 실패: %s", _e)
+
+        # 3순위: sys.executable (frozen에서는 temp일 수 있음)
+        log.warning("[updater] 원본 경로 특정 실패, sys.executable 사용: %s", sys.executable)
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 

@@ -1,4 +1,4 @@
-name: Build EXE with Cython Obfuscation
+name: Build EXE with Nuitka
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss pyinstaller Cython setuptools wheel
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss nuitka ordered-set
 
       - name: 아이콘 생성
         run: python scripts/make_icon.py
@@ -36,142 +36,73 @@ jobs:
       - name: SERVER_URL 삽입
         run: python scripts/inject_url.py
 
-      # ── Cython 컴파일 ───────────────────────────────────────────────────
-      - name: Cython 컴파일 폴더 준비
-        shell: pwsh
-        run: |
-          Write-Host "빌드 폴더 생성..."
-          New-Item -ItemType Directory -Force -Path build_cython | Out-Null
-          Write-Host "✓ 폴더 생성 완료"
-
-      - name: Python 파일을 .pyx로 변환
-        shell: pwsh
-        run: |
-          Write-Host "Python 파일을 Cython 형식(.pyx)으로 변환..."
-          $files = @(
-            "app_icon.py","audio_com.py","audio_capture.py",
-            "log_utils.py","mem_utils.py","processes.py",
-            "win32_utils.py","auth.py","db_manager.py",
-            "video_hash.py","similarity.py","series_key.py"
-          )
-          
-          foreach ($f in $files) {
-            $pyx_file = "build_cython/$($f -replace '\.py$', '.pyx')"
-            Copy-Item $f $pyx_file
-            Write-Host "  ✓ $f"
-          }
-          
-          # GUI 패키지 복사
-          if (Test-Path "gui") {
-            Copy-Item gui build_cython\gui -Recurse -Force
-            Write-Host "  ✓ gui 패키지"
-          }
-          
-          # main.py는 PyInstaller 진입점이므로 변환하지 않음
-          Write-Host "  (main.py는 PyInstaller 진입점이므로 원본 사용)"
-          Write-Host "✓ 모든 파일 변환 완료"
-
-      - name: Cython 컴파일 실행
-        shell: pwsh
-        run: |
-          Write-Host "Cython으로 Python 파일 컴파일 중..."
-          Write-Host "(이 과정은 3-5분 소요됩니다)"
-          
-          python setup_cython.py build_ext --inplace --build-temp build_cython\build
-          
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "ERROR: Cython 컴파일 실패"
-            Write-Host "build_cython 디렉토리 구조 확인:"
-            Get-ChildItem -Path build_cython -Recurse -Name | Select-Object -First 20
-            exit $LASTEXITCODE
-          }
-          Write-Host "✓ Cython 컴파일 완료"
-
-      - name: 컴파일 결과 확인
-        shell: pwsh
-        run: |
-          Write-Host "=== 컴파일 결과 확인 ==="
-          $pyd_count = (Get-ChildItem -Path . -Filter "*.pyd" -Recurse).Count
-          Write-Host "생성된 .pyd 파일: $pyd_count개"
-          
-          Write-Host ""
-          Write-Host "=== 빌드 구조 ==="
-          Get-ChildItem -Path build_cython -Recurse -Name | Select-Object -First 30
-          Write-Host "✓ 확인 완료"
-
-      # ── PyInstaller로 EXE 빌드 ───────────────────────────────────────────
-      - name: PyInstaller EXE 빌드
+      # ── Nuitka로 EXE 빌드 ────────────────────────────────────────────────
+      - name: Nuitka EXE 빌드
         run: >
-          pyinstaller
-          --clean
+          python -m nuitka
           --onefile
-          --noconsole
-          --name "Auto Sinc"
-          --icon "app.ico"
-          --version-file "version_info.txt"
-          --hidden-import="app_icon"
-          --hidden-import="audio_com"
-          --hidden-import="audio_capture"
-          --hidden-import="log_utils"
-          --hidden-import="mem_utils"
-          --hidden-import="processes"
-          --hidden-import="win32_utils"
-          --hidden-import="updater"
-          --hidden-import="auth"
-          --hidden-import="db_manager"
-          --hidden-import="video_hash"
-          --hidden-import="similarity"
-          --hidden-import="series_key"
-          --hidden-import="gui"
-          --hidden-import="gui.base"
-          --hidden-import="gui.ui_layout"
-          --hidden-import="gui.ui_logic"
-          --hidden-import="gui.ui_logic2"
-          --hidden-import="gui.ui_logic3"
-          --hidden-import="gui.auth"
-          --hidden-import="gui.run"
-          --hidden-import="gui.run_oped"
-          --hidden-import="gui.run_process"
-          --hidden-import="gui.run_popup"
-          --hidden-import="gui.run_notify"
-          --hidden-import="gui.run_refresh"
-          --hidden-import="gui.record_open"
-          --hidden-import="gui.record_backend"
-          --hidden-import="gui._record_impl"
-          --hidden-import="cv2"
-          --hidden-import="sounddevice"
-          --hidden-import="scipy.signal"
-          --hidden-import="win32api"
-          --hidden-import="win32con"
-          --hidden-import="win32gui"
-          --hidden-import="tkinter"
-          --hidden-import="tkinter.messagebox"
-          --hidden-import="tkinter.filedialog"
-          --hidden-import="multiprocessing"
-          --hidden-import="comtypes"
-          --hidden-import="comtypes.client"
-          --hidden-import="winreg"
-          --hidden-import="psutil"
-          --hidden-import="mss"
-          --hidden-import="pystray"
-          --hidden-import="pystray._win32"
-          --hidden-import="pystray._base"
-          --hidden-import="pystray._util"
-          --hidden-import="six"
-          --hidden-import="PIL"
-          --hidden-import="PIL.Image"
-          --hidden-import="PIL._imaging"
-          --collect-all PIL
-          --copy-metadata Pillow
-          --hidden-import="winotify"
-          --hidden-import="urllib.request"
-          --hidden-import="urllib.parse"
-          --hidden-import="uuid"
-          --hidden-import="hashlib"
-          --hidden-import="platform"
-          --collect-data cv2
-          --add-data "lbpcascade_animeface.xml;."
-          --add-data "app.ico;."
+          --windows-console-mode=disable
+          --output-filename="Auto Sinc.exe"
+          --output-dir=dist
+          --windows-icon-from-ico=app.ico
+          --file-version=1.5.0.0
+          --product-version=1.5.0.0
+          --file-description="Auto Sinc"
+          --product-name="Auto Sinc"
+          --copyright="Sinamon"
+          --include-module=app_icon
+          --include-module=audio_com
+          --include-module=audio_capture
+          --include-module=log_utils
+          --include-module=mem_utils
+          --include-module=processes
+          --include-module=win32_utils
+          --include-module=updater
+          --include-module=auth
+          --include-module=db_manager
+          --include-module=video_hash
+          --include-module=similarity
+          --include-module=series_key
+          --include-module=gui
+          --include-module=gui.base
+          --include-module=gui.ui_layout
+          --include-module=gui.ui_logic
+          --include-module=gui.ui_logic2
+          --include-module=gui.ui_logic3
+          --include-module=gui.auth
+          --include-module=gui.run
+          --include-module=gui.run_oped
+          --include-module=gui.run_process
+          --include-module=gui.run_popup
+          --include-module=gui.run_notify
+          --include-module=gui.run_refresh
+          --include-module=gui.record_open
+          --include-module=gui.record_backend
+          --include-module=gui._record_impl
+          --include-module=cv2
+          --include-module=sounddevice
+          --include-module=scipy.signal
+          --include-module=win32api
+          --include-module=win32con
+          --include-module=win32gui
+          --include-module=tkinter
+          --include-module=tkinter.messagebox
+          --include-module=tkinter.filedialog
+          --include-module=multiprocessing
+          --include-module=comtypes
+          --include-module=comtypes.client
+          --include-module=winreg
+          --include-module=psutil
+          --include-module=mss
+          --include-module=pystray
+          --include-module=pystray._win32
+          --include-module=pystray._base
+          --include-module=pystray._util
+          --include-module=six
+          --include-package=PIL
+          --include-package-data=cv2
+          --include-data-files=lbpcascade_animeface.xml=.
+          --include-data-files=app.ico=.
           main.py
 
       - name: 빌드 결과 확인

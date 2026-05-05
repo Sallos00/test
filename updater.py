@@ -132,8 +132,9 @@ def _write_bat(bat_path: str, exe_path: str, tmp_path: str, pid: int) -> None:
       2. 이름 기반 대기 — 동일 이름 프로세스 완전 종료 확인 (재시작 방어)
       3. 기존 exe 삭제  — 잠금 해제될 때까지 1초 간격 재시도
       4. tmp → exe 이름 변경
-      5. 새 exe 실행
-      6. 배치 자기 삭제
+      5. Nuitka onefile 환경변수 제거
+      6. 새 exe 실행
+      7. 배치 자기 삭제
     """
     exe_name = os.path.basename(exe_path)   # "Auto Sinc.exe"
     workdir  = os.path.dirname(exe_path) or "C:\\"
@@ -163,12 +164,15 @@ def _write_bat(bat_path: str, exe_path: str, tmp_path: str, pid: int) -> None:
         # 4단계: Auto Sinc.exe.tmp → Auto Sinc.exe 이름 변경
         f'move /Y "{tmp_path}" "{exe_path}"',
         "timeout /t 2 /nobreak > nul",
-        # 5단계: 새 EXE 실행
-        # cmd.exe start 는 현재 cmd 환경을 그대로 상속한다.
+        # 5단계: Nuitka onefile 잔류 환경변수 제거
+        # bootstrap이 child 실행 전 설정한 NUITKA_ONEFILE_PARENT가 남아 있으면
+        # 새 exe가 자신을 child로 착각해 압축 해제 없이 실행을 시도한다.
+        "set NUITKA_ONEFILE_PARENT=",
+        # 6단계: 새 EXE 실행
         f'if exist "{exe_path}" (',
         f'  start "" /D "{workdir}" "{exe_path}"',
         ")",
-        # 6단계: 배치 자기 삭제
+        # 7단계: 배치 자기 삭제
         'del "%~f0"',
     ]
 
@@ -183,7 +187,27 @@ def _launch_bat(bat_path: str) -> None:
 
     CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW 플래그로 현재 프로세스
     종료 후에도 배치가 계속 동작하도록 보장한다.
+
+    Nuitka onefile은 bootstrap이 child 실행 전 NUITKA_ONEFILE_PARENT 환경변수를
+    설정한다. cmd.exe가 이를 상속하면 배치가 실행하는 새 exe도 이를 물려받아
+    자신을 child로 착각한다. Win32 API로 직접 삭제해 이를 방지한다.
     """
+    # Win32 레이어에서 Nuitka onefile 환경변수 제거
+    # (배치 파일 내 set 명령으로도 제거하지만 cmd.exe 실행 시점에 이미
+    #  상속되므로 Python 단에서도 미리 제거한다.)
+    _NUITKA_KEYS = ("NUITKA_ONEFILE_PARENT",)
+    try:
+        import ctypes
+        _k32 = ctypes.windll.kernel32
+        for _key in _NUITKA_KEYS:
+            _k32.SetEnvironmentVariableW(_key, None)
+            log.debug("[updater] Win32 env 삭제: %s", _key)
+    except Exception as _e:
+        log.warning("[updater] Win32 env 처리 실패(계속 진행): %s", _e)
+
+    # CRT 레이어(os.environ)에서도 제거
+    clean_env = {k: v for k, v in os.environ.items() if k not in _NUITKA_KEYS}
+
     si = subprocess.STARTUPINFO()
     si.dwFlags    |= subprocess.STARTF_USESHOWWINDOW
     si.wShowWindow = 0   # SW_HIDE
@@ -196,6 +220,7 @@ def _launch_bat(bat_path: str) -> None:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=clean_env,
         close_fds=True,
     )
     log.debug("[updater] 배치 런처 실행: %s", bat_path)

@@ -132,9 +132,8 @@ def _write_bat(bat_path: str, exe_path: str, tmp_path: str, pid: int) -> None:
       2. 이름 기반 대기 — 동일 이름 프로세스 완전 종료 확인 (재시작 방어)
       3. 기존 exe 삭제  — 잠금 해제될 때까지 1초 간격 재시도
       4. tmp → exe 이름 변경
-      5. PyInstaller 잔류 환경 변수 제거
-      6. 새 exe 실행
-      7. 배치 자기 삭제
+      5. 새 exe 실행
+      6. 배치 자기 삭제
     """
     exe_name = os.path.basename(exe_path)   # "Auto Sinc.exe"
     workdir  = os.path.dirname(exe_path) or "C:\\"
@@ -164,29 +163,12 @@ def _write_bat(bat_path: str, exe_path: str, tmp_path: str, pid: int) -> None:
         # 4단계: Auto Sinc.exe.tmp → Auto Sinc.exe 이름 변경
         f'move /Y "{tmp_path}" "{exe_path}"',
         "timeout /t 2 /nobreak > nul",
-        # 5단계: PyInstaller 잔류 환경 변수 배치 레벨 강제 제거
-        # Python(_launch_bat)에서 Win32 API로 이미 제거했지만
-        # 배치 레벨에서도 재차 삭제해 이중 차단한다.
-        "set _MEIPASS2=",
-        "set TCL_LIBRARY=",
-        "set TK_LIBRARY=",
-        # 6단계: _MEIPASS2 완전 삭제 확인 루프 — 1초 간격으로 재확인
-        # "if defined VAR" 는 값이 빈 문자열("")이면 미정의로 판단하므로
-        # set VAR= 이후에는 항상 false 가 된다.
-        ":check_meipass2",
-        "if defined _MEIPASS2 (",
-        "  set _MEIPASS2=",
-        "  timeout /t 1 /nobreak > nul",
-        "  goto :check_meipass2",
-        ")",
-        # 7단계: 새 EXE 실행
-        # cmd.exe start 는 현재 cmd 환경(위에서 정리됨)을 그대로 상속한다.
-        #   · _MEIPASS2 없음 확인됨 → PyInstaller 가 새 _MEI 폴더 생성 ✓
-        #   · APPDATA 보존          → settings.json 정상 로드 ✓
+        # 5단계: 새 EXE 실행
+        # cmd.exe start 는 현재 cmd 환경을 그대로 상속한다.
         f'if exist "{exe_path}" (',
         f'  start "" /D "{workdir}" "{exe_path}"',
         ")",
-        # 8단계: 배치 자기 삭제
+        # 6단계: 배치 자기 삭제
         'del "%~f0"',
     ]
 
@@ -201,44 +183,7 @@ def _launch_bat(bat_path: str) -> None:
 
     CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW 플래그로 현재 프로세스
     종료 후에도 배치가 계속 동작하도록 보장한다.
-
-    PyInstaller 부트로더는 _MEIPASS2 를 CRT(_putenv)와 Win32
-    (SetEnvironmentVariableW) 두 레이어에 모두 기록한다.
-    Python os.environ 은 CRT 레이어만 보므로 dict 필터링만으로는
-    Win32 레이어 잔류분을 제거할 수 없다.
-    → ctypes 로 Win32 API 를 직접 호출해 현재 프로세스 환경 블록에서
-      완전히 삭제한 뒤 clean_env 를 구성한다.
     """
-    _PIE_KEYS = ("_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY")
-
-    # ── Win32 레이어에서 직접 삭제 + 삭제 확인 ────────────────────────────
-    # SetEnvironmentVariableW(name, NULL) 은 해당 변수를 프로세스 환경 블록에서
-    # 완전히 제거한다. 이후 CreateProcess 가 생성하는 자식 환경 블록에도
-    # 해당 변수가 포함되지 않는다.
-    # 삭제 후 GetEnvironmentVariableW 로 실제로 지워졌는지 검증한다.
-    # (반환값 0 + ERROR_ENVVAR_NOT_FOUND(203) → 삭제 확인)
-    try:
-        import ctypes
-        _k32   = ctypes.windll.kernel32
-        _ERROR_ENVVAR_NOT_FOUND = 203
-        _buf   = ctypes.create_unicode_buffer(32767)
-        for _key in _PIE_KEYS:
-            _k32.SetEnvironmentVariableW(_key, None)
-            # 삭제 확인: GetEnvironmentVariableW 가 0 을 반환하고
-            # GetLastError 가 203(ENVVAR_NOT_FOUND) 이면 완전 삭제됨
-            _ret = _k32.GetEnvironmentVariableW(_key, _buf, 32767)
-            if _ret == 0 and _k32.GetLastError() == _ERROR_ENVVAR_NOT_FOUND:
-                log.debug("[updater] Win32 env 삭제 확인: %s", _key)
-            else:
-                # 삭제 실패 — 값이 남아 있으면 빈 문자열로 덮어써서 무력화
-                log.warning("[updater] Win32 env 삭제 실패, 빈값으로 덮어씀: %s", _key)
-                _k32.SetEnvironmentVariableW(_key, "")
-    except Exception as _e:
-        log.warning("[updater] Win32 env 처리 실패(계속 진행): %s", _e)
-
-    # ── CRT 레이어에서도 제거 (os.environ 기준 clean_env 구성) ─────────────
-    clean_env = {k: v for k, v in os.environ.items() if k not in _PIE_KEYS}
-
     si = subprocess.STARTUPINFO()
     si.dwFlags    |= subprocess.STARTF_USESHOWWINDOW
     si.wShowWindow = 0   # SW_HIDE
@@ -251,7 +196,6 @@ def _launch_bat(bat_path: str) -> None:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        env=clean_env,
         close_fds=True,
     )
     log.debug("[updater] 배치 런처 실행: %s", bat_path)

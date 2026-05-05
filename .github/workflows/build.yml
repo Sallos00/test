@@ -101,8 +101,8 @@ jobs:
           --include-module=six
           --include-package=PIL
           --include-package-data=cv2
-          --include-data-files=lbpcascade_animeface.xml=.
-          --include-data-files=app.ico=.
+          --include-data-files=lbpcascade_animeface.xml=lbpcascade_animeface.xml
+          --include-data-files=app.ico=app.ico
           main.py
 
       - name: 빌드 결과 확인

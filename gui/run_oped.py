@@ -30,7 +30,7 @@ class OpedMonitorMixin:
         """싱크 미실행 상태 전용 OP/ED 감지 스레드(T2+T3) 시작."""
         # [수정] 링크 재생 모드 중에는 OP/ED 감지 비활성화
         if getattr(self, "_link_play_mode", False):
-            import collections, time as _t
+            import time as _t
             if not hasattr(self, "_log_lines"):
                 self._log_lines = collections.deque(maxlen=100)
             self._log_lines.append(

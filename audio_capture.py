@@ -146,7 +146,6 @@ def _process_buffer(data, num_frames, flg, qp, ch, sr, freq, to_stream_t):
 
 def _run_capture_session(pid, audio_queue, stop_flag, send_log, stream_anchor):
     """MTA 스레드에서 ProcessLoopback 캡처를 실행하는 래퍼."""
-    import threading
     result_box = [None]
 
     def _session_mta():
@@ -361,7 +360,6 @@ def _run_global_loopback_session(audio_queue, stop_flag, send_log, stream_anchor
             if co_ok:
                 _ole32.CoUninitialize()
 
-    import threading
     t = threading.Thread(target=_mta, daemon=True)
     t.start()
     t.join()

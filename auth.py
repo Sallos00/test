@@ -257,6 +257,16 @@ def skip_update_version(pc_id: str) -> bool:
         return False
 
 
+def get_reg_setup_done() -> bool:
+    """settings.json에 레지스트리 셋팅 완료 여부를 반환한다."""
+    return bool(_load_settings().get("reg_setup_done", False))
+
+
+def save_reg_setup_done():
+    """settings.json에 레지스트리 셋팅 완료를 기록한다."""
+    _save_settings({"reg_setup_done": True})
+
+
 def check_download_permission(pc_id: str) -> str:
     """인증목록 시트 H열 다운로드 권한 값을 확인한다.
 

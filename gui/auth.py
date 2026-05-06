@@ -242,12 +242,6 @@ class LipSyncGUIAuth:
                     )
                     return
 
-                # ── 다운로드 중: 닫기(X) 및 나중에 버튼 비활성화 ──
-                popup.protocol("WM_DELETE_WINDOW", lambda: None)
-                try:
-                    later_btn.configure(state="disabled")
-                except Exception:
-                    pass
                 update_btn.configure(state="disabled", text="다운로드 중…")
 
                 def _on_progress(pct: int):
@@ -265,15 +259,6 @@ class LipSyncGUIAuth:
                 def _on_error(msg: str):
                     # 백그라운드 스레드 → root.after() 로 UI 스레드 전달
                     def _ui():
-                        # 오류 시 버튼/닫기 복원
-                        try:
-                            popup.protocol("WM_DELETE_WINDOW", _close_and_start)
-                        except Exception:
-                            pass
-                        try:
-                            later_btn.configure(state="normal")
-                        except Exception:
-                            pass
                         try:
                             update_btn.configure(state="normal", text="업데이트")
                         except Exception:
@@ -305,12 +290,11 @@ class LipSyncGUIAuth:
                                    command=_on_update, **BTN)
             update_btn.pack(side="left", padx=round(6 * r))
 
-            # "나중에" 버튼 참조 보관 → 다운로드 중 비활성화에 사용
-            later_btn = tk.Button(btn_f, text="나중에",
-                                  bg=self.BG3, fg=self.TEXT,
-                                  activebackground=self.BORDER,
-                                  command=_on_later, **BTN)
-            later_btn.pack(side="left", padx=round(6 * r))
+            tk.Button(btn_f, text="나중에",
+                      bg=self.BG3, fg=self.TEXT,
+                      activebackground=self.BORDER,
+                      command=_on_later, **BTN).pack(
+                side="left", padx=round(6 * r))
 
             # 체크박스 상태에 따라 업데이트 버튼 활성/비활성 전환
             def _on_skip_toggle(*_):
@@ -321,10 +305,6 @@ class LipSyncGUIAuth:
                     pass
 
             skip_var.trace_add("write", _on_skip_toggle)
-
-            # ── 자동 업데이트: 체크 시 팝업 표시 직후 다운로드 자동 시작 ──
-            if getattr(self, "_auto_update_var", None) and self._auto_update_var.get():
-                popup.after(0, _on_update)
 
         except Exception:
             # 팝업 생성 실패 시에도 앱은 정상 시작

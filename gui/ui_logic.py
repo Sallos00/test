@@ -275,6 +275,18 @@ class LipSyncGUILogic:
                 # Livehistory.json 존재 확인 / 생성
                 self._ensure_live_history_file()
 
+                # ── PotPlayer 부가 파일 병렬 확인 (백그라운드) ────────────────
+                pot_dir = self._get_potplayer_dir()
+                if pot_dir:
+                    threading.Thread(
+                        target=self._bg_ensure_potplayer_ytdlp,
+                        args=(pot_dir,), daemon=True,
+                        name="pot-ytdlp-check").start()
+                    threading.Thread(
+                        target=self._bg_ensure_potplayer_extension,
+                        args=(pot_dir,), daemon=True,
+                        name="pot-ext-check").start()
+
                 # PotPlayer 실행 확인
                 self._link_status("⏳ PotPlayer 확인 중...")
                 ok = self._launch_potplayer_if_needed()
@@ -545,6 +557,107 @@ class LipSyncGUILogic:
         self._save_live_history(records)
         self._update_link_resume_btn()
         self._refresh_live_history_list()
+
+    # ── PotPlayer 부가 파일 자동 설치 ────────────────────────────────────────
+
+    def _get_potplayer_dir(self) -> str:
+        """PotPlayer 설치 디렉터리를 반환한다. 찾지 못하면 빈 문자열 반환."""
+        candidates = [
+            r"C:\Program Files\DAUM\PotPlayer\PotPlayerMini64.exe",
+            r"C:\Program Files (x86)\DAUM\PotPlayer\PotPlayerMini.exe",
+            r"C:\Program Files\DAUM\PotPlayer\PotPlayerMini.exe",
+        ]
+        try:
+            import winreg
+            for base in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                for key_path in (
+                    r"SOFTWARE\DAUM\PotPlayer64",
+                    r"SOFTWARE\DAUM\PotPlayer",
+                    r"SOFTWARE\WOW6432Node\DAUM\PotPlayer64",
+                ):
+                    try:
+                        with winreg.OpenKey(base, key_path) as k:
+                            exe, _ = winreg.QueryValueEx(k, "ProgramPath")
+                            if exe and os.path.isfile(exe):
+                                candidates.insert(0, exe)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        for path in candidates:
+            if os.path.isfile(path):
+                return os.path.dirname(path)
+        return ""
+
+    def _bg_ensure_potplayer_ytdlp(self, pot_dir: str):
+        """PotPlayer Module 폴더에 yt-dlp.exe 가 없으면 GitHub 최신 버전에서 다운로드."""
+        try:
+            module_dir = os.path.join(pot_dir, "Module")
+            dest = os.path.join(module_dir, "yt-dlp.exe")
+            if os.path.isfile(dest):
+                return
+            os.makedirs(module_dir, exist_ok=True)
+            import urllib.request
+            ts = _time.strftime("%H:%M:%S")
+            url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+            tmp = dest + ".tmp"
+            self._log_lines.append(f"[{ts}] ⬇ PotPlayer Module/yt-dlp.exe 다운로드 시작")
+            urllib.request.urlretrieve(url, tmp)
+            os.replace(tmp, dest)
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ✅ PotPlayer Module/yt-dlp.exe 설치 완료")
+        except Exception as e:
+            try:
+                if os.path.exists(dest + ".tmp"):
+                    try: os.remove(dest + ".tmp")
+                    except Exception: pass
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ PotPlayer Module/yt-dlp.exe 설치 실패: {e}")
+            except Exception:
+                pass
+
+    def _bg_ensure_potplayer_extension(self, pot_dir: str):
+        """Extension\\Media\\UrlList 에 'MediaPlayParse - yt-dlp.as' 가 없으면
+        서버 업데이트 시트 B3 URL 의 zip 을 내려받아 압축 해제 후 zip 삭제."""
+        zip_path = ""
+        try:
+            ext_dir = os.path.join(pot_dir, "Extension", "Media", "UrlList")
+            target_file = os.path.join(ext_dir, "MediaPlayParse - yt-dlp.as")
+            if os.path.isfile(target_file):
+                return
+            # 서버 업데이트 시트 B3 URL 취득
+            ext_url = ""
+            try:
+                import auth as _auth_mod
+                resp = _auth_mod.check_version()
+                ext_url = resp.get("ext_url", "").strip()
+            except Exception:
+                pass
+            if not ext_url:
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ Extension 설치: 서버 B3 URL 없음")
+                return
+            os.makedirs(ext_dir, exist_ok=True)
+            import urllib.request, zipfile
+            ts = _time.strftime("%H:%M:%S")
+            zip_path = os.path.join(ext_dir, "_as_update.zip")
+            self._log_lines.append(
+                f"[{ts}] ⬇ PotPlayer Extension/MediaPlayParse - yt-dlp.as 다운로드 시작")
+            urllib.request.urlretrieve(ext_url, zip_path)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(ext_dir)
+            os.remove(zip_path)
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ✅ PotPlayer Extension/MediaPlayParse - yt-dlp.as 설치 완료")
+        except Exception as e:
+            try:
+                if zip_path and os.path.exists(zip_path):
+                    try: os.remove(zip_path)
+                    except Exception: pass
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ⚠ PotPlayer Extension/yt-dlp.as 설치 실패: {e}")
+            except Exception:
+                pass
 
     # ── yt-dlp 영상 저장 기능 ─────────────────────────────────────────────────
 

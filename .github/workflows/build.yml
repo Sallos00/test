@@ -41,7 +41,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build_cython/gui | Out-Null
-          $rootMods = @("app_icon","audio_com","audio_capture","log_utils","mem_utils",
+          # app_icon은 Cython 제외: Cython 컴파일 시 __file__ 경로 문제로 아이콘 로드 실패
+          $rootMods = @("audio_com","audio_capture","log_utils","mem_utils",
                         "processes","win32_utils","updater","auth","db_manager",
                         "video_hash","similarity","series_key")
           foreach ($m in $rootMods) {

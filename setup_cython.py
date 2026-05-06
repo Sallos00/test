@@ -12,9 +12,9 @@ import glob
 # 빌드 디렉토리
 BUILD_DIR = "build_cython"
 
-# 컴파일할 Python 모듈 목록 (main.py 제외)
+# 컴파일할 Python 모듈 목록 (main.py, app_icon.py 제외)
+# app_icon.py는 Cython 제외: __file__ 경로 문제로 아이콘 로드 실패
 modules = [
-    "app_icon.pyx",
     "audio_com.pyx",
     "audio_capture.pyx",
     "log_utils.pyx",

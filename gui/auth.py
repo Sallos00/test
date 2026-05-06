@@ -77,6 +77,13 @@ class LipSyncGUIAuth:
         - 버전 불일치 + G열 '차단'       → 팝업 생략, 바로 시작
         - 버전 불일치 + G열 비차단       → 업데이트 팝업 표시
         """
+        # H열 다운로드 권한 확인 — 버전 체크와 병렬 백그라운드 실행
+        threading.Thread(
+            target=self._check_download_permission_bg,
+            daemon=True,
+            name="download-perm-check",
+        ).start()
+
         import logging as _log
         try:
             resp    = _auth_module.check_version()
@@ -104,6 +111,38 @@ class LipSyncGUIAuth:
             pass
         # 버전 일치 / 체크 실패 → 바로 시작
         self.root.after(0, self._do_start_app)
+
+    def _check_download_permission_bg(self):
+        """백그라운드: 인증목록 H열 다운로드 권한 확인 → 다운 버튼 표시/숨김.
+
+        "차단"일 경우 저장 버튼 숨김, "허가"(또는 그 외)일 경우 표시.
+        서버 오류 시 버튼 상태를 변경하지 않는다.
+        """
+        try:
+            pc_id = _auth_module.get_pc_id()
+            perm  = _auth_module.check_download_permission(pc_id)
+            if perm:  # 빈 문자열(오류)이면 상태 변경 없음
+                self.root.after(0, lambda: self._apply_download_permission(perm))
+        except Exception:
+            pass  # 오류 시 버튼 상태 그대로 유지
+
+    def _apply_download_permission(self, perm: str):
+        """다운로드 권한에 따라 저장 버튼 표시/숨김 (UI 스레드에서 호출).
+
+        perm == "차단" : pack_forget() 으로 버튼 숨김
+        perm == "허가" : 원래 pack 옵션으로 버튼 복원
+        """
+        btn = getattr(self, "_link_save_btn", None)
+        if btn is None:
+            return
+        try:
+            if perm == "차단":
+                btn.pack_forget()
+            else:
+                kw = getattr(self, "_link_save_btn_pack_kw", dict(side="left"))
+                btn.pack(**kw)
+        except Exception:
+            pass
 
     def _show_update_popup(self, current: str, latest: str, on_close=None, download_url: str = ""):
         """버전 불일치 시 업데이트 안내 팝업.

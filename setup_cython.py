@@ -21,6 +21,7 @@ modules = [
     "mem_utils.pyx",
     "processes.pyx",
     "win32_utils.pyx",
+    "updater.pyx",
     "auth.pyx",
     "db_manager.pyx",
     "video_hash.pyx",

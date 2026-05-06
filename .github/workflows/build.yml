@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss nuitka ordered-set zstandard
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss nuitka ordered-set zstandard cython
 
       - name: 아이콘 생성
         run: python scripts/make_icon.py
@@ -35,6 +35,24 @@ jobs:
 
       - name: SERVER_URL 삽입
         run: python scripts/inject_url.py
+
+      # ── Cython 난독화 빌드 ────────────────────────────────────────────────
+      - name: .pyx 파일 준비
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build_cython/gui | Out-Null
+          $rootMods = @("app_icon","audio_com","audio_capture","log_utils","mem_utils",
+                        "processes","win32_utils","updater","auth","db_manager",
+                        "video_hash","similarity","series_key")
+          foreach ($m in $rootMods) {
+            if (Test-Path "$m.py") { Copy-Item "$m.py" "build_cython/$m.pyx" }
+          }
+          Get-ChildItem gui -Filter "*.py" | ForEach-Object {
+            Copy-Item $_.FullName "build_cython/gui/$($_.BaseName).pyx"
+          }
+
+      - name: Cython 컴파일 (.pyd 생성)
+        run: python setup_cython.py build_ext --inplace
 
       # ── Nuitka로 EXE 빌드 ────────────────────────────────────────────────
       - name: Nuitka EXE 빌드

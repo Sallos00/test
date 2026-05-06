@@ -478,6 +478,8 @@ class LipSyncGUILayout:
                       command=self._link_save, **BTN_S),
             bg="BG3", fg="TEXT_MID", abg="BORDER")
         self._link_save_btn.pack(side="left", padx=(round(4*r), 0))
+        # 다운로드 권한 변경 시 pack 복원에 사용
+        self._link_save_btn_pack_kw = dict(side="left", padx=(round(4*r), 0))
 
         self._link_stop_btn = reg(
             tk.Button(btn_row, text="■ 중지",

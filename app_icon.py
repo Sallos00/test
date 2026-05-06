@@ -97,8 +97,15 @@ def write_app_ico_file(path: str) -> None:
 
 
 def resource_base_dir() -> str:
+    # PyInstaller: sys._MEIPASS 에 리소스 압축 해제
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return sys._MEIPASS
+    # Nuitka onefile: sys.frozen 미설정, sys.executable 이 임시 압축 해제 디렉터리를 가리킴
+    # app.ico 도 같은 디렉터리에 함께 압축 해제되므로 이를 우선 확인
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.isfile(os.path.join(exe_dir, "app.ico")):
+        return exe_dir
+    # 개발 환경 폴백
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -162,20 +169,22 @@ def apply_windows_ico_bitmap(widget):
 
 
 def apply_to_root_window(root):
-    # iconphoto는 메인스레드에서 즉시 적용 (창 표시에 필요)
+    # iconphoto 즉시 적용 (타이틀바용 PNG 아이콘)
     ref = apply_iconphoto(root)
     root._app_icon_photo_ref = ref
 
-    # iconbitmap(ICO 파일 생성)은 무거운 작업이므로 백그라운드에서 처리
-    # 번들된 app.ico가 있으면 빠르게 끝나고, 없으면 PNG 생성 비용을 메인스레드에서 제거
-    import threading as _threading
-    def _set_ico():
+    # iconbitmap 을 창 표시(deiconify) 전 동기로 적용한다.
+    # 비동기(백그라운드 스레드 + root.after)로 처리하면 창이 작업표시줄에
+    # 먼저 등록된 뒤 iconbitmap 이 뒤늦게 도착해 아이콘이 반영되지 않는다.
+    # resource_base_dir() 가 Nuitka 압축 해제 경로를 올바르게 반환하므로
+    # bundled_ico_path() 가 즉시 성공하여 블로킹 비용은 무시할 수준이다.
+    if sys.platform == "win32":
         try:
             path = ico_path_for_windows()
-            root.after(0, lambda: _apply_ico_safe(root, path))
+            _apply_ico_safe(root, path)
         except Exception:
             pass
-    _threading.Thread(target=_set_ico, daemon=True, name="ico-build").start()
+
     return ref
 
 

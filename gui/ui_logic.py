@@ -275,17 +275,22 @@ class LipSyncGUILogic:
                 # Livehistory.json 존재 확인 / 생성
                 self._ensure_live_history_file()
 
-                # ── PotPlayer 부가 파일 병렬 확인 (백그라운드) ────────────────
+                # ── PotPlayer 부가 파일 병렬 확인 (완료 후 PotPlayer 실행) ──────
                 pot_dir = self._get_potplayer_dir()
                 if pot_dir:
-                    threading.Thread(
+                    self._link_status("⏳ PotPlayer 파일 확인 중...")
+                    t1 = threading.Thread(
                         target=self._bg_ensure_potplayer_ytdlp,
                         args=(pot_dir,), daemon=True,
-                        name="pot-ytdlp-check").start()
-                    threading.Thread(
+                        name="pot-ytdlp-check")
+                    t2 = threading.Thread(
                         target=self._bg_ensure_potplayer_extension,
                         args=(pot_dir,), daemon=True,
-                        name="pot-ext-check").start()
+                        name="pot-ext-check")
+                    t1.start()
+                    t2.start()
+                    t1.join()   # 두 작업이 모두 끝날 때까지 대기
+                    t2.join()
 
                 # PotPlayer 실행 확인
                 self._link_status("⏳ PotPlayer 확인 중...")
@@ -589,43 +594,79 @@ class LipSyncGUILogic:
                 return os.path.dirname(path)
         return ""
 
+    @staticmethod
+    def _runas_powershell(ps_cmd: str) -> bool:
+        """PowerShell 명령을 관리자 권한(UAC)으로 실행한다. 성공 시 True 반환."""
+        import ctypes
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", "powershell.exe",
+            f"-NonInteractive -WindowStyle Hidden -Command \"{ps_cmd}\"",
+            None, 0,
+        )
+        return ret > 32
+
     def _bg_ensure_potplayer_ytdlp(self, pot_dir: str):
-        """PotPlayer Module 폴더에 yt-dlp.exe 가 없으면 GitHub 최신 버전에서 다운로드."""
+        """PotPlayer Module 폴더에 yt-dlp.exe 가 없으면 GitHub 최신 버전에서 다운로드.
+
+        C:\\Program Files 는 일반 권한으로 쓸 수 없으므로:
+          1) %TEMP% 에 먼저 다운로드
+          2) 직접 복사 시도 → PermissionError 면 UAC(ShellExecuteW runas) 로 복사
+        """
+        import tempfile, urllib.request, shutil
+        module_dir = os.path.join(pot_dir, "Module")
+        dest       = os.path.join(module_dir, "yt-dlp.exe")
+        tmp_path   = os.path.join(tempfile.gettempdir(), "yt-dlp_potplayer.exe")
         try:
-            module_dir = os.path.join(pot_dir, "Module")
-            dest = os.path.join(module_dir, "yt-dlp.exe")
             if os.path.isfile(dest):
                 return
-            os.makedirs(module_dir, exist_ok=True)
-            import urllib.request
             ts = _time.strftime("%H:%M:%S")
-            url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-            tmp = dest + ".tmp"
             self._log_lines.append(f"[{ts}] ⬇ PotPlayer Module/yt-dlp.exe 다운로드 시작")
-            urllib.request.urlretrieve(url, tmp)
-            os.replace(tmp, dest)
-            self._log_lines.append(
-                f"[{_time.strftime('%H:%M:%S')}] ✅ PotPlayer Module/yt-dlp.exe 설치 완료")
-        except Exception as e:
+            urllib.request.urlretrieve(
+                "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+                tmp_path)
             try:
-                if os.path.exists(dest + ".tmp"):
-                    try: os.remove(dest + ".tmp")
-                    except Exception: pass
+                # ① 직접 복사 (관리자로 실행 중이거나 권한 있을 때)
+                os.makedirs(module_dir, exist_ok=True)
+                shutil.copy2(tmp_path, dest)
                 self._log_lines.append(
-                    f"[{_time.strftime('%H:%M:%S')}] ⚠ PotPlayer Module/yt-dlp.exe 설치 실패: {e}")
+                    f"[{_time.strftime('%H:%M:%S')}] ✅ PotPlayer Module/yt-dlp.exe 설치 완료")
+            except PermissionError:
+                # ② 권한 없음 → UAC로 PowerShell 복사 (단발성 팝업)
+                ps = f"Copy-Item -Path '{tmp_path}' -Destination '{dest}' -Force"
+                ok = self._runas_powershell(ps)
+                _time.sleep(4)   # UAC 승인 + 복사 완료 대기
+                result = os.path.isfile(dest)
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] "
+                    + ("✅ PotPlayer Module/yt-dlp.exe 설치 완료 (관리자)" if result
+                       else "⚠ PotPlayer Module/yt-dlp.exe 설치 실패 (UAC 거부)"))
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⚠ PotPlayer Module/yt-dlp.exe 설치 실패: {e}")
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
             except Exception:
                 pass
 
     def _bg_ensure_potplayer_extension(self, pot_dir: str):
         """Extension\\Media\\UrlList 에 'MediaPlayParse - yt-dlp.as' 가 없으면
-        서버 업데이트 시트 B3 URL 의 zip 을 내려받아 압축 해제 후 zip 삭제."""
-        zip_path = ""
+        서버 업데이트 시트 B3 URL 의 zip 을 내려받아 압축 해제 후 zip 삭제.
+
+        C:\\Program Files 쓰기 권한 없을 경우:
+          1) %TEMP% 에 다운로드 + 압축 해제
+          2) 직접 복사 시도 → PermissionError 면 UAC(ShellExecuteW runas) 로 복사
+        """
+        import tempfile, urllib.request, zipfile, shutil
+        ext_dir     = os.path.join(pot_dir, "Extension", "Media", "UrlList")
+        target_file = os.path.join(ext_dir, "MediaPlayParse - yt-dlp.as")
+        tmp_zip     = os.path.join(tempfile.gettempdir(), "_as_potplayer.zip")
+        tmp_ext_dir = os.path.join(tempfile.gettempdir(), "_as_potplayer_ext")
         try:
-            ext_dir = os.path.join(pot_dir, "Extension", "Media", "UrlList")
-            target_file = os.path.join(ext_dir, "MediaPlayParse - yt-dlp.as")
             if os.path.isfile(target_file):
                 return
-            # 서버 업데이트 시트 B3 URL 취득
+            # B3 URL 취득
             ext_url = ""
             try:
                 import auth as _auth_mod
@@ -637,25 +678,46 @@ class LipSyncGUILogic:
                 self._log_lines.append(
                     f"[{_time.strftime('%H:%M:%S')}] ⚠ Extension 설치: 서버 B3 URL 없음")
                 return
-            os.makedirs(ext_dir, exist_ok=True)
-            import urllib.request, zipfile
             ts = _time.strftime("%H:%M:%S")
-            zip_path = os.path.join(ext_dir, "_as_update.zip")
             self._log_lines.append(
                 f"[{ts}] ⬇ PotPlayer Extension/MediaPlayParse - yt-dlp.as 다운로드 시작")
-            urllib.request.urlretrieve(ext_url, zip_path)
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(ext_dir)
-            os.remove(zip_path)
-            self._log_lines.append(
-                f"[{_time.strftime('%H:%M:%S')}] ✅ PotPlayer Extension/MediaPlayParse - yt-dlp.as 설치 완료")
-        except Exception as e:
+            # %TEMP% 에 다운로드 + 압축 해제
+            urllib.request.urlretrieve(ext_url, tmp_zip)
+            if os.path.exists(tmp_ext_dir):
+                shutil.rmtree(tmp_ext_dir, ignore_errors=True)
+            os.makedirs(tmp_ext_dir, exist_ok=True)
+            with zipfile.ZipFile(tmp_zip, "r") as zf:
+                zf.extractall(tmp_ext_dir)
             try:
-                if zip_path and os.path.exists(zip_path):
-                    try: os.remove(zip_path)
-                    except Exception: pass
+                # ① 직접 복사 (권한 있을 때)
+                os.makedirs(ext_dir, exist_ok=True)
+                for f in os.listdir(tmp_ext_dir):
+                    shutil.copy2(os.path.join(tmp_ext_dir, f),
+                                 os.path.join(ext_dir, f))
                 self._log_lines.append(
-                    f"[{_time.strftime('%H:%M:%S')}] ⚠ PotPlayer Extension/yt-dlp.as 설치 실패: {e}")
+                    f"[{_time.strftime('%H:%M:%S')}] ✅ PotPlayer Extension/MediaPlayParse - yt-dlp.as 설치 완료")
+            except PermissionError:
+                # ② 권한 없음 → UAC로 PowerShell 복사
+                ps = (f"New-Item -ItemType Directory -Force -Path '{ext_dir}' | Out-Null; "
+                      f"Copy-Item -Path '{tmp_ext_dir}\\*' -Destination '{ext_dir}' -Force")
+                ok = self._runas_powershell(ps)
+                _time.sleep(4)
+                result = os.path.isfile(target_file)
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] "
+                    + ("✅ PotPlayer Extension/MediaPlayParse - yt-dlp.as 설치 완료 (관리자)" if result
+                       else "⚠ PotPlayer Extension/yt-dlp.as 설치 실패 (UAC 거부)"))
+        except Exception as e:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⚠ PotPlayer Extension/yt-dlp.as 설치 실패: {e}")
+        finally:
+            try:
+                if os.path.exists(tmp_zip):
+                    os.remove(tmp_zip)
+            except Exception:
+                pass
+            try:
+                shutil.rmtree(tmp_ext_dir, ignore_errors=True)
             except Exception:
                 pass
 

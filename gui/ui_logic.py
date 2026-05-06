@@ -883,20 +883,22 @@ class LipSyncGUILogic:
                 try:
                     ytdlp = self._ensure_ytdlp()
                 except Exception as e:
+                    _err = str(e)
                     self.root.after(0, lambda: self._link_status(
-                        f"❌ yt-dlp 설치 실패: {e}", warn=True))
+                        f"❌ yt-dlp 설치 실패: {_err}", warn=True))
                     self.root.after(0, self._dl_progress_hide)
-                    self._log_lines.append(f"[{ts}] ❌ yt-dlp 설치 실패: {e}")
+                    self._log_lines.append(f"[{ts}] ❌ yt-dlp 설치 실패: {_err}")
                     return
 
                 # ── 2) ffmpeg 확보 ────────────────────────────────────────────
                 try:
                     ffmpeg = self._ensure_ffmpeg()
                 except Exception as e:
+                    _err = str(e)
                     self.root.after(0, lambda: self._link_status(
-                        f"❌ ffmpeg 설치 실패: {e}", warn=True))
+                        f"❌ ffmpeg 설치 실패: {_err}", warn=True))
                     self.root.after(0, self._dl_progress_hide)
-                    self._log_lines.append(f"[{ts}] ❌ ffmpeg 설치 실패: {e}")
+                    self._log_lines.append(f"[{ts}] ❌ ffmpeg 설치 실패: {_err}")
                     return
 
                 # ── 3) 영상 다운로드 (bestvideo+bestaudio → mp4 병합) ─────────
@@ -1383,11 +1385,12 @@ class LipSyncGUILogic:
                         f"[{ts}] ❌ yt-dlp 저장 실패 (code {_rc}) | 원본 URL: {url} | fallback=없음")
 
             except Exception as e:
+                _err = str(e)
                 self._link_save_proc = None
                 self._link_save_dest_glob = None
-                self.root.after(0, lambda: self._link_status(f"❌ 오류: {e}", warn=True))
+                self.root.after(0, lambda: self._link_status(f"❌ 오류: {_err}", warn=True))
                 self.root.after(0, self._dl_progress_hide)
-                self._log_lines.append(f"[{ts}] ❌ yt-dlp 예외: {e}")
+                self._log_lines.append(f"[{ts}] ❌ yt-dlp 예외: {_err}")
             finally:
                 self._link_save_proc = None
                 # 취소된 경우 UI 복구는 _link_save_cancel의 _cleanup 스레드가 담당

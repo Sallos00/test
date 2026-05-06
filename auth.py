@@ -257,6 +257,21 @@ def skip_update_version(pc_id: str) -> bool:
         return False
 
 
+def check_download_permission(pc_id: str) -> str:
+    """인증목록 시트 H열 다운로드 권한 값을 확인한다.
+
+    반환값:
+        "차단"  → 다운 버튼 숨김
+        "허가"  → 다운 버튼 표시
+        ""      → 서버 오류 / 빈 값 (버튼 상태 변경 없음)
+    """
+    try:
+        resp = _api({"action": "check_download_perm", "pc_id": pc_id}, timeout=6)
+        return str(resp.get("perm", "")).strip()
+    except Exception:
+        return ""
+
+
 def poll_until_approved(pc_id: str, on_approved, on_revoked, on_error, stop_event):
     """
     허가될 때까지 POLL_INTERVAL 초마다 서버 확인.

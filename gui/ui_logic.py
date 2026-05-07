@@ -740,6 +740,10 @@ class LipSyncGUILogic:
         "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/"
         "ffmpeg-master-latest-win64-gpl.zip"
     )
+    # N_m3u8DL-RE GitHub API (최신 릴리즈 자동 조회, Windows x64)
+    _NM3U8_RE_API_URL = (
+        "https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest"
+    )
 
     # ── 공통 다운로드 헬퍼 ───────────────────────────────────────────────────
 
@@ -844,6 +848,81 @@ class LipSyncGUILogic:
             except Exception: pass
 
         self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ ffmpeg 설치 완료: {local}")
+        return local
+
+    # ── N_m3u8DL-RE ──────────────────────────────────────────────────────────
+
+    def _nm3u8dl_re_path(self) -> str:
+        return os.path.join(self.APP_DIR, "N_m3u8DL-RE.exe")
+
+    def _ensure_nm3u8dl_re(self) -> str:
+        """N_m3u8DL-RE 실행파일을 확보해 경로를 반환한다.
+        없으면 GitHub Releases API에서 최신 Windows x64 버전을 자동 다운로드한다.
+        """
+        import shutil, zipfile
+        import json as _json
+        import urllib.request
+
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        found = shutil.which("N_m3u8DL-RE")
+        if found:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ✅ N_m3u8DL-RE (PATH): {found}")
+            return found
+
+        local = self._nm3u8dl_re_path()
+        if os.path.isfile(local):
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ✅ N_m3u8DL-RE (로컬): {local}")
+            return local
+
+        # GitHub API로 최신 릴리즈 zip URL 조회
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] ⬇ N_m3u8DL-RE 최신 버전 조회 중…")
+        self.root.after(0, lambda: self._link_status("⬇ N_m3u8DL-RE 버전 조회 중…"))
+        req = urllib.request.Request(
+            self._NM3U8_RE_API_URL,
+            headers={"User-Agent": "AutoSinc"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            release_info = _json.loads(resp.read().decode())
+
+        # win-x64 zip 에셋 선택
+        asset_url = None
+        for asset in release_info.get("assets", []):
+            name = asset.get("name", "")
+            if "win" in name.lower() and "x64" in name.lower() and name.endswith(".zip"):
+                asset_url = asset["browser_download_url"]
+                break
+        if asset_url is None:
+            raise RuntimeError("N_m3u8DL-RE Windows x64 zip 에셋을 찾을 수 없습니다.")
+
+        os.makedirs(self.APP_DIR, exist_ok=True)
+        zip_path = local + ".zip"
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] ⬇ N_m3u8DL-RE 다운로드 시작: {asset_url}")
+        self._download_file(asset_url, zip_path, "N_m3u8DL-RE")
+
+        self.root.after(0, lambda: self._link_status("⬇ N_m3u8DL-RE 압축 해제 중…"))
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                target = next(
+                    (n for n in zf.namelist()
+                     if n.lower().endswith("n_m3u8dl-re.exe")),
+                    None)
+                if target is None:
+                    raise RuntimeError("zip 안에서 N_m3u8DL-RE.exe를 찾을 수 없습니다.")
+                with zf.open(target) as src, open(local, "wb") as dst:
+                    dst.write(src.read())
+        finally:
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
+
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] ✅ N_m3u8DL-RE 설치 완료: {local}")
         return local
 
     def _dl_stop_btn_show(self):
@@ -1062,29 +1141,47 @@ class LipSyncGUILogic:
             self._link_save_tracked_files = set()
             self._link_save_dl_dir        = dl_dir
             try:
-                # ── 1) yt-dlp 확보 ────────────────────────────────────────────
-                try:
-                    ytdlp = self._ensure_ytdlp()
-                except Exception as e:
-                    _err = str(e)
+                # ── 1) yt-dlp / ffmpeg / N_m3u8DL-RE 병렬 확보 ───────────────
+                import concurrent.futures as _cf
+                _results   = {}
+                _exc       = {}
+
+                def _fetch(key, fn):
+                    try:
+                        _results[key] = fn()
+                    except Exception as _e:
+                        _exc[key] = _e
+
+                with _cf.ThreadPoolExecutor(max_workers=3) as _pool:
+                    _pool.submit(_fetch, "ytdlp",   self._ensure_ytdlp)
+                    _pool.submit(_fetch, "ffmpeg",  self._ensure_ffmpeg)
+                    _pool.submit(_fetch, "nm3u8",   self._ensure_nm3u8dl_re)
+
+                # yt-dlp / ffmpeg 실패 시 즉시 중단
+                if "ytdlp" in _exc:
+                    _err = str(_exc["ytdlp"])
                     self.root.after(0, lambda: self._link_status(
                         f"❌ yt-dlp 설치 실패: {_err}", warn=True))
                     self.root.after(0, self._dl_progress_hide)
                     self._log_lines.append(f"[{ts}] ❌ yt-dlp 설치 실패: {_err}")
                     return
-
-                # ── 2) ffmpeg 확보 ────────────────────────────────────────────
-                try:
-                    ffmpeg = self._ensure_ffmpeg()
-                except Exception as e:
-                    _err = str(e)
+                if "ffmpeg" in _exc:
+                    _err = str(_exc["ffmpeg"])
                     self.root.after(0, lambda: self._link_status(
                         f"❌ ffmpeg 설치 실패: {_err}", warn=True))
                     self.root.after(0, self._dl_progress_hide)
                     self._log_lines.append(f"[{ts}] ❌ ffmpeg 설치 실패: {_err}")
                     return
+                # N_m3u8DL-RE 설치 실패는 폴백 불가 경고만 기록 (중단하지 않음)
+                if "nm3u8" in _exc:
+                    self._log_lines.append(
+                        f"[{ts}] ⚠ N_m3u8DL-RE 설치 실패 (폴백 불가): {_exc['nm3u8']}")
 
-                # ── 3) 영상 다운로드 (bestvideo+bestaudio → mp4 병합) ─────────
+                ytdlp  = _results["ytdlp"]
+                ffmpeg = _results["ffmpeg"]
+                _nm3u8dl_re_exe = _results.get("nm3u8")  # None 이면 폴백 불가
+
+                # ── 2) 영상 다운로드 (bestvideo+bestaudio → mp4 병합) ─────────
                 self.root.after(0, lambda: self._dl_progress_update(0.0))
                 self.root.after(0, lambda: self._link_status("동영상을 저장하고 있습니다."))
                 self.root.after(0, self._dl_progress_show)
@@ -1541,31 +1638,85 @@ class LipSyncGUILogic:
                         f"[{ts}] ✅ yt-dlp 저장 완료 | 원본 URL: {url} | m3u8 추출=False")
                 else:
                     self._link_save_dest_glob = None
-                    # 플랫폼별 실패 안내 메시지
-                    if _is_facebook:
-                        self.root.after(0, lambda: self._link_status(
-                            "❌ Facebook 저장 실패. "
-                            "공개 콘텐츠인지 확인하거나, "
-                            "브라우저에서 Facebook에 로그인 후 다시 시도하세요.",
-                            warn=True))
-                    elif _is_soop:
-                        self.root.after(0, lambda: self._link_status(
-                            "❌ Soop 저장 실패. "
-                            "공개 영상인지 확인하거나, "
-                            "브라우저에서 Soop에 로그인 후 다시 시도하세요.",
-                            warn=True))
-                    elif _is_chzzk:
-                        self.root.after(0, lambda: self._link_status(
-                            "❌ 치지직 저장 실패. "
-                            "공개 영상인지 확인하거나, "
-                            "브라우저에서 치지직에 로그인 후 다시 시도하세요.",
-                            warn=True))
-                    else:
-                        self.root.after(0, lambda: self._link_status(
-                            "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
-                    self.root.after(0, self._dl_progress_hide)
+                    # ── N_m3u8DL-RE 폴백 ──────────────────────────────────
                     self._log_lines.append(
-                        f"[{ts}] ❌ yt-dlp 저장 실패 (code {_rc}) | 원본 URL: {url} | fallback=없음")
+                        f"[{ts}] ⚠ yt-dlp 실패 → N_m3u8DL-RE 폴백 시도 | 원본 URL: {url}")
+                    self.root.after(0, lambda: self._link_status(
+                        "⏳ yt-dlp 실패 → N_m3u8DL-RE로 재시도 중…"))
+                    _nm3u8_rc = 1
+                    try:
+                        if not _nm3u8dl_re_exe:
+                            raise RuntimeError("N_m3u8DL-RE 설치 실패로 폴백 불가")
+                        nm3u8 = _nm3u8dl_re_exe
+                        _nm3u8_cmd = [
+                            nm3u8, url,
+                            "--save-dir", dl_dir,
+                            "--auto-select",
+                            "--no-log",
+                        ]
+                        _nm3u8_proc = subprocess.Popen(
+                            _nm3u8_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            creationflags=0x08000000,
+                        )
+                        self._link_save_proc = _nm3u8_proc
+                        for _nln in _nm3u8_proc.stdout:
+                            if getattr(self, "_link_save_cancelled", False):
+                                _nm3u8_proc.kill()
+                                break
+                            _nm = re.search(r'(\d+(?:\.\d+)?)%', _nln)
+                            if _nm:
+                                _npct = float(_nm.group(1))
+                                self.root.after(
+                                    0, lambda p=_npct: self._dl_progress_update(p))
+                        _nm3u8_proc.wait()
+                        _nm3u8_rc = _nm3u8_proc.returncode
+                        self._link_save_proc = None
+                    except Exception as _ne:
+                        _nm3u8_rc = 1
+                        self._log_lines.append(
+                            f"[{_time.strftime('%H:%M:%S')}] ❌ N_m3u8DL-RE 설치/실행 오류: {_ne}")
+
+                    if getattr(self, "_link_save_cancelled", False):
+                        return
+
+                    if _nm3u8_rc == 0:
+                        self.root.after(0, lambda: self._dl_progress_update(100.0))
+                        self.root.after(0, lambda: self._link_status(
+                            f"✅ 저장 완료 (N_m3u8DL-RE) → {dl_dir}"))
+                        self.root.after(2500, self._dl_progress_hide)
+                        self._log_lines.append(
+                            f"[{ts}] ✅ N_m3u8DL-RE 저장 완료 | 원본 URL: {url}")
+                    else:
+                        # 플랫폼별 실패 안내 메시지
+                        if _is_facebook:
+                            self.root.after(0, lambda: self._link_status(
+                                "❌ Facebook 저장 실패. "
+                                "공개 콘텐츠인지 확인하거나, "
+                                "브라우저에서 Facebook에 로그인 후 다시 시도하세요.",
+                                warn=True))
+                        elif _is_soop:
+                            self.root.after(0, lambda: self._link_status(
+                                "❌ Soop 저장 실패. "
+                                "공개 영상인지 확인하거나, "
+                                "브라우저에서 Soop에 로그인 후 다시 시도하세요.",
+                                warn=True))
+                        elif _is_chzzk:
+                            self.root.after(0, lambda: self._link_status(
+                                "❌ 치지직 저장 실패. "
+                                "공개 영상인지 확인하거나, "
+                                "브라우저에서 치지직에 로그인 후 다시 시도하세요.",
+                                warn=True))
+                        else:
+                            self.root.after(0, lambda: self._link_status(
+                                "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
+                        self.root.after(0, self._dl_progress_hide)
+                        self._log_lines.append(
+                            f"[{ts}] ❌ N_m3u8DL-RE 저장 실패 (code {_nm3u8_rc}) | 원본 URL: {url}")
 
             except Exception as e:
                 _err = str(e)

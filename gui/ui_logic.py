@@ -1628,95 +1628,151 @@ class LipSyncGUILogic:
                         if getattr(self, "_link_save_cancelled", False):
                             return
 
-                if _rc == 0:
-                    self._link_save_dest_glob = None
+                # ── m3u8 추출 헬퍼 (yt-dlp -g) ───────────────────────────────
+                def _extract_m3u8(target_url: str):
+                    """yt-dlp -g 로 스트림 URL을 추출한다.
+                    m3u8 URL이 포함된 경우 첫 번째를 반환, 없으면 None."""
+                    try:
+                        _gp = subprocess.run(
+                            [ytdlp, "-g", "-f", "bestvideo+bestaudio/best",
+                             "--no-warnings", "--quiet", target_url],
+                            capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
+                            timeout=30,
+                            creationflags=0x08000000 if os.name == "nt" else 0)
+                        for _line in _gp.stdout.splitlines():
+                            _line = _line.strip()
+                            if _line and re.search(r'\.m3u8(?:[?#]|$)', _line,
+                                                   re.IGNORECASE):
+                                return _line
+                        # m3u8 URL이 없더라도 첫 번째 URL 반환 (직접 스트림)
+                        _urls = [l.strip() for l in _gp.stdout.splitlines()
+                                 if l.strip()]
+                        return _urls[0] if _urls else None
+                    except Exception:
+                        return None
+
+                # ── N_m3u8DL-RE 실행 헬퍼 ───────────────────────────────────
+                def _exec_nm3u8dl_re(target_url: str) -> int:
+                    """N_m3u8DL-RE 로 target_url 을 다운로드한다.
+                    반환: returncode (int)"""
+                    if not _nm3u8dl_re_exe:
+                        self._log_lines.append(
+                            f"[{_time.strftime('%H:%M:%S')}] ⚠ N_m3u8DL-RE 없음 — 폴백 불가")
+                        return 1
+                    _nc = [
+                        _nm3u8dl_re_exe, target_url,
+                        "--save-dir", dl_dir,
+                        "--auto-select",
+                        "--no-log",
+                    ]
+                    _np = subprocess.Popen(
+                        _nc,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True, encoding="utf-8", errors="replace",
+                        creationflags=0x08000000 if os.name == "nt" else 0)
+                    self._link_save_proc = _np
+                    for _nln in _np.stdout:
+                        if getattr(self, "_link_save_cancelled", False):
+                            _np.kill()
+                            break
+                        _nm = re.search(r'(\d+(?:\.\d+)?)%', _nln)
+                        if _nm:
+                            _npct = float(_nm.group(1))
+                            self.root.after(
+                                0, lambda p=_npct: self._dl_progress_update(p))
+                    _np.wait()
+                    self._link_save_proc = None
+                    return _np.returncode
+
+                # ══ 4단계 폴백 체인 ══════════════════════════════════════════
+                # 단계 1 결과(_rc)는 위에서 이미 구함.
+                # 이후 단계는 이전 단계가 실패한 경우에만 진입한다.
+
+                _final_rc   = _rc        # 최종 결과 추적
+                _final_step = "yt-dlp"   # 마지막 시도 단계 이름
+
+                # ── 단계 2: yt-dlp m3u8 추출 → yt-dlp 다운로드 ─────────────
+                if _final_rc != 0 and not getattr(self, "_link_save_cancelled", False):
+                    self.root.after(0, lambda: self._link_status(
+                        "⏳ yt-dlp 직접 실패 → m3u8 추출 후 재시도 중…"))
+                    self._log_lines.append(
+                        f"[{ts}] ⚠ [2단계] yt-dlp 직접 실패 → m3u8 추출 시도")
+                    _m3u8_url = _extract_m3u8(url)
+                    if _m3u8_url and _m3u8_url != url:
+                        self._log_lines.append(
+                            f"[{ts}] 🔗 m3u8 추출 성공: {_m3u8_url[:80]}")
+                        _cmd_m3u8 = [c if c != url else _m3u8_url for c in cmd]
+                        _final_rc, _ = _exec_ytdlp(_cmd_m3u8)
+                        _final_step  = "yt-dlp+m3u8"
+                    else:
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ [2단계] m3u8 추출 실패 — 다음 단계로")
+
+                # ── 단계 3: N_m3u8DL-RE 직접 다운로드 ──────────────────────
+                if _final_rc != 0 and not getattr(self, "_link_save_cancelled", False):
+                    self.root.after(0, lambda: self._link_status(
+                        "⏳ N_m3u8DL-RE로 직접 다운로드 시도 중…"))
+                    self._log_lines.append(
+                        f"[{ts}] ⚠ [3단계] N_m3u8DL-RE 직접 시도 | URL: {url}")
+                    _final_rc   = _exec_nm3u8dl_re(url)
+                    _final_step = "N_m3u8DL-RE"
+
+                # ── 단계 4: m3u8 추출 → N_m3u8DL-RE 다운로드 ───────────────
+                if _final_rc != 0 and not getattr(self, "_link_save_cancelled", False):
+                    self.root.after(0, lambda: self._link_status(
+                        "⏳ N_m3u8DL-RE 직접 실패 → m3u8 추출 후 재시도 중…"))
+                    self._log_lines.append(
+                        f"[{ts}] ⚠ [4단계] N_m3u8DL-RE 직접 실패 → m3u8 추출 시도")
+                    _m3u8_url2 = _extract_m3u8(url)
+                    if _m3u8_url2 and _m3u8_url2 != url:
+                        self._log_lines.append(
+                            f"[{ts}] 🔗 [4단계] m3u8 추출 성공: {_m3u8_url2[:80]}")
+                        _final_rc   = _exec_nm3u8dl_re(_m3u8_url2)
+                        _final_step = "N_m3u8DL-RE+m3u8"
+                    else:
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ [4단계] m3u8 추출 실패 — 모든 방법 소진")
+
+                # ── 최종 결과 처리 ───────────────────────────────────────────
+                if getattr(self, "_link_save_cancelled", False):
+                    return
+
+                self._link_save_dest_glob = None
+                if _final_rc == 0:
                     self.root.after(0, lambda: self._dl_progress_update(100.0))
                     self.root.after(0, lambda: self._link_status(
                         f"✅ 저장 완료 → {dl_dir}"))
                     self.root.after(2500, self._dl_progress_hide)
                     self._log_lines.append(
-                        f"[{ts}] ✅ yt-dlp 저장 완료 | 원본 URL: {url} | m3u8 추출=False")
+                        f"[{ts}] ✅ 저장 완료 ({_final_step}) | 원본 URL: {url}")
                 else:
-                    self._link_save_dest_glob = None
-                    # ── N_m3u8DL-RE 폴백 ──────────────────────────────────
-                    self._log_lines.append(
-                        f"[{ts}] ⚠ yt-dlp 실패 → N_m3u8DL-RE 폴백 시도 | 원본 URL: {url}")
-                    self.root.after(0, lambda: self._link_status(
-                        "⏳ yt-dlp 실패 → N_m3u8DL-RE로 재시도 중…"))
-                    _nm3u8_rc = 1
-                    try:
-                        if not _nm3u8dl_re_exe:
-                            raise RuntimeError("N_m3u8DL-RE 설치 실패로 폴백 불가")
-                        nm3u8 = _nm3u8dl_re_exe
-                        _nm3u8_cmd = [
-                            nm3u8, url,
-                            "--save-dir", dl_dir,
-                            "--auto-select",
-                            "--no-log",
-                        ]
-                        _nm3u8_proc = subprocess.Popen(
-                            _nm3u8_cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                            encoding="utf-8",
-                            errors="replace",
-                            creationflags=0x08000000,
-                        )
-                        self._link_save_proc = _nm3u8_proc
-                        for _nln in _nm3u8_proc.stdout:
-                            if getattr(self, "_link_save_cancelled", False):
-                                _nm3u8_proc.kill()
-                                break
-                            _nm = re.search(r'(\d+(?:\.\d+)?)%', _nln)
-                            if _nm:
-                                _npct = float(_nm.group(1))
-                                self.root.after(
-                                    0, lambda p=_npct: self._dl_progress_update(p))
-                        _nm3u8_proc.wait()
-                        _nm3u8_rc = _nm3u8_proc.returncode
-                        self._link_save_proc = None
-                    except Exception as _ne:
-                        _nm3u8_rc = 1
-                        self._log_lines.append(
-                            f"[{_time.strftime('%H:%M:%S')}] ❌ N_m3u8DL-RE 설치/실행 오류: {_ne}")
-
-                    if getattr(self, "_link_save_cancelled", False):
-                        return
-
-                    if _nm3u8_rc == 0:
-                        self.root.after(0, lambda: self._dl_progress_update(100.0))
+                    if _is_facebook:
                         self.root.after(0, lambda: self._link_status(
-                            f"✅ 저장 완료 (N_m3u8DL-RE) → {dl_dir}"))
-                        self.root.after(2500, self._dl_progress_hide)
-                        self._log_lines.append(
-                            f"[{ts}] ✅ N_m3u8DL-RE 저장 완료 | 원본 URL: {url}")
+                            "❌ Facebook 저장 실패. "
+                            "공개 콘텐츠인지 확인하거나, "
+                            "브라우저에서 Facebook에 로그인 후 다시 시도하세요.",
+                            warn=True))
+                    elif _is_soop:
+                        self.root.after(0, lambda: self._link_status(
+                            "❌ Soop 저장 실패. "
+                            "공개 영상인지 확인하거나, "
+                            "브라우저에서 Soop에 로그인 후 다시 시도하세요.",
+                            warn=True))
+                    elif _is_chzzk:
+                        self.root.after(0, lambda: self._link_status(
+                            "❌ 치지직 저장 실패. "
+                            "공개 영상인지 확인하거나, "
+                            "브라우저에서 치지직에 로그인 후 다시 시도하세요.",
+                            warn=True))
                     else:
-                        # 플랫폼별 실패 안내 메시지
-                        if _is_facebook:
-                            self.root.after(0, lambda: self._link_status(
-                                "❌ Facebook 저장 실패. "
-                                "공개 콘텐츠인지 확인하거나, "
-                                "브라우저에서 Facebook에 로그인 후 다시 시도하세요.",
-                                warn=True))
-                        elif _is_soop:
-                            self.root.after(0, lambda: self._link_status(
-                                "❌ Soop 저장 실패. "
-                                "공개 영상인지 확인하거나, "
-                                "브라우저에서 Soop에 로그인 후 다시 시도하세요.",
-                                warn=True))
-                        elif _is_chzzk:
-                            self.root.after(0, lambda: self._link_status(
-                                "❌ 치지직 저장 실패. "
-                                "공개 영상인지 확인하거나, "
-                                "브라우저에서 치지직에 로그인 후 다시 시도하세요.",
-                                warn=True))
-                        else:
-                            self.root.after(0, lambda: self._link_status(
-                                "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
-                        self.root.after(0, self._dl_progress_hide)
-                        self._log_lines.append(
-                            f"[{ts}] ❌ N_m3u8DL-RE 저장 실패 (code {_nm3u8_rc}) | 원본 URL: {url}")
+                        self.root.after(0, lambda: self._link_status(
+                            "❌ 저장 실패. URL이 올바른지 확인하세요.", warn=True))
+                    self.root.after(0, self._dl_progress_hide)
+                    self._log_lines.append(
+                        f"[{ts}] ❌ 저장 실패 — 모든 방법 소진 "
+                        f"(마지막 시도: {_final_step}) | 원본 URL: {url}")
 
             except Exception as e:
                 _err = str(e)

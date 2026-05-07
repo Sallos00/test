@@ -31,6 +31,9 @@ class PopupMixin:
             self._log_lines.append(
                 f"[{_t.strftime('%H:%M:%S')}] ⚠ 링크 재생 모드 중 — 싱크 보정 비활성화")
             return
+        # 초기 작업(인증·버전·레지) 미완료 시 싱크 시작 불가
+        if not getattr(self, "_features_ready", False):
+            return
         if not self._running:
             self._stop_oped_monitor()   # 싱크 시작 전 모니터 중지
             try:

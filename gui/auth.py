@@ -18,11 +18,16 @@ class LipSyncGUIAuth:
         if local and status == _auth.AuthStatus.APPROVED:
             # 허가 상태 → APPROVED 확인과 동시에 버전 체크를 병렬로 시작
             # (기존: _after_auth_ok 호출 후 UI 스레드에서 시작 → 변경: 즉시 시작)
+            # 기능 게이트 초기화 — 모든 초기 작업 통과 후 _do_start_app()에서 True로 전환
+            self._features_ready = False
             self._version_check_started_early = True
             threading.Thread(
                 target=self._check_version_and_start,
                 daemon=True).start()
             self.root.after(0, self._after_auth_ok)
+            # 팟플레이어 감지 조기 시작 — 인증/버전/레지 확인과 병렬로 실행
+            # 실제 기능(스킵 팝업 등)은 _features_ready=True 가 될 때까지 차단됨
+            self.root.after(200, self._start_oped_monitor)
             def _verify():
                 resp = _auth.check_auth(local["pc_id"], local["token"])
                 s = resp.get("status", "")
@@ -57,11 +62,14 @@ class LipSyncGUIAuth:
 
     def _do_start_app(self):
         """실제 앱 시작 로직 — 기존 _after_auth_ok의 실행 흐름을 그대로 유지."""
+        # 모든 초기 작업(인증·버전·레지) 통과 → 기능 게이트 오픈
+        self._features_ready = True
         if self._autostart_var.get():
             self.root.after(500, self._toggle)
         else:
-            # 자동 시작이 아닐 때 → oped 모니터 바로 시작
-            self.root.after(200, self._start_oped_monitor)
+            # 조기 시작되지 않은 경우에만 oped 모니터 시작
+            if not getattr(self, "_oped_monitor_running", False):
+                self.root.after(200, self._start_oped_monitor)
         threading.Thread(
             target=self._monitor_for_popup,
             kwargs={"wait_for_exit": self._autostart_var.get()},
@@ -84,26 +92,11 @@ class LipSyncGUIAuth:
             name="download-perm-check",
         ).start()
 
-        # reg 셋팅 이벤트 초기화 (체크 미시작 상태)
-        self._reg_setup_event = None
-
         import logging as _log
         try:
             resp    = _auth_module.check_version()
             latest  = resp.get("latest", "").strip()
             current = _auth_module.APP_VERSION.strip()
-
-            # B4 reg URL 취득 후 병렬로 reg 셋팅 체크 시작
-            reg_url = resp.get("reg_url", "").strip()
-            if reg_url:
-                self._reg_setup_event = threading.Event()
-                threading.Thread(
-                    target=self._check_reg_setup_bg,
-                    args=(reg_url,),
-                    daemon=True,
-                    name="reg-setup-check",
-                ).start()
-
             if latest and latest != current:
                 # G열 '차단' 여부 확인 — 문자열 공백/케이스 방어
                 pc_id   = _auth_module.get_pc_id()
@@ -112,8 +105,8 @@ class LipSyncGUIAuth:
                     "[version_check] latest=%s current=%s skipped=%s",
                     latest, current, skipped)
                 if skipped is True:
-                    # G열 차단 확정 → 팝업 없이 바로 시작 (reg 체크 포함)
-                    self.root.after(0, self._do_start_app_checked)
+                    # G열 차단 확정 → 팝업 없이 바로 시작
+                    self.root.after(0, self._do_start_app)
                     return
                 # 차단 아님 → 업데이트 팝업 표시 (서버 B2 다운로드 URL도 전달)
                 download_url = resp.get("url", "").strip()
@@ -124,8 +117,8 @@ class LipSyncGUIAuth:
         except Exception:
             # 서버 응답 오류, 인터넷 미연결 등 → 무시하고 바로 시작
             pass
-        # 버전 일치 / 체크 실패 → 바로 시작 (reg 체크 포함)
-        self.root.after(0, self._do_start_app_checked)
+        # 버전 일치 / 체크 실패 → 바로 시작
+        self.root.after(0, self._do_start_app)
 
     def _check_download_permission_bg(self):
         """백그라운드: 인증목록 H열 다운로드 권한 확인 → 다운 버튼 표시/숨김.
@@ -172,7 +165,7 @@ class LipSyncGUIAuth:
         # 확인 실패(네트워크 오류 등) 시에는 기존대로 팝업을 표시한다.
         try:
             if _auth_module.check_update_skipped(_auth_module.get_pc_id()):
-                self._do_start_app_checked()
+                self._do_start_app()
                 return
         except Exception:
             pass
@@ -205,7 +198,7 @@ class LipSyncGUIAuth:
                     except Exception:
                         pass
                 else:
-                    self._do_start_app_checked()
+                    self._do_start_app()
 
             popup.protocol("WM_DELETE_WINDOW", _close_and_start)
 
@@ -382,185 +375,7 @@ class LipSyncGUIAuth:
 
         except Exception:
             # 팝업 생성 실패 시에도 앱은 정상 시작
-            self._do_start_app_checked()
-
-    def _check_reg_setup_bg(self, reg_url: str):
-        """백그라운드: settings.json reg_setup_done 확인 → 필요 시 .reg 파일 다운로드.
-
-        완료 후 self._reg_setup_event 를 set() 한다.
-        self._reg_needs_setup : True 이면 팝업 표시 필요
-        self._reg_file_path   : 다운로드된 .reg 파일 경로
-        """
-        import http.cookiejar
-        import os as _os
-        import re as _re
-        import urllib.request as _ureq
-
-        try:
-            if _auth_module.get_reg_setup_done():
-                self._reg_needs_setup = False
-            else:
-                # Google Drive URL → 직접 다운로드 URL 변환
-                def _resolve(url: str) -> str:
-                    for pat in (
-                        r'drive\.google\.com/file/d/([^/?]+)',
-                        r'drive\.google\.com/open\?id=([^&]+)',
-                        r'drive\.google\.com/uc[?&].*?id=([^&]+)',
-                        r'drive\.usercontent\.google\.com/download.*?[?&]id=([^&]+)',
-                    ):
-                        m = _re.search(pat, url)
-                        if m:
-                            fid = m.group(1)
-                            return (
-                                "https://drive.usercontent.google.com/download"
-                                f"?id={fid}&export=download&confirm=t"
-                            )
-                    return url
-
-                resolved = _resolve(reg_url)
-                _appdata = _auth_module._get_appdata()
-                save_dir = (
-                    _os.path.join(_appdata, "AutoSync") if _appdata
-                    else _os.path.dirname(_os.path.abspath(__file__))
-                )
-                _os.makedirs(save_dir, exist_ok=True)
-                reg_path = _os.path.join(save_dir, "potplayer_setup.reg")
-
-                jar    = http.cookiejar.CookieJar()
-                opener = _ureq.build_opener(
-                    _ureq.HTTPCookieProcessor(jar),
-                    _ureq.HTTPRedirectHandler(),
-                )
-                req = _ureq.Request(resolved, headers={"User-Agent": "Mozilla/5.0"})
-                with opener.open(req, timeout=60) as resp:
-                    data = resp.read()
-                with open(reg_path, "wb") as f:
-                    f.write(data)
-
-                self._reg_needs_setup = True
-                self._reg_file_path   = reg_path
-        except Exception:
-            self._reg_needs_setup = False
-        finally:
-            event = getattr(self, "_reg_setup_event", None)
-            if event is not None:
-                event.set()
-
-    def _do_start_app_checked(self):
-        """reg 셋팅 확인 완료 여부를 기다린 뒤 팝업 표시 또는 바로 시작.
-
-        _reg_setup_event 가 None(체크 미시작) 이면 바로 _do_start_app() 호출.
-        이벤트가 아직 set 되지 않은 경우 100 ms 후 재시도(비블로킹).
-        """
-        event = getattr(self, "_reg_setup_event", None)
-        if event is None:
             self._do_start_app()
-            return
-        if not event.is_set():
-            self.root.after(100, self._do_start_app_checked)
-            return
-        if getattr(self, "_reg_needs_setup", False) and getattr(self, "_reg_file_path", ""):
-            self._show_reg_setup_popup(self._do_start_app)
-        else:
-            self._do_start_app()
-
-    def _show_reg_setup_popup(self, on_done):
-        """팟플레이어 레지스트리 셋팅 변경 안내 팝업.
-
-        '변경하기' : regedit /s 실행 → 성공 시 reg_setup_done 저장 → on_done()
-        '닫기' / X : 프로그램 종료
-        예외 발생 시 팝업 없이 on_done() 호출.
-        """
-        try:
-            popup = tk.Toplevel(self.root)
-            popup.title("Auto Sync — 환경 설정")
-            popup.resizable(False, False)
-            popup.configure(bg=self.BG)
-            popup.grab_set()
-
-            r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-            self._place_popup(popup, round(340 * r), round(200 * r))
-
-            PAD     = round(20 * r)
-            F_TITLE = max(9,  round(11 * r))
-            F_BODY  = max(8,  round(9  * r))
-            F_BTN   = max(8,  round(9  * r))
-
-            def _on_close_program():
-                try:
-                    popup.destroy()
-                except Exception:
-                    pass
-                self._on_close()
-
-            popup.protocol("WM_DELETE_WINDOW", _on_close_program)
-
-            tk.Label(popup, text="환경 설정",
-                     font=("Segoe UI", F_TITLE, "bold"),
-                     bg=self.BG, fg=self.TEXT).pack(pady=(PAD, 0))
-            tk.Frame(popup, bg=self.BORDER, height=1).pack(
-                fill="x", pady=(round(10 * r), 0))
-
-            tk.Label(popup,
-                     text="프로그램의 원활한 이용을 위해\n팟플레이어의 레지스트리 셋팅을 변경합니다.",
-                     font=("Segoe UI", F_BODY),
-                     bg=self.BG, fg=self.TEXT, justify="center").pack(
-                pady=(round(14 * r), 0))
-
-            tk.Frame(popup, bg=self.BORDER, height=1).pack(
-                fill="x", padx=round(16 * r), pady=(round(12 * r), 0))
-
-            btn_f = tk.Frame(popup, bg=self.BG)
-            btn_f.pack(pady=round(12 * r))
-
-            BTN = dict(font=("Consolas", F_BTN, "bold"), relief="flat",
-                       cursor="hand2", padx=round(14 * r), pady=round(5 * r))
-
-            def _on_apply():
-                apply_btn.configure(state="disabled", text="적용 중…")
-                close_btn.configure(state="disabled")
-
-                reg_path = self._reg_file_path
-
-                def _run_reg():
-                    try:
-                        import subprocess as _sp
-                        result = _sp.run(
-                            ["regedit.exe", "/s", reg_path],
-                            timeout=30,
-                        )
-                        success = (result.returncode == 0)
-                    except Exception:
-                        success = False
-
-                    def _after():
-                        try:
-                            popup.destroy()
-                        except Exception:
-                            pass
-                        if success:
-                            _auth_module.save_reg_setup_done()
-                        on_done()
-
-                    self.root.after(0, _after)
-
-                import threading as _t
-                _t.Thread(target=_run_reg, daemon=True).start()
-
-            apply_btn = tk.Button(btn_f, text="변경하기",
-                                  bg=self.BG3, fg=self.ACCENT,
-                                  activebackground=self.BORDER,
-                                  command=_on_apply, **BTN)
-            apply_btn.pack(side="left", padx=round(6 * r))
-
-            close_btn = tk.Button(btn_f, text="닫기",
-                                  bg=self.BG3, fg=self.TEXT,
-                                  activebackground=self.BORDER,
-                                  command=_on_close_program, **BTN)
-            close_btn.pack(side="left", padx=round(6 * r))
-
-        except Exception:
-            on_done()
 
     def _start_update_download(self, download_url: str, on_progress=None, on_error=None):
         """업데이트 파일 다운로드 → AutoSincUpDate.bat 생성·실행 → 앱 종료.

@@ -681,8 +681,34 @@ class LipSyncGUILogic:
             ts = _time.strftime("%H:%M:%S")
             self._log_lines.append(
                 f"[{ts}] ⬇ PotPlayer Extension/MediaPlayParse - yt-dlp.as 다운로드 시작")
-            # %TEMP% 에 다운로드 + 압축 해제
-            urllib.request.urlretrieve(ext_url, tmp_zip)
+            # 구글 드라이브 공유 링크 → 직접 다운로드 URL 변환
+            import re as _re, http.cookiejar as _cj
+            def _resolve_gdrive(url: str) -> str:
+                for pat in (
+                    r'drive\.google\.com/file/d/([^/?]+)',
+                    r'drive\.google\.com/open\?id=([^&]+)',
+                    r'drive\.google\.com/uc[?&].*?id=([^&]+)',
+                    r'drive\.usercontent\.google\.com/download.*?[?&]id=([^&]+)',
+                ):
+                    m = _re.search(pat, url)
+                    if m:
+                        fid = m.group(1)
+                        return (
+                            "https://drive.usercontent.google.com/download"
+                            f"?id={fid}&export=download&confirm=t"
+                        )
+                return url
+            resolved_url = _resolve_gdrive(ext_url)
+            jar    = _cj.CookieJar()
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(jar),
+                urllib.request.HTTPRedirectHandler(),
+            )
+            req = urllib.request.Request(
+                resolved_url, headers={"User-Agent": "Mozilla/5.0"})
+            with opener.open(req, timeout=60) as resp:
+                with open(tmp_zip, "wb") as f:
+                    f.write(resp.read())
             if os.path.exists(tmp_ext_dir):
                 shutil.rmtree(tmp_ext_dir, ignore_errors=True)
             os.makedirs(tmp_ext_dir, exist_ok=True)

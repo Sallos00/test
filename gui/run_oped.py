@@ -163,6 +163,9 @@ class OpedMonitorMixin:
         # (omed 블록·메인 싱크 블록 양쪽에서 호출되므로 여기서 일괄 차단)
         if getattr(self, "_link_play_mode", False):
             return
+        # 초기 작업(인증·버전·레지) 미완료 시 팝업 차단
+        if not getattr(self, "_features_ready", False):
+            return
         if getattr(self, "_oped_popup_open", False):
             return
 

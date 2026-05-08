@@ -61,6 +61,21 @@ class RefreshMixin:
                     self._om_shared_pos[0] = pv
                     self._om_shared_dur[0] = dv
 
+            # ── [Bug Fix] 링크 재생 모드: hwnd 기반으로 팟플레이어 상태 직접 갱신 ──
+            # _link_play_mode=True 이면 _running=False·oped 비활성화로
+            # state_queue/om_state_queue 가 비어 _pot_lbl 이 갱신되지 않는다.
+            # _cached_hwnd 를 직접 보고 즉시 반영한다.
+            # → 버그 1 (재생 후 '미감지' 고착) / 버그 2 (종료 후 '연결됨' 고착) 동시 해결.
+            if getattr(self, "_link_play_mode", False):
+                _lp_ok = bool(hwnd)
+                _lp_c  = self.ACCENT3 if _lp_ok else self.ACCENT2
+                _lp_t  = "연결됨"    if _lp_ok else "미감지"
+                try:
+                    self._pot_dot.config(fg=_lp_c)
+                    self._pot_lbl.config(text=_lp_t, fg=_lp_c)
+                except Exception:
+                    pass
+
             if (self._running and not hwnd
                     and not getattr(self, "_pot_exit_handling", False)):
                 self._pot_exit_handling = True

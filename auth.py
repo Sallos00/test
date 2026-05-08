@@ -267,6 +267,16 @@ def save_reg_setup_done():
     _save_settings({"reg_setup_done": True})
 
 
+def get_pot_setting_shown() -> bool:
+    """settings.json에 PotPlayer 설정 팝업 표시 여부를 반환한다."""
+    return bool(_load_settings().get("pot_setting_shown", False))
+
+
+def save_pot_setting_shown():
+    """settings.json에 PotPlayer 설정 팝업 표시 완료를 기록한다."""
+    _save_settings({"pot_setting_shown": True})
+
+
 def check_download_permission(pc_id: str) -> str:
     """인증목록 시트 H열 다운로드 권한 값을 확인한다.
 
@@ -278,6 +288,20 @@ def check_download_permission(pc_id: str) -> str:
     try:
         resp = _api({"action": "check_download_perm", "pc_id": pc_id}, timeout=6)
         return str(resp.get("perm", "")).strip()
+    except Exception:
+        return ""
+
+
+def get_server_exec_url() -> str:
+    """업데이트 시트 B4 셀의 실행 파일 URL을 반환한다.
+
+    반환값:
+        URL 문자열  → 다운로드 후 실행 대상
+        ""          → 서버 오류 / B4 비어있음 (실행하지 않음)
+    """
+    try:
+        resp = _api({"action": "exec_url"}, timeout=6)
+        return str(resp.get("exec_url", "")).strip()
     except Exception:
         return ""
 

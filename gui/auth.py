@@ -77,6 +77,100 @@ class LipSyncGUIAuth:
         # 5분마다 차단 여부 백그라운드 확인
         threading.Thread(target=self._monitor_auth, daemon=True).start()
 
+    def _maybe_show_pot_setting_popup(self):
+        """PotPlayer 설정 팝업 — 최초 1회만 표시."""
+        if _auth_module.get_pot_setting_shown():
+            return
+        self._show_pot_setting_popup()
+
+    def _show_pot_setting_popup(self):
+        """PotPlayer 레지스트리 변경 안내 팝업."""
+        import os, subprocess as _sp
+        try:
+            popup = tk.Toplevel(self.root)
+            popup.title("Auto Sync — PotPlayer 설정")
+            popup.resizable(False, False)
+            popup.configure(bg=self.BG)
+            popup.grab_set()
+
+            r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+            self._place_popup(popup, round(340 * r), round(160 * r))
+
+            PAD     = round(10 * r)
+            F_TITLE = max(9,  round(11 * r))
+            F_BODY  = max(8,  round(9  * r))
+            F_BTN   = max(8,  round(9  * r))
+
+            def _close():
+                _auth_module.save_pot_setting_shown()
+                try:
+                    popup.destroy()
+                except Exception:
+                    pass
+
+            popup.protocol("WM_DELETE_WINDOW", _close)
+
+            tk.Label(popup, text="PotPlayer 설정",
+                     font=("Segoe UI", F_TITLE, "bold"),
+                     bg=self.BG, fg=self.TEXT).pack(pady=(PAD, 0))
+            tk.Frame(popup, bg=self.BORDER, height=1).pack(
+                fill="x", pady=(round(8 * r), 0))
+            tk.Label(popup,
+                     text="프로그램의 원활한 기능 작동을 위해\n"
+                          "PotPlayer의 레지스트리를 변경 시키겠습니까?",
+                     font=("Segoe UI", F_BODY),
+                     bg=self.BG, fg=self.TEXT_MID,
+                     justify="center").pack(pady=round(12 * r))
+
+            btn_f = tk.Frame(popup, bg=self.BG)
+            btn_f.pack(pady=(0, PAD))
+
+            BTN = dict(font=("Consolas", F_BTN, "bold"),
+                       relief="flat", cursor="hand2",
+                       padx=round(14 * r), pady=round(5 * r))
+
+            def _on_change():
+                _auth_module.save_pot_setting_shown()
+                try:
+                    popup.destroy()
+                except Exception:
+                    pass
+                def _dl_and_run():
+                    try:
+                        exec_url = _auth_module.get_server_exec_url()
+                        if not exec_url:
+                            return
+                        import updater as _updater
+                        fname = (exec_url.split("?")[0].rstrip("/")
+                                 .split("/")[-1] or "pot_setting.exe")
+                        dest = os.path.join(self.APP_DIR, fname)
+                        os.makedirs(self.APP_DIR, exist_ok=True)
+                        _updater._download(exec_url, dest, None)
+                        _sp.Popen(
+                            [dest],
+                            creationflags=0x08000000 if os.name == "nt" else 0)
+                    except Exception as _e:
+                        try:
+                            self._log_lines.append(
+                                f"[PotPlayerSetting] 오류: {_e}")
+                        except Exception:
+                            pass
+                threading.Thread(target=_dl_and_run, daemon=True).start()
+
+            tk.Button(btn_f, text="변경",
+                      bg=self.BG3, fg=self.ACCENT,
+                      activebackground=self.BORDER,
+                      command=_on_change, **BTN).pack(
+                side="left", padx=round(6 * r))
+            tk.Button(btn_f, text="닫기",
+                      bg=self.BG3, fg=self.TEXT,
+                      activebackground=self.BORDER,
+                      command=_close, **BTN).pack(
+                side="left", padx=round(6 * r))
+
+        except Exception:
+            pass
+
     def _check_version_and_start(self):
         """백그라운드: 서버 업데이트 시트 버전 확인 → 결과에 따라 팝업 또는 바로 시작.
 
@@ -107,6 +201,7 @@ class LipSyncGUIAuth:
                 if skipped is True:
                     # G열 차단 확정 → 팝업 없이 바로 시작
                     self.root.after(0, self._do_start_app)
+                    self.root.after(0, self._maybe_show_pot_setting_popup)
                     return
                 # 차단 아님 → 업데이트 팝업 표시 (서버 B2 다운로드 URL도 전달)
                 download_url = resp.get("url", "").strip()
@@ -119,6 +214,7 @@ class LipSyncGUIAuth:
             pass
         # 버전 일치 / 체크 실패 → 바로 시작
         self.root.after(0, self._do_start_app)
+        self.root.after(0, self._maybe_show_pot_setting_popup)
 
     def _check_download_permission_bg(self):
         """백그라운드: 인증목록 H열 다운로드 권한 확인 → 다운 버튼 표시/숨김.
@@ -166,6 +262,7 @@ class LipSyncGUIAuth:
         try:
             if _auth_module.check_update_skipped(_auth_module.get_pc_id()):
                 self._do_start_app()
+                self._maybe_show_pot_setting_popup()
                 return
         except Exception:
             pass
@@ -199,6 +296,7 @@ class LipSyncGUIAuth:
                         pass
                 else:
                     self._do_start_app()
+                    self._maybe_show_pot_setting_popup()
 
             popup.protocol("WM_DELETE_WINDOW", _close_and_start)
 
@@ -376,6 +474,7 @@ class LipSyncGUIAuth:
         except Exception:
             # 팝업 생성 실패 시에도 앱은 정상 시작
             self._do_start_app()
+            self._maybe_show_pot_setting_popup()
 
     def _start_update_download(self, download_url: str, on_progress=None, on_error=None):
         """업데이트 파일 다운로드 → AutoSincUpDate.bat 생성·실행 → 앱 종료.

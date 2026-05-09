@@ -489,6 +489,49 @@ class LipSyncGUILayout:
             bg="BG3", fg="ACCENT2", abg="BORDER")
         # pack() 하지 않음 — _dl_stop_btn_show() 에서 표시
 
+        # 영상 / 영상+자막 토글 버튼
+        self._link_subtitle_var = tk.StringVar(value="video")
+
+        def _make_sub_toggle(text, val):
+            def _cmd():
+                self._link_subtitle_var.set(val)
+                _refresh_sub_btns()
+            btn = reg(
+                tk.Button(btn_row, text=text,
+                          bg=self.BG3, fg=self.TEXT_DIM,
+                          activebackground=self.BORDER,
+                          command=_cmd, **BTN_S),
+                bg="BG3", fg="TEXT_DIM", abg="BORDER")
+            return btn
+
+        self._link_sub_video_btn = _make_sub_toggle("영상", "video")
+        self._link_sub_both_btn  = _make_sub_toggle("영상+자막", "both")
+
+        def _refresh_sub_btns():
+            val = self._link_subtitle_var.get()
+            try:
+                if val == "video":
+                    self._link_sub_video_btn.config(
+                        fg=self.ACCENT, relief="solid", bd=1)
+                    self._link_sub_both_btn.config(
+                        fg=self.TEXT_DIM, relief="flat", bd=0)
+                else:
+                    self._link_sub_video_btn.config(
+                        fg=self.TEXT_DIM, relief="flat", bd=0)
+                    self._link_sub_both_btn.config(
+                        fg=self.ACCENT, relief="solid", bd=1)
+            except Exception:
+                pass
+
+        # 초기 상태 반영
+        _refresh_sub_btns()
+
+        self._link_sub_video_btn.pack(side="left", padx=(round(8*r), 0))
+        self._link_sub_both_btn.pack(side="left",  padx=(round(2*r), 0))
+        # 토글 버튼 pack 복원용 kw
+        self._link_sub_video_btn_pack_kw = dict(side="left", padx=(round(8*r), 0))
+        self._link_sub_both_btn_pack_kw  = dict(side="left", padx=(round(2*r), 0))
+
         # 상태 레이블
         self._link_status_lbl = reg(
             tk.Label(_play_page, text="URL을 입력하고 재생 버튼을 클릭하세요.",

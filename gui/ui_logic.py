@@ -818,12 +818,12 @@ class LipSyncGUILogic:
         found = shutil.which("ffmpeg")
         if found:
             self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ ffmpeg (PATH): {found}")
-            return found
+            return self._verify_ffmpeg(found)
 
         local = self._ffmpeg_path()
         if os.path.isfile(local):
             self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ ffmpeg (로컬): {local}")
-            return local
+            return self._verify_ffmpeg(local)
 
         # zip 다운로드 후 ffmpeg.exe 만 추출
         self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ⬇ ffmpeg 다운로드 시작")
@@ -848,7 +848,41 @@ class LipSyncGUILogic:
             except Exception: pass
 
         self._log_lines.append(f"[{_time.strftime('%H:%M:%S')}] ✅ ffmpeg 설치 완료: {local}")
-        return local
+        return self._verify_ffmpeg(local)
+
+    def _verify_ffmpeg(self, ffmpeg_path: str) -> str:
+        """ffmpeg 가 실제로 실행 가능한지 확인한다.
+
+        ffmpeg -version 을 실행해 버전 문자열이 반환되면 정상.
+        실패 시 RuntimeError 를 발생시켜 다운로드 체인을 즉시 중단한다.
+        (경로는 있는데 실행 안 되는 경우 — 손상된 바이너리, 권한 오류 등)
+        """
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+        try:
+            _r = subprocess.run(
+                [ffmpeg_path, "-version"],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",  # cp949 오류 방지
+                timeout=10,
+                creationflags=0x08000000 if os.name == "nt" else 0)
+            if _r.returncode == 0:
+                _ver = _r.stdout.splitlines()[0] if _r.stdout else "?"
+                self._log_lines.append(
+                    f"[{_time.strftime('%H:%M:%S')}] ✅ ffmpeg 검증 OK: {_ver}")
+                return ffmpeg_path
+            else:
+                raise RuntimeError(
+                    f"ffmpeg 실행 실패 (returncode={_r.returncode}): "
+                    f"{_r.stderr.strip()[:200]}")
+        except FileNotFoundError:
+            raise RuntimeError(f"ffmpeg 실행파일을 찾을 수 없습니다: {ffmpeg_path}")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("ffmpeg -version 타임아웃 (10초 초과)")
+        except RuntimeError:
+            raise
+        except Exception as _e:
+            raise RuntimeError(f"ffmpeg 검증 중 오류: {_e}") from _e
 
     # ── N_m3u8DL-RE ──────────────────────────────────────────────────────────
 
@@ -2057,11 +2091,22 @@ class LipSyncGUILogic:
                                     extra_headers: dict | None = None) -> int:
                     """N_m3u8DL-RE 로 target_url 을 다운로드한다.
                     extra_headers: {"referer": str, "cookies": str} 형태로 전달
-                    반환: returncode (int)"""
+                    반환: returncode (int)
+
+                    [버그 수정] N_m3u8DL-RE 는 HLS 를 기본적으로 .ts 로 저장한다.
+                    다운로드 완료 후 dl_dir 에서 새로 생긴 .ts 파일을 찾아
+                    ffmpeg 로 .mp4 로 변환하고 원본 .ts 를 삭제한다.
+                    """
                     if not _nm3u8dl_re_exe:
                         self._log_lines.append(
                             f"[{_time.strftime('%H:%M:%S')}] ⚠ N_m3u8DL-RE 없음 — 폴백 불가")
                         return 1
+
+                    # 다운로드 전 dl_dir 의 .ts 파일 목록을 스냅샷
+                    import glob as _glob
+                    _ts_before = set(
+                        _glob.glob(os.path.join(dl_dir, "**", "*.ts"), recursive=True))
+
                     _nc = [
                         _nm3u8dl_re_exe, target_url,
                         "--save-dir", dl_dir,
@@ -2091,7 +2136,70 @@ class LipSyncGUILogic:
                                 0, lambda p=_npct: self._dl_progress_update(p))
                     _np.wait()
                     self._link_save_proc = None
-                    return _np.returncode
+                    _rc_nm = _np.returncode
+
+                    if _rc_nm != 0 or getattr(self, "_link_save_cancelled", False):
+                        return _rc_nm
+
+                    # ── 다운로드 후 새로 생긴 .ts 파일 → .mp4 변환 ──────────
+                    # N_m3u8DL-RE 가 .ts 로 저장했을 경우 ffmpeg 로 컨테이너 변환
+                    _ts_after = set(
+                        _glob.glob(os.path.join(dl_dir, "**", "*.ts"), recursive=True))
+                    _new_ts = _ts_after - _ts_before
+
+                    if not _new_ts:
+                        # .ts 파일이 새로 생기지 않았으면 이미 mp4 등으로 저장된 것
+                        return _rc_nm
+
+                    self.root.after(0, lambda: self._link_status(
+                        "⏳ N_m3u8DL-RE 완료 → .ts → .mp4 변환 중…"))
+                    _all_converted = True
+                    for _ts_path in sorted(_new_ts):
+                        if getattr(self, "_link_save_cancelled", False):
+                            break
+                        _mp4_path = os.path.splitext(_ts_path)[0] + ".mp4"
+                        self._log_lines.append(
+                            f"[{_time.strftime('%H:%M:%S')}] 🔀 .ts → .mp4: "
+                            f"{os.path.basename(_ts_path)}")
+                        try:
+                            _conv = subprocess.run(
+                                [
+                                    ffmpeg,
+                                    "-y",                    # 덮어쓰기 허용
+                                    "-i", _ts_path,
+                                    "-c", "copy",            # 재인코딩 없이 컨테이너만 변환
+                                    "-movflags", "+faststart",  # 스트리밍 최적화
+                                    _mp4_path,
+                                ],
+                                capture_output=True, text=True,
+                                encoding="utf-8", errors="replace",  # cp949 오류 방지
+                                timeout=600,
+                                creationflags=0x08000000 if os.name == "nt" else 0)
+                            if _conv.returncode == 0:
+                                try:
+                                    os.remove(_ts_path)  # 원본 .ts 삭제
+                                except Exception:
+                                    pass
+                                self._log_lines.append(
+                                    f"[{_time.strftime('%H:%M:%S')}] ✅ 변환 완료: "
+                                    f"{os.path.basename(_mp4_path)}")
+                            else:
+                                _all_converted = False
+                                self._log_lines.append(
+                                    f"[{_time.strftime('%H:%M:%S')}] ❌ 변환 실패: "
+                                    f"{os.path.basename(_ts_path)} — "
+                                    f"{_conv.stderr.strip()[:100]}")
+                        except subprocess.TimeoutExpired:
+                            _all_converted = False
+                            self._log_lines.append(
+                                f"[{_time.strftime('%H:%M:%S')}] ❌ 변환 타임아웃: "
+                                f"{os.path.basename(_ts_path)}")
+                        except Exception as _ce:
+                            _all_converted = False
+                            self._log_lines.append(
+                                f"[{_time.strftime('%H:%M:%S')}] ❌ 변환 오류: {_ce}")
+
+                    return 0 if _all_converted else 1
 
                 # ══ 4단계 폴백 체인 ══════════════════════════════════════════
                 # 단계 1 결과(_rc)는 위에서 이미 구함.
@@ -2183,7 +2291,20 @@ class LipSyncGUILogic:
                             "--no-warnings",
                             "-f", "bestvideo+bestaudio/best",
                             "--merge-output-format", "mp4",
-                            "--ffmpeg-location", ffmpeg,
+                            # [버그 수정] ffmpeg.exe 경로가 아닌 폴더 경로를 넘겨야 함
+                            # (1~4단계와 동일하게 os.path.dirname 적용)
+                            "--ffmpeg-location", os.path.dirname(ffmpeg),
+                            "--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k",
+                            # [개선] 병렬 수를 4로 낮춰 CDN 토큰 만료 방지
+                            # (8이면 뒤쪽 세그먼트 URL이 만료될 수 있음)
+                            "-N", "4",
+                            "--concurrent-fragments", "4",
+                            # [개선] 세그먼트 실패 시 재시도 (네트워크 순단 대응)
+                            "--retries", "10",
+                            "--fragment-retries", "10",
+                            "--sleep-interval", "0",
+                            "--max-sleep-interval", "0",
+                            "--newline",
                             "-o", os.path.join(dl_dir, "%(title)s.%(ext)s"),
                         ]
                         if _pw_hdrs.get("referer"):

@@ -84,7 +84,10 @@ class LipSyncGUIAuth:
         self._show_pot_setting_popup()
 
     def _show_pot_setting_popup(self):
-        """PotPlayer 레지스트리 변경 안내 팝업."""
+        """PotPlayer 레지스트리 변경 안내 팝업.
+        변경 버튼 클릭 시 5가지 작업을 병렬로 실행하고
+        진행 상황을 팝업에 표시한 뒤 완료되면 자동으로 닫는다.
+        """
         import os, subprocess as _sp
         try:
             popup = tk.Toplevel(self.root)
@@ -94,12 +97,13 @@ class LipSyncGUIAuth:
             popup.grab_set()
 
             r       = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
-            self._place_popup(popup, round(340 * r), round(160 * r))
-
             PAD     = round(10 * r)
             F_TITLE = max(9,  round(11 * r))
             F_BODY  = max(8,  round(9  * r))
             F_BTN   = max(8,  round(9  * r))
+            F_LOG   = max(7,  round(8  * r))
+
+            self._place_popup(popup, round(400 * r), round(200 * r))
 
             def _close():
                 _auth_module.save_pot_setting_shown()
@@ -120,7 +124,39 @@ class LipSyncGUIAuth:
                           "PotPlayer의 레지스트리를 변경 시키겠습니까?",
                      font=("Segoe UI", F_BODY),
                      bg=self.BG, fg=self.TEXT_MID,
-                     justify="center").pack(pady=round(12 * r))
+                     justify="center").pack(pady=round(10 * r))
+
+            # ── 진행 상황 표시 프레임 (변경 클릭 전에는 숨김) ──────────
+            prog_frame = tk.Frame(popup, bg=self.BG)
+            prog_labels: dict[str, tk.Label] = {}
+
+            TASKS = [
+                ("extension",  "Extension (.as)"),
+                ("ytdlp_mod",  "PotPlayer yt-dlp.exe"),
+                ("ffmpeg",     "ffmpeg.exe"),
+                ("nm3u8",      "N_m3u8DL-RE.exe"),
+                ("ytdlp",      "yt-dlp.exe"),
+            ]
+            for key, name in TASKS:
+                row = tk.Frame(prog_frame, bg=self.BG)
+                row.pack(fill="x", padx=PAD, pady=round(1 * r))
+                tk.Label(row, text=f"  {name}",
+                         font=("Segoe UI", F_LOG),
+                         bg=self.BG, fg=self.TEXT_DIM,
+                         width=24, anchor="w").pack(side="left")
+                lbl = tk.Label(row, text="대기 중",
+                               font=("Segoe UI", F_LOG),
+                               bg=self.BG, fg=self.TEXT_DIM)
+                lbl.pack(side="left")
+                prog_labels[key] = lbl
+
+            def _set_status(key: str, text: str, color: str | None = None):
+                lbl = prog_labels.get(key)
+                if lbl:
+                    c = color or self.TEXT_DIM
+                    popup.after(0, lambda l=lbl, t=text, cc=c:
+                                (l.config(text=t, fg=cc)
+                                 if l.winfo_exists() else None))
 
             btn_f = tk.Frame(popup, bg=self.BG)
             btn_f.pack(pady=(0, PAD))
@@ -129,44 +165,117 @@ class LipSyncGUIAuth:
                        relief="flat", cursor="hand2",
                        padx=round(14 * r), pady=round(5 * r))
 
-            def _on_change():
-                _auth_module.save_pot_setting_shown()
-                try:
-                    popup.destroy()
-                except Exception:
-                    pass
-                def _dl_and_run():
-                    try:
-                        exec_url = _auth_module.get_server_exec_url()
-                        if not exec_url:
-                            return
-                        import updater as _updater
-                        fname = (exec_url.split("?")[0].rstrip("/")
-                                 .split("/")[-1] or "pot_setting.exe")
-                        dest = os.path.join(self.APP_DIR, fname)
-                        os.makedirs(self.APP_DIR, exist_ok=True)
-                        _updater._download(exec_url, dest, None)
-                        _sp.Popen(
-                            [dest],
-                            creationflags=0x08000000 if os.name == "nt" else 0)
-                    except Exception as _e:
-                        try:
-                            self._log_lines.append(
-                                f"[PotPlayerSetting] 오류: {_e}")
-                        except Exception:
-                            pass
-                threading.Thread(target=_dl_and_run, daemon=True).start()
+            change_btn = tk.Button(btn_f, text="변경",
+                                   bg=self.BG3, fg=self.ACCENT,
+                                   activebackground=self.BORDER,
+                                   **BTN)
+            change_btn.pack(side="left", padx=round(6 * r))
+            close_btn  = tk.Button(btn_f, text="닫기",
+                                   bg=self.BG3, fg=self.TEXT,
+                                   activebackground=self.BORDER,
+                                   command=_close, **BTN)
+            close_btn.pack(side="left", padx=round(6 * r))
 
-            tk.Button(btn_f, text="변경",
-                      bg=self.BG3, fg=self.ACCENT,
-                      activebackground=self.BORDER,
-                      command=_on_change, **BTN).pack(
-                side="left", padx=round(6 * r))
-            tk.Button(btn_f, text="닫기",
-                      bg=self.BG3, fg=self.TEXT,
-                      activebackground=self.BORDER,
-                      command=_close, **BTN).pack(
-                side="left", padx=round(6 * r))
+            def _on_change():
+                # 버튼 비활성화 + X 버튼도 비활성화
+                change_btn.config(state="disabled")
+                close_btn.config(state="disabled")
+                popup.protocol("WM_DELETE_WINDOW", lambda: None)
+                popup.after(0, lambda: (
+                    prog_frame.pack(fill="x",
+                                    before=btn_f,
+                                    pady=(0, round(6 * r))),
+                    self._place_popup(popup,
+                                      round(400 * r),
+                                      round(200 * r + len(TASKS) * round(18 * r))),
+                ))
+
+                def _worker():
+                    import concurrent.futures as _cf
+
+                    # pot_dir 는 extension / ytdlp_mod 에 필요
+                    pot_dir = self._get_potplayer_dir() if hasattr(
+                        self, "_get_potplayer_dir") else ""
+
+                    def _run_extension():
+                        _set_status("extension", "설치 중…", self.ACCENT3)
+                        try:
+                            if pot_dir:
+                                self._bg_ensure_potplayer_extension(pot_dir)
+                            _set_status("extension", "✅ 완료", self.ACCENT3)
+                        except Exception as _e:
+                            _set_status("extension", f"❌ 실패: {_e}", self.ACCENT2)
+
+                    def _run_ytdlp_mod():
+                        _set_status("ytdlp_mod", "설치 중…", self.ACCENT3)
+                        try:
+                            if pot_dir:
+                                self._bg_ensure_potplayer_ytdlp(pot_dir)
+                            _set_status("ytdlp_mod", "✅ 완료", self.ACCENT3)
+                        except Exception as _e:
+                            _set_status("ytdlp_mod", f"❌ 실패: {_e}", self.ACCENT2)
+
+                    def _run_ffmpeg():
+                        _set_status("ffmpeg", "다운로드 중…", self.ACCENT3)
+                        try:
+                            self._ensure_ffmpeg()
+                            _set_status("ffmpeg", "✅ 완료", self.ACCENT3)
+                        except Exception as _e:
+                            _set_status("ffmpeg", f"❌ 실패: {_e}", self.ACCENT2)
+
+                    def _run_nm3u8():
+                        _set_status("nm3u8", "다운로드 중…", self.ACCENT3)
+                        try:
+                            self._ensure_nm3u8dl_re()
+                            _set_status("nm3u8", "✅ 완료", self.ACCENT3)
+                        except Exception as _e:
+                            _set_status("nm3u8", f"❌ 실패: {_e}", self.ACCENT2)
+
+                    def _run_ytdlp():
+                        _set_status("ytdlp", "다운로드 중…", self.ACCENT3)
+                        try:
+                            self._ensure_ytdlp()
+                            _set_status("ytdlp", "✅ 완료", self.ACCENT3)
+                        except Exception as _e:
+                            _set_status("ytdlp", f"❌ 실패: {_e}", self.ACCENT2)
+
+                    # B4 실행파일 다운로드 + 실행
+                    def _run_b4():
+                        try:
+                            exec_url = _auth_module.get_server_exec_url()
+                            if not exec_url:
+                                return
+                            import updater as _updater
+                            fname = (exec_url.split("?")[0].rstrip("/")
+                                     .split("/")[-1] or "pot_setting.exe")
+                            dest = os.path.join(self.APP_DIR, fname)
+                            os.makedirs(self.APP_DIR, exist_ok=True)
+                            _updater._download(exec_url, dest, None)
+                            _sp.Popen(
+                                [dest],
+                                creationflags=0x08000000 if os.name == "nt" else 0)
+                        except Exception as _e:
+                            try:
+                                self._log_lines.append(
+                                    f"[PotPlayerSetting] B4 오류: {_e}")
+                            except Exception:
+                                pass
+
+                    with _cf.ThreadPoolExecutor(max_workers=5) as _pool:
+                        _pool.submit(_run_extension)
+                        _pool.submit(_run_ytdlp_mod)
+                        _pool.submit(_run_ffmpeg)
+                        _pool.submit(_run_nm3u8)
+                        _pool.submit(_run_ytdlp)
+
+                    # 모든 설치 완료 후 B4 실행 + 팝업 닫기
+                    threading.Thread(target=_run_b4, daemon=True).start()
+                    _auth_module.save_pot_setting_shown()
+                    popup.after(800, _close)
+
+                threading.Thread(target=_worker, daemon=True).start()
+
+            change_btn.config(command=_on_change)
 
         except Exception:
             pass

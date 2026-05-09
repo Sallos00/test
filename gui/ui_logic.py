@@ -322,14 +322,33 @@ class LipSyncGUILogic:
                     f"platform={'soop' if is_soop else 'general'}")
 
                 if is_soop:
-                    # Soop: yt-dlp로 스트림 URL 추출
-                    self._link_status("⏳ Soop 영상 정보 추출 중…")
-                    play_url, real_title = self._fetch_soop_play_info(url)
-                    # _fetch_soop_play_info 실패 시 play_url == url(원본) → fallback 로그는 내부 기록
+                    # Soop: CDP(실제 Chrome)로 m3u8 URL + 제목 추출
+                    self._link_status("⏳ Soop m3u8 감지 중 (CDP)…")
+                    try:
+                        self._ensure_playwright()
+                        _cdp_result = self._extract_m3u8_playwright(url)
+                    except Exception as _cdp_e:
+                        _cdp_result = None
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ Soop CDP 준비 실패: {_cdp_e}")
+
+                    if _cdp_result and _cdp_result.get("url"):
+                        play_url   = _cdp_result["url"]
+                        real_title = _cdp_result.get("title", "")
+                        self._log_lines.append(
+                            f"[{ts}] ✅ Soop CDP m3u8 감지: {play_url[:80]} "
+                            f"| 제목={real_title!r}")
+                    else:
+                        # CDP 실패 시 원본 URL fallback
+                        play_url   = url
+                        real_title = self._fetch_page_title(url)
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ Soop CDP 실패 → 원본 URL fallback")
                 else:
                     # 유튜브·치지직·페이스북·일반 URL 등: 원본 URL 그대로 PotPlayer에 전달
                     play_url   = url
-                    real_title = ""
+                    # CDP 저장 방식과 동일하게 og:title → twitter:title → <title> 순으로 제목 추출
+                    real_title = self._fetch_page_title(url)
                     self._log_lines.append(
                         f"[{ts}] 🔗 일반 URL 직접 전달 (m3u8 추출 없음, fallback 없음)")
 
@@ -1316,6 +1335,25 @@ class LipSyncGUILogic:
                 except Exception:
                     _cookies_list = []
 
+                # ── 페이지 제목 추출 ──────────────────────────────────────
+                # 앱의 onReceivedTitle 방식과 동일:
+                #   1순위: og:title 메타태그 (대부분의 동영상 사이트)
+                #   2순위: twitter:title 메타태그
+                #   3순위: document.title (브라우저 탭 제목)
+                _page_title = ""
+                try:
+                    _page_title = _page.evaluate("""() => {
+                        const og = document.querySelector(
+                            'meta[property="og:title"]');
+                        if (og && og.content) return og.content.trim();
+                        const tw = document.querySelector(
+                            'meta[name="twitter:title"]');
+                        if (tw && tw.content) return tw.content.trim();
+                        return document.title.trim();
+                    }""") or ""
+                except Exception:
+                    pass
+
                 try:
                     _browser.close()
                 except Exception:
@@ -1334,33 +1372,80 @@ class LipSyncGUILogic:
                     pass
 
         if _found_info:
-            # ── [개선2] 헤더 우선순위: 요청 헤더 > 페이지 쿠키 ──────────
-            # m3u8 요청 자체에 포함된 Cookie 헤더가 있으면 그것을 우선 사용.
-            # 없으면 페이지 context 쿠키를 조합해 사용.
             _req_hdrs    = _found_info.get("req_headers", {})
             _req_cookie  = _req_hdrs.get("cookie", "")
             _page_cookie = "; ".join(
                 f"{c['name']}={c['value']}" for c in _cookies_list)
             _final_cookie = _req_cookie if _req_cookie else _page_cookie
-
-            # 요청 헤더에서 Referer 추출 (없으면 page_url 사용)
             _req_referer  = _req_hdrs.get("referer", "") or page_url
 
             self._log_lines.append(
                 f"[{_time.strftime('%H:%M:%S')}] 🔗 m3u8 감지 완료: "
                 f"{_found_info['url'][:80]} | "
-                f"쿠키={len(_cookies_list)}개 | "
-                f"req_referer={_req_referer[:40]}")
+                f"제목={_page_title[:30]!r} | "
+                f"쿠키={len(_cookies_list)}개")
             return {
                 "url":         _found_info["url"],
                 "referer":     _req_referer,
                 "cookies":     _final_cookie,
-                "req_headers": _req_hdrs,   # 다운로더가 필요 시 직접 참조 가능
+                "req_headers": _req_hdrs,
+                "title":       _page_title,   # 페이지에서 추출한 동영상 제목
             }
         return None
 
+    def _fetch_page_title(self, url: str) -> str:
+        """URL 페이지에서 CDP 저장 방식과 동일한 우선순위로 제목을 추출한다.
+        1순위: og:title 메타태그
+        2순위: twitter:title 메타태그
+        3순위: <title> 태그
+        실패하면 빈 문자열 반환.
+        """
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"),
+                    "Accept-Language": "ko-KR,ko;q=0.9",
+                })
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read(65536).decode("utf-8", errors="replace")
+
+            # 1순위: og:title
+            m = re.search(
+                r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+                raw, re.IGNORECASE)
+            if not m:
+                m = re.search(
+                    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+                    raw, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+
+            # 2순위: twitter:title
+            m = re.search(
+                r'<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)["\']',
+                raw, re.IGNORECASE)
+            if not m:
+                m = re.search(
+                    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:title["\']',
+                    raw, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+
+            # 3순위: <title>
+            m = re.search(r'<title[^>]*>([^<]+)</title>', raw, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+        except Exception:
+            pass
+        return ""
+
     def _dl_stop_btn_show(self):
-        """저장 중지 버튼 표시."""
+        """저장 중지 버튼 표시 + 자막 토글 버튼을 중지 버튼 오른쪽으로 이동."""
         btn = getattr(self, "_link_stop_btn", None)
         if btn:
             try:
@@ -1368,15 +1453,41 @@ class LipSyncGUILogic:
                 btn.pack(side="left", padx=(round(4*r), 0))
             except Exception:
                 pass
+        # 토글 버튼을 중지 버튼 뒤로 이동 (pack 순서 재배치)
+        for _attr, _kw_attr in (
+            ("_link_sub_video_btn", "_link_sub_video_btn_pack_kw"),
+            ("_link_sub_both_btn",  "_link_sub_both_btn_pack_kw"),
+        ):
+            _b  = getattr(self, _attr, None)
+            _kw = getattr(self, _kw_attr, dict(side="left"))
+            if _b:
+                try:
+                    _b.pack_forget()
+                    _b.pack(**_kw)
+                except Exception:
+                    pass
 
     def _dl_stop_btn_hide(self):
-        """저장 중지 버튼 숨기기."""
+        """저장 중지 버튼 숨기기 + 자막 토글 버튼 위치 원상복구."""
         btn = getattr(self, "_link_stop_btn", None)
         if btn:
             try:
                 btn.pack_forget()
             except Exception:
                 pass
+        # 토글 버튼 pack 순서 원상복구 (저장 버튼 뒤 위치 유지 — pack_forget 후 재pack)
+        for _attr, _kw_attr in (
+            ("_link_sub_video_btn", "_link_sub_video_btn_pack_kw"),
+            ("_link_sub_both_btn",  "_link_sub_both_btn_pack_kw"),
+        ):
+            _b  = getattr(self, _attr, None)
+            _kw = getattr(self, _kw_attr, dict(side="left"))
+            if _b:
+                try:
+                    _b.pack_forget()
+                    _b.pack(**_kw)
+                except Exception:
+                    pass
 
     def _link_save_cancel(self):
         """중지 버튼 콜백 — 진행 중인 저장을 즉시 중단하고 잔여 파일을 정리한다.
@@ -1548,6 +1659,12 @@ class LipSyncGUILogic:
         """
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
+
+        # 자막 포함 여부 (영상+자막 선택 시 True)
+        _save_with_sub = (
+            getattr(self, "_link_subtitle_var", None) is not None
+            and self._link_subtitle_var.get() == "both"
+        )
 
         url = getattr(self, "_link_url_var", tk.StringVar()).get().strip()
         if not url:
@@ -1981,10 +2098,15 @@ class LipSyncGUILogic:
                     return (0 if all_ok else 1), []
 
                 # ── 1차 실행 ─────────────────────────────────────────────────
+                self._log_lines.append(
+                    f"[{ts}] ▶ [1단계] yt-dlp 직접 다운로드 시도 | URL: {url}")
                 if _is_playlist:
                     _rc, _captured_lines = _playlist_parallel_dl()
                 else:
                     _rc, _captured_lines = _exec_ytdlp(cmd)
+
+                self._log_lines.append(
+                    f"[{ts}] {'✅ [1단계] yt-dlp 성공' if _rc == 0 else f'⚠ [1단계] yt-dlp 실패 (rc={_rc}) → 2단계로'}")
 
                 # ── 취소된 경우 → _link_save_cancel 이 파일 정리를 담당하므로 여기서 종료
                 if getattr(self, "_link_save_cancelled", False):
@@ -2094,14 +2216,11 @@ class LipSyncGUILogic:
 
                 # ── N_m3u8DL-RE 실행 헬퍼 ───────────────────────────────────
                 def _exec_nm3u8dl_re(target_url: str,
-                                    extra_headers: dict | None = None) -> int:
+                                    extra_headers: dict | None = None,
+                                    save_name: str | None = None) -> int:
                     """N_m3u8DL-RE 로 target_url 을 다운로드한다.
-                    extra_headers: {"referer": str, "cookies": str} 형태로 전달
-                    반환: returncode (int)
-
-                    [버그 수정] N_m3u8DL-RE 는 HLS 를 기본적으로 .ts 로 저장한다.
-                    다운로드 완료 후 dl_dir 에서 새로 생긴 .ts 파일을 찾아
-                    ffmpeg 로 .mp4 로 변환하고 원본 .ts 를 삭제한다.
+                    extra_headers : {"referer": str, "cookies": str}
+                    save_name     : 저장 파일명 (확장자 제외). None 이면 자동 결정.
                     """
                     if not _nm3u8dl_re_exe:
                         self._log_lines.append(
@@ -2119,6 +2238,8 @@ class LipSyncGUILogic:
                         "--auto-select",
                         "--no-log",
                     ]
+                    if save_name:
+                        _nc += ["--save-name", save_name]
                     if extra_headers:
                         if extra_headers.get("referer"):
                             _nc += ["--header", f"Referer:{extra_headers['referer']}"]
@@ -2163,7 +2284,16 @@ class LipSyncGUILogic:
                     for _ts_path in sorted(_new_ts):
                         if getattr(self, "_link_save_cancelled", False):
                             break
-                        _mp4_path = os.path.splitext(_ts_path)[0] + ".mp4"
+                        # save_name 이 있으면 그 이름으로, 없으면 원본 .ts 이름 유지
+                        if save_name:
+                            _mp4_path = os.path.join(dl_dir, f"{save_name}.mp4")
+                            # 동명 파일이 이미 있으면 타임스탬프 추가
+                            if os.path.exists(_mp4_path):
+                                _sfx = _time.strftime("%Y%m%d_%H%M%S")
+                                _mp4_path = os.path.join(
+                                    dl_dir, f"{save_name}_{_sfx}.mp4")
+                        else:
+                            _mp4_path = os.path.splitext(_ts_path)[0] + ".mp4"
                         self._log_lines.append(
                             f"[{_time.strftime('%H:%M:%S')}] 🔀 .ts → .mp4: "
                             f"{os.path.basename(_ts_path)}")
@@ -2228,8 +2358,8 @@ class LipSyncGUILogic:
                             f"[{ts}] ❌ [2단계] Playwright 준비 실패: {_pwe}")
 
                     if _pw_result:
-                        _pw_m3u8 = _pw_result["url"]
-                        _pw_hdrs = {
+                        _pw_m3u8  = _pw_result["url"]
+                        _pw_hdrs  = {
                             "referer": _pw_result["referer"],
                             "cookies": _pw_result["cookies"],
                         }
@@ -2242,15 +2372,40 @@ class LipSyncGUILogic:
                             if _rh_summary:
                                 self._log_lines.append(
                                     f"[{ts}] 📋 [2단계] 캡처된 요청 헤더: {_rh_summary}")
+
+                        # ── 페이지 제목 → 안전한 파일명으로 변환 ──────────
+                        # 앱의 onReceivedTitle 과 동일한 방식으로 추출한 제목을
+                        # Windows/Linux 파일명으로 쓸 수 있게 정제한다.
+                        _raw_title = _pw_result.get("title", "").strip()
+
+                        def _safe_filename(t: str, max_len: int = 120) -> str:
+                            """제목 문자열을 파일명으로 쓸 수 있게 정제한다.
+                            - Windows 금지 문자 제거
+                            - 앞뒤 공백·점 제거
+                            - 최대 길이 제한
+                            - 비어있으면 타임스탬프 반환
+                            """
+                            if not t:
+                                return f"master_{_time.strftime('%Y%m%d_%H%M%S')}"
+                            # Windows 파일명 금지 문자 제거
+                            t = re.sub(r'[\\/:*?"<>|]', '', t)
+                            # 연속 공백 → 단일 공백
+                            t = re.sub(r'\s+', ' ', t).strip(' .')
+                            return t[:max_len] if t else \
+                                f"master_{_time.strftime('%Y%m%d_%H%M%S')}"
+
+                        _safe_title = _safe_filename(_raw_title)
                         self._log_lines.append(
-                            f"[{ts}] 🔗 [2단계] m3u8 감지: {_pw_m3u8[:80]}")
+                            f"[{ts}] 🔗 [2단계] m3u8 감지: {_pw_m3u8[:80]} "
+                            f"| 제목: {_safe_title[:40]!r}")
 
                         # ── 2-a: N_m3u8DL-RE 다운로드 ────────────────────
                         self.root.after(0, lambda: self._link_status(
                             "⏳ m3u8 감지 완료 → N_m3u8DL-RE로 다운로드 중…"))
                         self._log_lines.append(
                             f"[{ts}] ▶ [2-a] N_m3u8DL-RE 시도")
-                        _final_rc   = _exec_nm3u8dl_re(_pw_m3u8, _pw_hdrs)
+                        _final_rc   = _exec_nm3u8dl_re(
+                            _pw_m3u8, _pw_hdrs, save_name=_safe_title)
                         _final_step = "CDP+N_m3u8DL-RE"
 
                         # ── 2-b: N_m3u8DL-RE 실패 시 yt-dlp 폴백 ─────────
@@ -2260,6 +2415,12 @@ class LipSyncGUILogic:
                                 "⏳ N_m3u8DL-RE 실패 → yt-dlp로 재시도 중…"))
                             self._log_lines.append(
                                 f"[{ts}] ⚠ [2-b] N_m3u8DL-RE 실패 → yt-dlp 폴백")
+                            # 제목을 알고 있으면 고정 파일명 사용,
+                            # 없으면 yt-dlp 가 스스로 제목을 추출하도록 %(title)s 템플릿
+                            _yt_out = os.path.join(
+                                dl_dir,
+                                f"{_safe_title}.%(ext)s" if _raw_title
+                                else "%(title)s.%(ext)s")
                             _pw_cmd = [
                                 ytdlp,
                                 "--no-warnings",
@@ -2275,7 +2436,7 @@ class LipSyncGUILogic:
                                 "--sleep-interval", "0",
                                 "--max-sleep-interval", "0",
                                 "--newline",
-                                "-o", os.path.join(dl_dir, "%(title)s.%(ext)s"),
+                                "-o", _yt_out,
                             ]
                             if _pw_hdrs.get("referer"):
                                 _pw_cmd += ["--add-header",
@@ -2286,6 +2447,114 @@ class LipSyncGUILogic:
                             _pw_cmd.append(_pw_m3u8)
                             _final_rc, _ = _exec_ytdlp(_pw_cmd)
                             _final_step  = "CDP+yt-dlp"
+
+                        # ── 2-c: yt-dlp 실패 시 ffmpeg 폴백 ──────────────
+                        if (_final_rc != 0
+                                and not getattr(self, "_link_save_cancelled", False)):
+                            self.root.after(0, lambda: self._link_status(
+                                "⏳ yt-dlp 실패 → ffmpeg로 재시도 중…"))
+                            self._log_lines.append(
+                                f"[{ts}] ⚠ [2-c] yt-dlp 실패 → ffmpeg 폴백")
+
+                            # 제목을 파일명으로 사용, 이미 존재하면 타임스탬프 추가
+                            _out_mp4 = os.path.join(dl_dir, f"{_safe_title}.mp4")
+                            if os.path.exists(_out_mp4):
+                                _suffix  = _time.strftime("%Y%m%d_%H%M%S")
+                                _out_mp4 = os.path.join(
+                                    dl_dir,
+                                    f"{_safe_title}_{_suffix}.mp4")
+
+                            _hdr_str = ""
+                            if _pw_hdrs.get("referer"):
+                                _hdr_str += f"Referer: {_pw_hdrs['referer']}\r\n"
+                            if _pw_hdrs.get("cookies"):
+                                _hdr_str += f"Cookie: {_pw_hdrs['cookies']}\r\n"
+
+                            _ff_cmd = [ffmpeg, "-y"]
+                            if _hdr_str:
+                                _ff_cmd += ["-headers", _hdr_str]
+                            _ff_cmd += [
+                                "-reconnect", "1",
+                                "-reconnect_streamed", "1",
+                                "-reconnect_delay_max", "5",
+                                "-i", _pw_m3u8,
+                                "-c:v", "copy",
+                                "-c:a", "aac",
+                                "-b:a", "192k",
+                                "-movflags", "+faststart",
+                                "-progress", "pipe:1",
+                                "-nostats",
+                                _out_mp4,
+                            ]
+
+                            try:
+                                _ff_proc = subprocess.Popen(
+                                    _ff_cmd,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                    encoding="utf-8", errors="replace",
+                                    creationflags=0x08000000 if os.name == "nt" else 0)
+                                self._link_save_proc = _ff_proc
+
+                                _ff_err_lines = []
+                                def _drain_stderr():
+                                    for _el in _ff_proc.stderr:
+                                        _ff_err_lines.append(_el.rstrip())
+                                _drain_t = threading.Thread(
+                                    target=_drain_stderr, daemon=True,
+                                    name="ffmpeg-stderr-drain")
+                                _drain_t.start()
+
+                                for _fln in _ff_proc.stdout:
+                                    if getattr(self, "_link_save_cancelled", False):
+                                        _ff_proc.kill()
+                                        break
+                                    _fln = _fln.strip()
+                                    if _fln.startswith("total_size="):
+                                        try:
+                                            _mb = int(_fln.split("=", 1)[1]) / (1024*1024)
+                                            self.root.after(0, lambda m=_mb:
+                                                self._link_status(
+                                                    f"⏳ ffmpeg 다운로드 중… {m:.1f} MB"))
+                                            self.root.after(0, lambda:
+                                                self._dl_progress_update(50.0))
+                                        except ValueError:
+                                            pass
+                                    elif _fln == "progress=end":
+                                        self.root.after(0, lambda:
+                                            self._dl_progress_update(100.0))
+
+                                _ff_proc.wait()
+                                _drain_t.join(timeout=3)
+                                self._link_save_proc = None
+                                _final_rc   = _ff_proc.returncode
+                                _final_step = "CDP+ffmpeg"
+
+                                if _final_rc == 0:
+                                    self.root.after(0, lambda:
+                                        self._dl_progress_update(100.0))
+                                    self._log_lines.append(
+                                        f"[{ts}] ✅ [2-c] ffmpeg 완료: "
+                                        f"{os.path.basename(_out_mp4)}")
+                                else:
+                                    for _f in (_out_mp4, _out_mp4 + ".part"):
+                                        try:
+                                            if os.path.isfile(_f):
+                                                os.remove(_f)
+                                        except Exception:
+                                            pass
+                                    _err_tail = " | ".join(
+                                        _ff_err_lines[-3:]) if _ff_err_lines else ""
+                                    self._log_lines.append(
+                                        f"[{ts}] ❌ [2-c] ffmpeg 실패 "
+                                        f"(rc={_final_rc}): {_err_tail[:150]}")
+                            except Exception as _ffe:
+                                self._link_save_proc = None
+                                _final_rc   = 1
+                                _final_step = "CDP+ffmpeg"
+                                self._log_lines.append(
+                                    f"[{ts}] ❌ [2-c] ffmpeg 예외: {_ffe}")
                     else:
                         self._log_lines.append(
                             f"[{ts}] ⚠ [2단계] m3u8 감지 실패 — 모든 방법 소진")
@@ -2327,6 +2596,46 @@ class LipSyncGUILogic:
                     self.root.after(2500, self._dl_progress_hide)
                     self._log_lines.append(
                         f"[{ts}] ✅ 저장 완료 ({_final_step}) | 원본 URL: {url}")
+
+                    # ── 자막 다운로드 (영상+자막 선택 시) ───────────────────
+                    if _save_with_sub:
+                        def _dl_subtitle():
+                            try:
+                                self.root.after(0, lambda: self._link_status(
+                                    "⏳ 자막 다운로드 중…"))
+                                _sub_cmd = [
+                                    ytdlp,
+                                    "--no-warnings",
+                                    "--write-sub",
+                                    "--write-auto-sub",
+                                    "--sub-langs", "ko,ko-KR,en,en-US",
+                                    "--sub-format", "vtt/srt/best",
+                                    "--skip-download",
+                                    "-o", os.path.join(dl_dir, "%(title)s.%(ext)s"),
+                                    url,
+                                ]
+                                _sub_proc = subprocess.run(
+                                    _sub_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    encoding="utf-8", errors="replace",
+                                    timeout=60,
+                                    creationflags=0x08000000 if os.name == "nt" else 0,
+                                )
+                                if _sub_proc.returncode == 0:
+                                    self._log_lines.append(
+                                        f"[{ts}] ✅ 자막 다운로드 완료")
+                                    self.root.after(0, lambda: self._link_status(
+                                        f"✅ 저장+자막 완료 → {dl_dir}"))
+                                else:
+                                    self._log_lines.append(
+                                        f"[{ts}] ⚠ 자막 없음 또는 다운로드 실패")
+                                    self.root.after(0, lambda: self._link_status(
+                                        f"✅ 저장 완료 (자막 없음) → {dl_dir}"))
+                            except Exception as _se:
+                                self._log_lines.append(
+                                    f"[{ts}] ⚠ 자막 다운로드 예외: {_se}")
+                        threading.Thread(target=_dl_subtitle, daemon=True).start()
                 else:
                     if _is_facebook:
                         self.root.after(0, lambda: self._link_status(
@@ -2767,14 +3076,33 @@ class LipSyncGUILogic:
                     f"platform={'soop' if is_soop else 'general'}")
 
                 if is_soop:
-                    # Soop: yt-dlp로 스트림 URL 추출
-                    self._link_status("⏳ Soop 영상 정보 추출 중…")
-                    play_url, real_title = self._fetch_soop_play_info(url)
-                    # 실패 시 play_url == url(원본) → fallback 로그는 내부 기록
+                    # Soop: CDP(실제 Chrome)로 m3u8 URL + 제목 추출
+                    self._link_status("⏳ Soop m3u8 감지 중 (CDP)…")
+                    try:
+                        self._ensure_playwright()
+                        _cdp_result = self._extract_m3u8_playwright(url)
+                    except Exception as _cdp_e:
+                        _cdp_result = None
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ Soop CDP 준비 실패: {_cdp_e}")
+
+                    if _cdp_result and _cdp_result.get("url"):
+                        play_url   = _cdp_result["url"]
+                        real_title = _cdp_result.get("title", "")
+                        self._log_lines.append(
+                            f"[{ts}] ✅ Soop CDP m3u8 감지: {play_url[:80]} "
+                            f"| 제목={real_title!r}")
+                    else:
+                        # CDP 실패 시 원본 URL fallback
+                        play_url   = url
+                        real_title = self._fetch_page_title(url)
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ Soop CDP 실패 → 원본 URL fallback")
                 else:
                     # 유튜브·치지직·페이스북·일반 URL 등: 원본 URL 그대로 PotPlayer에 전달
                     play_url   = url
-                    real_title = ""
+                    # CDP 저장 방식과 동일하게 og:title → twitter:title → <title> 순으로 제목 추출
+                    real_title = self._fetch_page_title(url)
                     self._log_lines.append(
                         f"[{ts}] 🔗 일반 URL 직접 전달 (m3u8 추출 없음, fallback 없음)")
 

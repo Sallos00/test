@@ -231,7 +231,7 @@ class LipSyncGUIAuth:
             pass  # 오류 시 버튼 상태 그대로 유지
 
     def _apply_download_permission(self, perm: str):
-        """다운로드 권한에 따라 저장 버튼 표시/숨김 (UI 스레드에서 호출).
+        """다운로드 권한에 따라 저장 버튼 + 자막 토글 버튼 표시/숨김 (UI 스레드에서 호출).
 
         perm == "차단" : pack_forget() 으로 버튼 숨김
         perm == "허가" : 원래 pack 옵션으로 버튼 복원
@@ -242,9 +242,21 @@ class LipSyncGUIAuth:
         try:
             if perm == "차단":
                 btn.pack_forget()
+                for _attr in ("_link_sub_video_btn", "_link_sub_both_btn"):
+                    _b = getattr(self, _attr, None)
+                    if _b:
+                        _b.pack_forget()
             else:
                 kw = getattr(self, "_link_save_btn_pack_kw", dict(side="left"))
                 btn.pack(**kw)
+                for _attr, _kw_attr in (
+                    ("_link_sub_video_btn", "_link_sub_video_btn_pack_kw"),
+                    ("_link_sub_both_btn",  "_link_sub_both_btn_pack_kw"),
+                ):
+                    _b  = getattr(self, _attr, None)
+                    _kw = getattr(self, _kw_attr, dict(side="left"))
+                    if _b:
+                        _b.pack(**_kw)
         except Exception:
             pass
 

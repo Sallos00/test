@@ -925,6 +925,406 @@ class LipSyncGUILogic:
             f"[{_time.strftime('%H:%M:%S')}] ✅ N_m3u8DL-RE 설치 완료: {local}")
         return local
 
+    # ── Playwright (헤드리스 브라우저 m3u8 추출) ──────────────────────────────
+
+    def _ensure_playwright(self):
+        """playwright Python 패키지와 Chromium 브라우저를 확보한다.
+        없으면 pip install 후 playwright install chromium 을 실행한다.
+        """
+        import importlib, sys
+
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        # 패키지 설치 여부 확인
+        if importlib.util.find_spec("playwright") is None:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⬇ playwright 패키지 설치 중…")
+            self.root.after(0, lambda: self._link_status(
+                "⬇ playwright 설치 중… (최초 1회)"))
+            _pip = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "playwright",
+                 "--quiet", "--disable-pip-version-check"],
+                capture_output=True, text=True,
+                creationflags=0x08000000 if os.name == "nt" else 0)
+            if _pip.returncode != 0:
+                raise RuntimeError(
+                    f"playwright pip 설치 실패: {_pip.stderr.strip()[:200]}")
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ✅ playwright 패키지 설치 완료")
+
+        # Chromium 브라우저 설치 여부 확인
+        _chromium_ok = False
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as _pw:
+                _chromium_ok = os.path.isfile(
+                    _pw.chromium.executable_path)
+        except Exception:
+            pass
+
+        if not _chromium_ok:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⬇ Playwright Chromium 설치 중…")
+            self.root.after(0, lambda: self._link_status(
+                "⬇ Playwright Chromium 설치 중… (최초 1회, 수분 소요)"))
+            _inst = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True, text=True,
+                creationflags=0x08000000 if os.name == "nt" else 0)
+            if _inst.returncode != 0:
+                raise RuntimeError(
+                    f"Chromium 설치 실패: {_inst.stderr.strip()[:200]}")
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ✅ Playwright Chromium 설치 완료")
+
+    def _find_real_chrome(self) -> str | None:
+        """사용자 PC에 설치된 실제 Chrome/Edge 실행파일 경로를 반환한다."""
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(
+                r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        return None
+
+    def _extract_m3u8_playwright(self, page_url: str,
+                                  timeout_ms: int = 30000) -> dict | None:
+        """실제 Chrome을 CDP로 실행해 page_url 의 m3u8 URL과 헤더/쿠키를 반환한다.
+
+        [개선사항]
+          1. request + response 양쪽에서 m3u8 감지
+             - request  이벤트: URL만 보고 빠르게 캡처
+             - response 이벤트: Content-Type 헤더가 m3u8인 응답도 캡처
+               (URL에 .m3u8이 없어도 application/vnd.apple.mpegurl 등으로 판별)
+          2. m3u8 요청의 실제 헤더(Referer, Authorization, Cookie 등) 캡처
+             - 페이지 쿠키가 아닌 실제 요청 헤더를 그대로 다운로더에 전달
+          3. 재생 트리거 강화
+             - 클릭 → JS click() dispatch → 스크롤 → video.play() 순으로 시도
+          4. 자동화 탐지 우회 강화
+             - navigator.webdriver 패치 (내장 Chromium 사용 시)
+             - Chrome 미설치 시에도 실제 User-Agent 주입
+
+        반환: {"url": str, "referer": str, "cookies": str, "req_headers": dict} 또는 None
+        """
+        import subprocess as _sub, socket, time as _tm, json as _json
+        import urllib.request as _ureq
+
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = collections.deque(maxlen=100)
+
+        try:
+            from playwright.sync_api import sync_playwright, TimeoutError as _PWTimeout
+        except ImportError:
+            return None
+
+        # ── 감지 결과 저장소 ──────────────────────────────────────────────
+        # _found_info: {"url": str, "req_headers": dict}
+        _found_info: dict | None = None
+        _cookies_list: list      = []
+        _chrome_proc             = None
+
+        # m3u8 판별 정규식 (URL 기반)
+        _M3U8_URL_RE = re.compile(r'\.m3u8(?:[?#]|$)', re.IGNORECASE)
+        # m3u8 판별 Content-Type 키워드 (응답 헤더 기반)
+        _M3U8_CT_KW  = ("mpegurl", "m3u8", "vnd.apple")
+
+        # ── 빈 포트 탐색 ──────────────────────────────────────────────────
+        def _free_port() -> int:
+            with socket.socket() as _s:
+                _s.bind(("127.0.0.1", 0))
+                return _s.getsockname()[1]
+
+        _dbg_port = _free_port()
+
+        try:
+            with sync_playwright() as _pw:
+                _chrome_exe = self._find_real_chrome()
+
+                if _chrome_exe:
+                    # ── CDP: 실제 Chrome 을 headless 로 직접 실행 ──────────
+                    self._log_lines.append(
+                        f"[{_time.strftime('%H:%M:%S')}] 🌐 CDP 실제 Chrome: {_chrome_exe}")
+                    _chrome_proc = _sub.Popen(
+                        [
+                            _chrome_exe,
+                            f"--remote-debugging-port={_dbg_port}",
+                            "--headless=new",
+                            "--no-first-run",
+                            "--no-default-browser-check",
+                            "--disable-extensions",
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-gpu",
+                            "--autoplay-policy=no-user-gesture-required",
+                            "about:blank",
+                        ],
+                        stdout=_sub.DEVNULL,
+                        stderr=_sub.DEVNULL,
+                        creationflags=0x08000000 if os.name == "nt" else 0,
+                    )
+                    # CDP 포트가 열릴 때까지 최대 5초 대기
+                    _cdp_url = f"http://127.0.0.1:{_dbg_port}"
+                    for _ in range(20):
+                        _tm.sleep(0.25)
+                        try:
+                            with _ureq.urlopen(
+                                    f"{_cdp_url}/json/version", timeout=1):
+                                break
+                        except Exception:
+                            pass
+
+                    _browser = _pw.chromium.connect_over_cdp(_cdp_url)
+                    _ctx     = _browser.contexts[0] if _browser.contexts \
+                               else _browser.new_context()
+                else:
+                    # ── 폴백: 내장 Chromium launch ────────────────────────
+                    self._log_lines.append(
+                        f"[{_time.strftime('%H:%M:%S')}] 🌐 내장 Chromium 사용 (Chrome 미감지)")
+                    _browser = _pw.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--autoplay-policy=no-user-gesture-required",
+                        ])
+                    _ctx = _browser.new_context(
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0.0.0 Safari/537.36"),
+                        ignore_https_errors=True)
+
+                # ── [개선1] request + response 양쪽에서 m3u8 감지 ──────────
+                #
+                # ▸ request 이벤트:
+                #   브라우저가 요청을 보내기 직전에 발생.
+                #   URL에 .m3u8 이 있으면 즉시 캡처.
+                #   shouldInterceptRequest 와 동일한 타이밍.
+                #
+                # ▸ response 이벤트:
+                #   서버 응답이 도착했을 때 발생.
+                #   URL에 .m3u8 이 없어도 Content-Type 으로 HLS 판별 가능.
+                #   (일부 사이트는 /stream?id=xxx 같은 URL로 m3u8을 내려줌)
+
+                def _capture(url: str, req_headers: dict):
+                    """m3u8 URL을 처음 발견했을 때만 저장한다."""
+                    nonlocal _found_info
+                    if _found_info is None:
+                        _found_info = {"url": url, "req_headers": req_headers}
+
+                def _on_request(req):
+                    """[개선2] URL 기반 감지 + 요청 헤더 캡처."""
+                    if _found_info:
+                        return
+                    _u = req.url
+                    if _M3U8_URL_RE.search(_u):
+                        # 요청 헤더에서 Referer, Authorization, Cookie 등 추출
+                        try:
+                            _hdrs = dict(req.headers)
+                        except Exception:
+                            _hdrs = {}
+                        _capture(_u, _hdrs)
+                        self._log_lines.append(
+                            f"[{_time.strftime('%H:%M:%S')}] "
+                            f"📡 [request] m3u8 감지: {_u[:80]}")
+
+                def _on_response(resp):
+                    """[개선1] Content-Type 기반 감지 (URL에 .m3u8 없는 경우)."""
+                    if _found_info:
+                        return
+                    try:
+                        _ct = resp.headers.get("content-type", "")
+                    except Exception:
+                        return
+                    if any(kw in _ct.lower() for kw in _M3U8_CT_KW):
+                        _u = resp.url
+                        try:
+                            _hdrs = dict(resp.request.headers)
+                        except Exception:
+                            _hdrs = {}
+                        _capture(_u, _hdrs)
+                        self._log_lines.append(
+                            f"[{_time.strftime('%H:%M:%S')}] "
+                            f"📡 [response] m3u8 감지 (Content-Type={_ct[:40]}): "
+                            f"{_u[:80]}")
+
+                _ctx.on("request",  _on_request)
+                _ctx.on("response", _on_response)
+
+                # ── [개선4] navigator.webdriver 패치 (내장 Chromium 전용) ──
+                # 실제 Chrome(CDP 연결)은 이미 패치 불필요
+                if not _chrome_exe:
+                    _ctx.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => undefined
+                        });
+                        window.chrome = { runtime: {} };
+                    """)
+
+                _page = _ctx.new_page()
+
+                # ── 페이지 로드 ───────────────────────────────────────────
+                try:
+                    _page.goto(page_url,
+                               wait_until="domcontentloaded",
+                               timeout=timeout_ms)
+                except _PWTimeout:
+                    pass
+
+                # ── [개선3] 재생 트리거 강화 ─────────────────────────────
+                #
+                # 단계별 시도:
+                #   1) CSS 셀렉터로 재생 버튼 클릭 (기존 방식)
+                #   2) JS dispatchEvent('click') — click() 을 막는 사이트 우회
+                #   3) 페이지 스크롤 — lazy-load 동영상 활성화
+                #   4) video.play() 직접 호출 — autoplay 차단 우회
+                #   5) 스크롤 후 video.play() 재시도
+
+                _PLAY_SELECTORS = [
+                    "button.play",
+                    "button[aria-label*='play' i]",
+                    "button[title*='play' i]",
+                    ".play-button",
+                    ".vjs-big-play-button",
+                    ".plyr__control--overlaid",
+                    "[class*='play'][class*='btn']",
+                    "[class*='btn'][class*='play']",
+                    "[data-testid*='play']",
+                    "video",
+                ]
+
+                def _try_click_selectors():
+                    """1단계: CSS 셀렉터 클릭."""
+                    for _sel in _PLAY_SELECTORS:
+                        if _found_info:
+                            return
+                        try:
+                            _page.locator(_sel).first.click(timeout=1500)
+                        except Exception:
+                            pass
+
+                def _try_js_dispatch():
+                    """2단계: JS dispatchEvent 로 클릭 강제."""
+                    if _found_info:
+                        return
+                    try:
+                        _page.evaluate("""() => {
+                            const sels = [
+                                'button.play', '.vjs-big-play-button',
+                                '.plyr__control--overlaid', 'video',
+                                '[class*="play"]'
+                            ];
+                            for (const s of sels) {
+                                const el = document.querySelector(s);
+                                if (el) {
+                                    el.dispatchEvent(
+                                        new MouseEvent('click',
+                                            {bubbles: true, cancelable: true}));
+                                    break;
+                                }
+                            }
+                        }""")
+                    except Exception:
+                        pass
+
+                def _try_scroll():
+                    """3단계: 스크롤로 lazy-load 동영상 활성화."""
+                    if _found_info:
+                        return
+                    try:
+                        _page.evaluate(
+                            "window.scrollTo(0, document.body.scrollHeight * 0.3)")
+                        _tm.sleep(0.5)
+                        _page.evaluate("window.scrollTo(0, 0)")
+                    except Exception:
+                        pass
+
+                def _try_video_play():
+                    """4단계: video.play() 직접 호출."""
+                    if _found_info:
+                        return
+                    try:
+                        _page.evaluate("""() => {
+                            const videos = document.querySelectorAll('video');
+                            videos.forEach(v => {
+                                v.muted = true;
+                                v.play().catch(() => {});
+                            });
+                        }""")
+                    except Exception:
+                        pass
+
+                # 재생 트리거 순차 실행
+                _try_click_selectors()
+                if not _found_info:
+                    _try_js_dispatch()
+                if not _found_info:
+                    _try_scroll()
+                if not _found_info:
+                    _try_video_play()
+
+                # ── m3u8 감지될 때까지 최대 20초 폴링 ────────────────────
+                _deadline = _tm.time() + 20
+                while not _found_info and _tm.time() < _deadline:
+                    _tm.sleep(0.5)
+                    # 5초, 10초 시점에 video.play() 재시도
+                    _elapsed = 20 - (_deadline - _tm.time())
+                    if _elapsed in (5.0, 10.0):
+                        _try_video_play()
+
+                # ── 쿠키 수집 ─────────────────────────────────────────────
+                try:
+                    _cookies_list = _ctx.cookies()
+                except Exception:
+                    _cookies_list = []
+
+                try:
+                    _browser.close()
+                except Exception:
+                    pass
+
+        except Exception as _e:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⚠ CDP/Playwright 오류: {_e}")
+            return None
+        finally:
+            # Chrome 프로세스 정리
+            if _chrome_proc is not None:
+                try:
+                    _chrome_proc.terminate()
+                except Exception:
+                    pass
+
+        if _found_info:
+            # ── [개선2] 헤더 우선순위: 요청 헤더 > 페이지 쿠키 ──────────
+            # m3u8 요청 자체에 포함된 Cookie 헤더가 있으면 그것을 우선 사용.
+            # 없으면 페이지 context 쿠키를 조합해 사용.
+            _req_hdrs    = _found_info.get("req_headers", {})
+            _req_cookie  = _req_hdrs.get("cookie", "")
+            _page_cookie = "; ".join(
+                f"{c['name']}={c['value']}" for c in _cookies_list)
+            _final_cookie = _req_cookie if _req_cookie else _page_cookie
+
+            # 요청 헤더에서 Referer 추출 (없으면 page_url 사용)
+            _req_referer  = _req_hdrs.get("referer", "") or page_url
+
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] 🔗 m3u8 감지 완료: "
+                f"{_found_info['url'][:80]} | "
+                f"쿠키={len(_cookies_list)}개 | "
+                f"req_referer={_req_referer[:40]}")
+            return {
+                "url":         _found_info["url"],
+                "referer":     _req_referer,
+                "cookies":     _final_cookie,
+                "req_headers": _req_hdrs,   # 다운로더가 필요 시 직접 참조 가능
+            }
+        return None
+
     def _dl_stop_btn_show(self):
         """저장 중지 버튼 표시."""
         btn = getattr(self, "_link_stop_btn", None)
@@ -1653,8 +2053,10 @@ class LipSyncGUILogic:
                         return None
 
                 # ── N_m3u8DL-RE 실행 헬퍼 ───────────────────────────────────
-                def _exec_nm3u8dl_re(target_url: str) -> int:
+                def _exec_nm3u8dl_re(target_url: str,
+                                    extra_headers: dict | None = None) -> int:
                     """N_m3u8DL-RE 로 target_url 을 다운로드한다.
+                    extra_headers: {"referer": str, "cookies": str} 형태로 전달
                     반환: returncode (int)"""
                     if not _nm3u8dl_re_exe:
                         self._log_lines.append(
@@ -1666,6 +2068,11 @@ class LipSyncGUILogic:
                         "--auto-select",
                         "--no-log",
                     ]
+                    if extra_headers:
+                        if extra_headers.get("referer"):
+                            _nc += ["--header", f"Referer:{extra_headers['referer']}"]
+                        if extra_headers.get("cookies"):
+                            _nc += ["--header", f"Cookie:{extra_headers['cookies']}"]
                     _np = subprocess.Popen(
                         _nc,
                         stdout=subprocess.PIPE,
@@ -1733,8 +2140,74 @@ class LipSyncGUILogic:
                         _final_step = "N_m3u8DL-RE+m3u8"
                     else:
                         self._log_lines.append(
-                            f"[{ts}] ⚠ [4단계] m3u8 추출 실패 — 모든 방법 소진")
+                            f"[{ts}] ⚠ [4단계] m3u8 추출 실패 — 다음 단계로")
 
+                # ── 단계 5: Playwright CDP → m3u8 감지 → yt-dlp → N_m3u8DL-RE ─
+                if _final_rc != 0 and not getattr(self, "_link_save_cancelled", False):
+                    self.root.after(0, lambda: self._link_status(
+                        "⏳ 헤드리스 브라우저로 m3u8 감지 중… (최초 실행 시 설치 포함)"))
+                    self._log_lines.append(
+                        f"[{ts}] ⚠ [5단계] Playwright CDP 시도 | URL: {url}")
+                    try:
+                        self._ensure_playwright()
+                        _pw_result = self._extract_m3u8_playwright(url)
+                    except Exception as _pwe:
+                        _pw_result = None
+                        self._log_lines.append(
+                            f"[{ts}] ❌ [5단계] Playwright 준비 실패: {_pwe}")
+
+                    if _pw_result:
+                        _pw_m3u8 = _pw_result["url"]
+                        _pw_hdrs = {
+                            "referer": _pw_result["referer"],
+                            "cookies": _pw_result["cookies"],
+                        }
+                        # [개선2] m3u8 요청의 실제 헤더도 로그에 기록
+                        _rh = _pw_result.get("req_headers", {})
+                        if _rh:
+                            _rh_summary = ", ".join(
+                                f"{k}={v[:20]}" for k, v in _rh.items()
+                                if k.lower() in ("referer", "authorization",
+                                                 "cookie", "origin"))
+                            if _rh_summary:
+                                self._log_lines.append(
+                                    f"[{ts}] 📋 [5단계] 캡처된 요청 헤더: {_rh_summary}")
+                        self._log_lines.append(
+                            f"[{ts}] 🔗 [5단계] m3u8 감지: {_pw_m3u8[:80]}")
+
+                        # ── 5-a: yt-dlp 로 m3u8 다운로드 시도 ────────────
+                        self.root.after(0, lambda: self._link_status(
+                            "⏳ m3u8 감지 완료 → yt-dlp로 다운로드 중…"))
+                        _pw_cmd = [
+                            ytdlp,
+                            "--no-warnings",
+                            "-f", "bestvideo+bestaudio/best",
+                            "--merge-output-format", "mp4",
+                            "--ffmpeg-location", ffmpeg,
+                            "-o", os.path.join(dl_dir, "%(title)s.%(ext)s"),
+                        ]
+                        if _pw_hdrs.get("referer"):
+                            _pw_cmd += ["--add-header",
+                                        f"Referer:{_pw_hdrs['referer']}"]
+                        if _pw_hdrs.get("cookies"):
+                            _pw_cmd += ["--add-header",
+                                        f"Cookie:{_pw_hdrs['cookies']}"]
+                        _pw_cmd.append(_pw_m3u8)
+                        _final_rc, _ = _exec_ytdlp(_pw_cmd)
+                        _final_step  = "CDP+yt-dlp"
+
+                        # ── 5-b: yt-dlp 실패 시 N_m3u8DL-RE 폴백 ─────────
+                        if (_final_rc != 0
+                                and not getattr(self, "_link_save_cancelled", False)):
+                            self.root.after(0, lambda: self._link_status(
+                                "⏳ yt-dlp 실패 → N_m3u8DL-RE로 재시도 중…"))
+                            self._log_lines.append(
+                                f"[{ts}] ⚠ [5-b] yt-dlp 실패 → N_m3u8DL-RE 폴백")
+                            _final_rc   = _exec_nm3u8dl_re(_pw_m3u8, _pw_hdrs)
+                            _final_step = "CDP+N_m3u8DL-RE"
+                    else:
+                        self._log_lines.append(
+                            f"[{ts}] ⚠ [5단계] m3u8 감지 실패 — 모든 방법 소진")
                 # ── 최종 결과 처리 ───────────────────────────────────────────
                 if getattr(self, "_link_save_cancelled", False):
                     return

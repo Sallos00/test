@@ -3064,28 +3064,30 @@ class LipSyncGUILogic:
     def _send_url_to_potplayer(self, hwnd: int, url: str):
         """PotPlayer 창에 URL을 클립보드 Ctrl+V로 전달한다.
 
-        PotPlayer는 클립보드에 복사된 URL을 Ctrl+V로 받으면 해당 링크의
-        영상을 직접 재생한다 (모든 URL 공통 적용).
-        SetForegroundWindow + keybd_event 방식으로 실제 키 입력을 전달한다.
+        PostMessageW 로 Ctrl+V 키 메시지를 창 메시지 큐에 직접 삽입하므로
+        PotPlayer 가 백그라운드에 있어도 포커스 없이 동작한다.
         """
         import ctypes
 
-        # ① Win32 API로 클립보드 설정 (워커 스레드 세이프)
+        WM_KEYDOWN  = 0x0100
+        WM_KEYUP    = 0x0101
+        VK_CONTROL  = 0x11
+        VK_V        = 0x56
+
+        # ① 클립보드에 URL 설정
         ok = _win32_set_clipboard(url)
         if not ok:
             self.root.after(0, lambda: self._clipboard_set(url))
 
-        # ② PotPlayer 포커스 후 Ctrl+V 전달
-        _time.sleep(0.3)
-        VK_CONTROL = 0x11
-        VK_V       = 0x56
+        _time.sleep(0.2)
+
+        # ② PostMessageW 로 Ctrl+V 직접 전달 (포커스 불필요)
         user32 = ctypes.windll.user32
-        user32.SetForegroundWindow(hwnd)
-        _time.sleep(0.1)
-        user32.keybd_event(VK_CONTROL, 0, 0, 0)
-        user32.keybd_event(VK_V,       0, 0, 0)
-        user32.keybd_event(VK_V,       0, 2, 0)   # KEYUP
-        user32.keybd_event(VK_CONTROL, 0, 2, 0)   # KEYUP
+        user32.PostMessageW(hwnd, WM_KEYDOWN, VK_CONTROL, 0)
+        user32.PostMessageW(hwnd, WM_KEYDOWN, VK_V,       0)
+        user32.PostMessageW(hwnd, WM_KEYUP,   VK_V,       0)
+        user32.PostMessageW(hwnd, WM_KEYUP,   VK_CONTROL, 0)
+
         _time.sleep(0.1)
 
 

@@ -73,6 +73,13 @@ class RefreshMixin:
                 try:
                     self._pot_dot.config(fg=_lp_c)
                     self._pot_lbl.config(text=_lp_t, fg=_lp_c)
+                    # 팟플레이어 종료 시 오디오 장치·프로세스 레이블도 즉시 초기화.
+                    # _running=False 이므로 state_queue 가 비어 아래 블록이 갱신하지 못함.
+                    if not _lp_ok:
+                        self._aud_dot.config(fg=self.TEXT_DIM)
+                        self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+                        self._proc_dot.config(fg=self.TEXT_DIM)
+                        self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
                 except Exception:
                     pass
 

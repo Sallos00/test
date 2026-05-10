@@ -714,7 +714,8 @@ class LipSyncGUILogic:
             ts = _time.strftime("%H:%M:%S")
             self._log_lines.append(
                 f"[{ts}] ⬇ PotPlayer Extension/MediaPlayParse - yt-dlp.as 다운로드 시작")
-            urllib.request.urlretrieve(ext_url, tmp_zip)
+            import updater as _updater
+            _updater._download(ext_url, tmp_zip, None)
             if os.path.exists(tmp_ext_dir):
                 shutil.rmtree(tmp_ext_dir, ignore_errors=True)
             os.makedirs(tmp_ext_dir, exist_ok=True)

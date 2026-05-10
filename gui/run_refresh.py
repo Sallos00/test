@@ -240,28 +240,34 @@ class RefreshMixin:
                 self._pot_dot.config(fg=c)
                 self._pot_lbl.config(text="연결됨" if pot_ok else "미감지", fg=c)
 
-                # ── 오디오 장치 상태 표기 ─────────────────────────────────────
-                # 요구사항: pot "연결됨" → Windows 빌드 기반 캡처 모드 즉시 표기
-                #            pot "미감지" → "대기 중"
-                # (기존: aud_n>0 조건에 의존 → 연결 초기에 표기 지연 발생)
-                if pot_ok:
-                    self._aud_dot.config(fg=self.ACCENT3)
-                    self._aud_lbl.config(
-                        text=f"캡처 중 ({_AUDIO_CAPTURE_MODE})", fg=self.ACCENT3)
+                # ── 오디오/프로세스: 링크 재생 모드에선 표기하지 않음 ─────────
+                # _link_play_mode=True 이면 싱크·OP/ED 가 비활성화 상태이므로
+                # 오디오 캡처·프로세스 연결 표기가 올라오면 안 된다.
+                if getattr(self, "_link_play_mode", False):
+                    # PotPlayer 종료 시 오디오/프로세스도 "대기 중"으로 초기화
+                    if not pot_ok:
+                        self._aud_dot.config(fg=self.TEXT_DIM)
+                        self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+                        self._proc_dot.config(fg=self.TEXT_DIM)
+                        self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+                    # pot_ok=True 이더라도 링크 재생 중엔 오디오/프로세스 상태 유지
                 else:
-                    self._aud_dot.config(fg=self.TEXT_DIM)
-                    self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+                    # ── 오디오 장치 상태 표기 ─────────────────────────────────
+                    if pot_ok:
+                        self._aud_dot.config(fg=self.ACCENT3)
+                        self._aud_lbl.config(
+                            text=f"캡처 중 ({_AUDIO_CAPTURE_MODE})", fg=self.ACCENT3)
+                    else:
+                        self._aud_dot.config(fg=self.TEXT_DIM)
+                        self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
 
-                # ── 프로세스 상태 표기 ────────────────────────────────────────
-                # 요구사항: pot "연결됨" + 싱크 미실행 → "OP/ED 감지 중"
-                #            pot "미감지"              → "대기 중"
-                # (기존: aud_n>0 조건이 불필요하게 추가되어 있어 오도적 표기 발생)
-                if pot_ok and not self._running:
-                    self._proc_dot.config(fg=self.ACCENT)
-                    self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
-                else:
-                    self._proc_dot.config(fg=self.TEXT_DIM)
-                    self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+                    # ── 프로세스 상태 표기 ────────────────────────────────────
+                    if pot_ok and not self._running:
+                        self._proc_dot.config(fg=self.ACCENT)
+                        self._proc_lbl.config(text="OP/ED 감지 중", fg=self.ACCENT)
+                    else:
+                        self._proc_dot.config(fg=self.TEXT_DIM)
+                        self._proc_lbl.config(text="대기 중", fg=self.TEXT_DIM)
 
         # ── 메인 state_queue 처리 ─────────────────────────────────────────────
         latest       = None
@@ -325,16 +331,19 @@ class RefreshMixin:
             self._pot_dot.config(fg=c); self._pot_lbl.config(text=t, fg=c)
 
             # ── 오디오 장치 상태 표기 ─────────────────────────────────────────
-            # 요구사항: pot "연결됨" → Windows 빌드 기반 캡처 모드 즉시 표기
-            #            pot "미감지" → "대기 중"
-            # (기존: aud_n>0 의존으로 재연결 직후 표기 지연, 색상 불일치 발생)
-            if pot_ok:
-                self._aud_dot.config(fg=self.ACCENT3)
-                self._aud_lbl.config(
-                    text=f"캡처 중 ({_AUDIO_CAPTURE_MODE})", fg=self.ACCENT3)
+            # 링크 재생 모드에선 오디오/프로세스 상태를 표기하지 않는다.
+            if getattr(self, "_link_play_mode", False):
+                if not pot_ok:
+                    self._aud_dot.config(fg=self.TEXT_DIM)
+                    self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
             else:
-                self._aud_dot.config(fg=self.TEXT_DIM)
-                self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
+                if pot_ok:
+                    self._aud_dot.config(fg=self.ACCENT3)
+                    self._aud_lbl.config(
+                        text=f"캡처 중 ({_AUDIO_CAPTURE_MODE})", fg=self.ACCENT3)
+                else:
+                    self._aud_dot.config(fg=self.TEXT_DIM)
+                    self._aud_lbl.config(text="대기 중", fg=self.TEXT_DIM)
 
             if self._running and lip_n > 0:
                 sign = "+" if offset > 0 else ""

@@ -134,7 +134,7 @@ class LipSyncGUIAuth:
                 fill="x", pady=(round(8 * r), 0))
             tk.Label(popup,
                      text="프로그램의 원활한 기능 작동을 위해\n"
-                          "PotPlayer의 레지스트리를 변경 시키겠습니까?",
+                          "추가 다운로드 및 PotPlayer의 레지스트리를 변경 시키겠습니까?",
                      font=("Segoe UI", F_BODY),
                      bg=self.BG, fg=self.TEXT_MID,
                      justify="center").pack(pady=round(10 * r))
@@ -193,21 +193,30 @@ class LipSyncGUIAuth:
                 else:
                     init_text, init_color = "대기 중", self.TEXT_DIM
 
-                # [Bug 3] 이름·상태 라벨을 중앙 정렬로 표시
-                row = tk.Frame(prog_frame, bg=self.BG)
-                row.pack(anchor="center", pady=round(1 * r))
-                tk.Label(row, text=name,
-                         font=("Segoe UI", F_LOG),
+                # 이름(col 0) · 상태(col 1) 그리드 분리 정렬
+                row_idx = TASKS.index((key, name))
+                tk.Label(prog_frame, text=name,
+                         font=("Consolas", F_LOG),
                          bg=self.BG, fg=self.TEXT_DIM,
-                         width=22, anchor="e").pack(side="left")
-                lbl = tk.Label(row, text=init_text,
-                               font=("Segoe UI", F_LOG),
+                         anchor="w").grid(row=row_idx, column=0,
+                                          sticky="w",
+                                          padx=(round(PAD * 2), round(4 * r)),
+                                          pady=round(1 * r))
+                lbl = tk.Label(prog_frame, text=init_text,
+                               font=("Consolas", F_LOG),
                                bg=self.BG, fg=init_color,
-                               width=8, anchor="w")
-                lbl.pack(side="left")
+                               anchor="w",
+                               wraplength=round(90 * r))
+                lbl.grid(row=row_idx, column=1,
+                         sticky="w",
+                         padx=(round(PAD * 2), 0),
+                         pady=round(1 * r))
                 prog_labels[key] = lbl
 
-            prog_frame.pack(fill="x", pady=(0, round(6 * r)))
+            # 이름 열 고정, 상태 열만 오른쪽으로 확장
+            prog_frame.grid_columnconfigure(0, weight=0)
+            prog_frame.grid_columnconfigure(1, weight=1)
+            prog_frame.pack(fill="x", padx=round(PAD * 8), pady=(0, round(6 * r)))
 
             def _set_status(key: str, text: str, color: str | None = None):
                 lbl = prog_labels.get(key)

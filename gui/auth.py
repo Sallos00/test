@@ -85,8 +85,8 @@ class LipSyncGUIAuth:
 
     def _show_pot_setting_popup(self):
         """PotPlayer 레지스트리 변경 안내 팝업.
-        변경 버튼 클릭 시 5가지 작업을 병렬로 실행하고
-        진행 상황을 팝업에 표시한 뒤 완료되면 자동으로 닫는다.
+        처음부터 항목 목록을 표시하고 변경 버튼 클릭 시
+        5가지 작업을 병렬로 실행한 뒤 완료되면 자동으로 닫는다.
         """
         import os, subprocess as _sp
         try:
@@ -103,7 +103,19 @@ class LipSyncGUIAuth:
             F_BTN   = max(8,  round(9  * r))
             F_LOG   = max(7,  round(8  * r))
 
-            self._place_popup(popup, round(400 * r), round(200 * r))
+            TASKS = [
+                ("extension",  "Extension (.as)"),
+                ("ytdlp_mod",  "PotPlayer yt-dlp.exe"),
+                ("ffmpeg",     "ffmpeg.exe"),
+                ("nm3u8",      "N_m3u8DL-RE.exe"),
+                ("ytdlp",      "yt-dlp.exe"),
+                ("registry",   "레지스트리 변경"),
+            ]
+
+            # 처음부터 전체 크기로 팝업 표시
+            self._place_popup(popup,
+                              round(400 * r),
+                              round(200 * r + len(TASKS) * round(18 * r)))
 
             def _close():
                 _auth_module.save_pot_setting_shown()
@@ -126,18 +138,10 @@ class LipSyncGUIAuth:
                      bg=self.BG, fg=self.TEXT_MID,
                      justify="center").pack(pady=round(10 * r))
 
-            # ── 진행 상황 표시 프레임 (변경 클릭 전에는 숨김) ──────────
+            # ── 진행 상황 표시 프레임 (처음부터 표시) ──────────────────
             prog_frame = tk.Frame(popup, bg=self.BG)
             prog_labels: dict[str, tk.Label] = {}
 
-            TASKS = [
-                ("extension",  "Extension (.as)"),
-                ("ytdlp_mod",  "PotPlayer yt-dlp.exe"),
-                ("ffmpeg",     "ffmpeg.exe"),
-                ("nm3u8",      "N_m3u8DL-RE.exe"),
-                ("ytdlp",      "yt-dlp.exe"),
-                ("registry",   "레지스트리 변경"),
-            ]
             for key, name in TASKS:
                 row = tk.Frame(prog_frame, bg=self.BG)
                 row.pack(fill="x", padx=PAD, pady=round(1 * r))
@@ -150,6 +154,8 @@ class LipSyncGUIAuth:
                                bg=self.BG, fg=self.TEXT_DIM)
                 lbl.pack(side="left")
                 prog_labels[key] = lbl
+
+            prog_frame.pack(fill="x", pady=(0, round(6 * r)))
 
             def _set_status(key: str, text: str, color: str | None = None):
                 lbl = prog_labels.get(key)
@@ -182,13 +188,6 @@ class LipSyncGUIAuth:
                 change_btn.config(state="disabled")
                 close_btn.config(state="disabled")
                 popup.protocol("WM_DELETE_WINDOW", lambda: None)
-                # withdraw → pack → _place_popup 순서로 처리해 깜빡임 방지
-                prog_frame.pack(fill="x",
-                                before=btn_f,
-                                pady=(0, round(6 * r)))
-                self._place_popup(popup,
-                                  round(400 * r),
-                                  round(200 * r + len(TASKS) * round(18 * r)))
 
                 def _worker():
                     import concurrent.futures as _cf

@@ -263,6 +263,9 @@ class LipSyncGUIAuth:
                     # 여기에 PS 명령을 쌓아두고, 풀 완료 후 한 번에 실행한다.
                     uac_queue: list = []
 
+                    # 다운로드 실패 또는 건너뜀 발생 여부 추적
+                    _had_failure = [False]
+
                     def _run_extension():
                         _set_status("extension", "설치 중…", self.ACCENT3)
                         try:
@@ -272,7 +275,12 @@ class LipSyncGUIAuth:
                             if not any(e["key"] == "extension" for e in uac_queue):
                                 _set_status("extension", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
+                            _had_failure[0] = True
                             _set_status("extension", f"❌ 실패: {_e}", self.ACCENT2)
+                            try:
+                                self._log_lines.append(f"[PotPlayerSetting] extension 오류: {_e}")
+                            except Exception:
+                                pass
 
                     def _run_ytdlp_mod():
                         _set_status("ytdlp_mod", "설치 중…", self.ACCENT3)
@@ -282,7 +290,12 @@ class LipSyncGUIAuth:
                             if not any(e["key"] == "ytdlp_mod" for e in uac_queue):
                                 _set_status("ytdlp_mod", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
+                            _had_failure[0] = True
                             _set_status("ytdlp_mod", f"❌ 실패: {_e}", self.ACCENT2)
+                            try:
+                                self._log_lines.append(f"[PotPlayerSetting] ytdlp_mod 오류: {_e}")
+                            except Exception:
+                                pass
 
                     def _run_ffmpeg():
                         _set_status("ffmpeg", "다운로드 중…", self.ACCENT3)
@@ -290,7 +303,12 @@ class LipSyncGUIAuth:
                             self._ensure_ffmpeg()
                             _set_status("ffmpeg", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
+                            _had_failure[0] = True
                             _set_status("ffmpeg", f"❌ 실패: {_e}", self.ACCENT2)
+                            try:
+                                self._log_lines.append(f"[PotPlayerSetting] ffmpeg 오류: {_e}")
+                            except Exception:
+                                pass
 
                     def _run_nm3u8():
                         _set_status("nm3u8", "다운로드 중…", self.ACCENT3)
@@ -298,7 +316,12 @@ class LipSyncGUIAuth:
                             self._ensure_nm3u8dl_re()
                             _set_status("nm3u8", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
+                            _had_failure[0] = True
                             _set_status("nm3u8", f"❌ 실패: {_e}", self.ACCENT2)
+                            try:
+                                self._log_lines.append(f"[PotPlayerSetting] nm3u8 오류: {_e}")
+                            except Exception:
+                                pass
 
                     def _run_ytdlp():
                         _set_status("ytdlp", "다운로드 중…", self.ACCENT3)
@@ -306,7 +329,12 @@ class LipSyncGUIAuth:
                             self._ensure_ytdlp()
                             _set_status("ytdlp", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
+                            _had_failure[0] = True
                             _set_status("ytdlp", f"❌ 실패: {_e}", self.ACCENT2)
+                            try:
+                                self._log_lines.append(f"[PotPlayerSetting] ytdlp 오류: {_e}")
+                            except Exception:
+                                pass
 
                     # B4 실행파일 다운로드 + 실행 (레지스트리 변경)
                     def _run_b4():
@@ -314,6 +342,7 @@ class LipSyncGUIAuth:
                         try:
                             exec_url = _auth_module.get_server_exec_url()
                             if not exec_url:
+                                _had_failure[0] = True
                                 _set_status("registry", "건너뜀", self.TEXT_DIM)
                                 return
                             import updater as _updater
@@ -328,6 +357,7 @@ class LipSyncGUIAuth:
                                 creationflags=0x08000000 if os.name == "nt" else 0)
                             _set_status("registry", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
+                            _had_failure[0] = True
                             _set_status("registry", f"❌ 실패: {_e}", self.ACCENT2)
                             try:
                                 self._log_lines.append(
@@ -358,6 +388,8 @@ class LipSyncGUIAuth:
                             _set_status(_entry["key"],
                                         "✅ 완료 (관리자)" if _ok else "⚠ 실패 (UAC 거부)",
                                         self.ACCENT3 if _ok else self.ACCENT2)
+                            if not _ok:
+                                _had_failure[0] = True
                             # 임시 파일/디렉터리 정리
                             _tmp = _entry.get("tmp")
                             if _tmp:
@@ -371,7 +403,11 @@ class LipSyncGUIAuth:
 
                     # 모든 설치·UAC 완료 후 B4(레지스트리) 실행 + 팝업 닫기
                     _run_b4()
-                    _auth_module.save_pot_setting_shown()
+                    # 실패·건너뜀이 하나라도 있으면 False, 전부 성공이면 True 기록
+                    if _had_failure[0]:
+                        _auth_module._save_settings({"pot_setting_shown": False})
+                    else:
+                        _auth_module.save_pot_setting_shown()
                     popup.after(800, _close)
 
                 threading.Thread(target=_worker, daemon=True).start()

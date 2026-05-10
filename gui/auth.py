@@ -88,7 +88,7 @@ class LipSyncGUIAuth:
         처음부터 항목 목록을 표시하고 변경 버튼 클릭 시
         5가지 작업을 병렬로 실행한 뒤 완료되면 자동으로 닫는다.
         """
-        import os, subprocess as _sp
+        import os, shutil as _shutil, subprocess as _sp
         try:
             popup = tk.Toplevel(self.root)
             popup.title("Auto Sync — PotPlayer 설정")
@@ -117,8 +117,9 @@ class LipSyncGUIAuth:
                               round(400 * r),
                               round(200 * r + len(TASKS) * round(18 * r)))
 
+            # [Bug 1] 닫기/X 클릭 시 save_pot_setting_shown() 호출 안 함
+            # save는 변경 → 작업 완료 후에만 _worker 내에서 호출
             def _close():
-                _auth_module.save_pot_setting_shown()
                 try:
                     popup.destroy()
                 except Exception:
@@ -142,16 +143,67 @@ class LipSyncGUIAuth:
             prog_frame = tk.Frame(popup, bg=self.BG)
             prog_labels: dict[str, tk.Label] = {}
 
+            # [Bug 2] 팝업 열릴 때 파일 존재 여부를 미리 확인해 초기 상태 표시
+            pot_dir_init = (self._get_potplayer_dir()
+                            if hasattr(self, "_get_potplayer_dir") else "")
+            _ext_filename = "MediaPlayParse - yt-dlp.as"
+
+            def _initial_status(key: str):
+                """True=설치, False=미설치, None=대기 중(판별 불가)"""
+                try:
+                    if key == "extension":
+                        if not pot_dir_init:
+                            return None
+                        dirs = [
+                            os.path.join(pot_dir_init, "Extension", "Media", "UrlList"),
+                            os.path.join(pot_dir_init, "Extension", "Media", "PlayParse"),
+                        ]
+                        return all(os.path.isfile(os.path.join(d, _ext_filename))
+                                   for d in dirs)
+                    elif key == "ytdlp_mod":
+                        if not pot_dir_init:
+                            return None
+                        return os.path.isfile(
+                            os.path.join(pot_dir_init, "Module", "yt-dlp.exe"))
+                    elif key == "ffmpeg":
+                        local = (self._ffmpeg_path()
+                                 if hasattr(self, "_ffmpeg_path") else "")
+                        return bool(os.path.isfile(local) or
+                                    _shutil.which("ffmpeg"))
+                    elif key == "nm3u8":
+                        local = (self._nm3u8dl_re_path()
+                                 if hasattr(self, "_nm3u8dl_re_path") else "")
+                        return bool(os.path.isfile(local) or
+                                    _shutil.which("N_m3u8DL-RE"))
+                    elif key == "ytdlp":
+                        local = (self._ytdlp_path()
+                                 if hasattr(self, "_ytdlp_path") else "")
+                        return bool(os.path.isfile(local) or
+                                    _shutil.which("yt-dlp"))
+                except Exception:
+                    pass
+                return None  # registry 포함 판별 불가 → 대기 중
+
             for key, name in TASKS:
+                st = _initial_status(key)
+                if st is True:
+                    init_text, init_color = "설치", self.ACCENT3
+                elif st is False:
+                    init_text, init_color = "미설치", self.ACCENT2
+                else:
+                    init_text, init_color = "대기 중", self.TEXT_DIM
+
+                # [Bug 3] 이름·상태 라벨을 중앙 정렬로 표시
                 row = tk.Frame(prog_frame, bg=self.BG)
-                row.pack(fill="x", padx=PAD, pady=round(1 * r))
-                tk.Label(row, text=f"  {name}",
+                row.pack(anchor="center", pady=round(1 * r))
+                tk.Label(row, text=name,
                          font=("Segoe UI", F_LOG),
                          bg=self.BG, fg=self.TEXT_DIM,
-                         width=24, anchor="w").pack(side="left")
-                lbl = tk.Label(row, text="대기 중",
+                         width=22, anchor="e").pack(side="left")
+                lbl = tk.Label(row, text=init_text,
                                font=("Segoe UI", F_LOG),
-                               bg=self.BG, fg=self.TEXT_DIM)
+                               bg=self.BG, fg=init_color,
+                               width=8, anchor="w")
                 lbl.pack(side="left")
                 prog_labels[key] = lbl
 

@@ -628,17 +628,20 @@ class LipSyncGUILogic:
         )
         return ret > 32
 
-    def _bg_ensure_potplayer_ytdlp(self, pot_dir: str):
+    def _bg_ensure_potplayer_ytdlp(self, pot_dir: str, uac_queue: list | None = None):
         """PotPlayer Module 폴더에 yt-dlp.exe 가 없으면 GitHub 최신 버전에서 다운로드.
 
         C:\\Program Files 는 일반 권한으로 쓸 수 없으므로:
           1) %TEMP% 에 먼저 다운로드
           2) 직접 복사 시도 → PermissionError 면 UAC(ShellExecuteW runas) 로 복사
+        uac_queue 가 전달되면 UAC 호출 대신 명령을 큐에 추가하고 반환
+        (caller 가 한 번에 일괄 처리하므로 관리자 권한 팝업이 1회만 표시됨)
         """
         import tempfile, urllib.request, shutil
         module_dir = os.path.join(pot_dir, "Module")
         dest       = os.path.join(module_dir, "yt-dlp.exe")
         tmp_path   = os.path.join(tempfile.gettempdir(), "yt-dlp_potplayer.exe")
+        _skip_tmp_cleanup = False
         try:
             if os.path.isfile(dest):
                 return
@@ -654,8 +657,14 @@ class LipSyncGUILogic:
                 self._log_lines.append(
                     f"[{_time.strftime('%H:%M:%S')}] ✅ PotPlayer Module/yt-dlp.exe 설치 완료")
             except PermissionError:
-                # ② 권한 없음 → UAC로 PowerShell 복사 (단발성 팝업)
                 ps = f"Copy-Item -Path '{tmp_path}' -Destination '{dest}' -Force"
+                if uac_queue is not None:
+                    # ② UAC를 caller에서 일괄 처리 — tmp_path는 caller가 정리
+                    uac_queue.append({"key": "ytdlp_mod", "check": dest,
+                                      "ps": ps, "tmp": tmp_path})
+                    _skip_tmp_cleanup = True
+                    return
+                # ② 권한 없음 → UAC로 PowerShell 복사 (단발성 팝업)
                 ok = self._runas_powershell(ps)
                 _time.sleep(4)   # UAC 승인 + 복사 완료 대기
                 result = os.path.isfile(dest)
@@ -667,13 +676,14 @@ class LipSyncGUILogic:
             self._log_lines.append(
                 f"[{_time.strftime('%H:%M:%S')}] ⚠ PotPlayer Module/yt-dlp.exe 설치 실패: {e}")
         finally:
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
+            if not _skip_tmp_cleanup:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
 
-    def _bg_ensure_potplayer_extension(self, pot_dir: str):
+    def _bg_ensure_potplayer_extension(self, pot_dir: str, uac_queue: list | None = None):
         """Extension\\Media\\UrlList 및 Extension\\Media\\PlayParse 에
         'MediaPlayParse - yt-dlp.as' 가 없으면
         서버 업데이트 시트 B3 URL 의 zip 을 내려받아 압축 해제 후 zip 삭제.
@@ -681,6 +691,8 @@ class LipSyncGUILogic:
         C:\\Program Files 쓰기 권한 없을 경우:
           1) %TEMP% 에 다운로드 + 압축 해제
           2) 직접 복사 시도 → PermissionError 면 UAC(ShellExecuteW runas) 로 복사
+        uac_queue 가 전달되면 UAC 호출 대신 명령을 큐에 추가하고 반환
+        (caller 가 한 번에 일괄 처리하므로 관리자 권한 팝업이 1회만 표시됨)
         """
         import tempfile, urllib.request, zipfile, shutil
 
@@ -696,6 +708,7 @@ class LipSyncGUILogic:
         target_file = os.path.join(ext_dir, _filename)
         tmp_zip     = os.path.join(tempfile.gettempdir(), "_as_potplayer.zip")
         tmp_ext_dir = os.path.join(tempfile.gettempdir(), "_as_potplayer_ext")
+        _skip_ext_cleanup = False
         try:
             if os.path.isfile(target_file):
                 return
@@ -758,6 +771,14 @@ class LipSyncGUILogic:
                     ps_parts.append(
                         f"New-Item -ItemType Directory -Force -Path '{_d}' | Out-Null; "
                         f"Copy-Item -Path '{tmp_ext_dir}\\*' -Destination '{_d}' -Force")
+                if uac_queue is not None:
+                    # UAC를 caller에서 일괄 처리 — tmp_ext_dir는 caller가 정리
+                    uac_queue.append({"key": "extension",
+                                      "check": os.path.join(_install_dirs[0], _filename),
+                                      "ps": "; ".join(ps_parts),
+                                      "tmp": tmp_ext_dir})
+                    _skip_ext_cleanup = True
+                    return
                 self._runas_powershell("; ".join(ps_parts))
                 _time.sleep(4)
                 for _d in _uac_dirs:
@@ -776,10 +797,11 @@ class LipSyncGUILogic:
                     os.remove(tmp_zip)
             except Exception:
                 pass
-            try:
-                shutil.rmtree(tmp_ext_dir, ignore_errors=True)
-            except Exception:
-                pass
+            if not _skip_ext_cleanup:
+                try:
+                    shutil.rmtree(tmp_ext_dir, ignore_errors=True)
+                except Exception:
+                    pass
 
     # ── yt-dlp 영상 저장 기능 ─────────────────────────────────────────────────
 

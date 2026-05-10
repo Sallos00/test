@@ -136,6 +136,7 @@ class LipSyncGUIAuth:
                 ("ffmpeg",     "ffmpeg.exe"),
                 ("nm3u8",      "N_m3u8DL-RE.exe"),
                 ("ytdlp",      "yt-dlp.exe"),
+                ("registry",   "레지스트리 변경"),
             ]
             for key, name in TASKS:
                 row = tk.Frame(prog_frame, bg=self.BG)
@@ -181,14 +182,13 @@ class LipSyncGUIAuth:
                 change_btn.config(state="disabled")
                 close_btn.config(state="disabled")
                 popup.protocol("WM_DELETE_WINDOW", lambda: None)
-                popup.after(0, lambda: (
-                    prog_frame.pack(fill="x",
-                                    before=btn_f,
-                                    pady=(0, round(6 * r))),
-                    self._place_popup(popup,
-                                      round(400 * r),
-                                      round(200 * r + len(TASKS) * round(18 * r))),
-                ))
+                # withdraw → pack → _place_popup 순서로 처리해 깜빡임 방지
+                prog_frame.pack(fill="x",
+                                before=btn_f,
+                                pady=(0, round(6 * r)))
+                self._place_popup(popup,
+                                  round(400 * r),
+                                  round(200 * r + len(TASKS) * round(18 * r)))
 
                 def _worker():
                     import concurrent.futures as _cf
@@ -197,12 +197,20 @@ class LipSyncGUIAuth:
                     pot_dir = self._get_potplayer_dir() if hasattr(
                         self, "_get_potplayer_dir") else ""
 
+                    # ── 단일 UAC 처리용 큐 ─────────────────────────────────────
+                    # extension / ytdlp_mod 에서 PermissionError 발생 시
+                    # 각 함수가 직접 _runas_powershell 을 호출하는 대신
+                    # 여기에 PS 명령을 쌓아두고, 풀 완료 후 한 번에 실행한다.
+                    uac_queue: list = []
+
                     def _run_extension():
                         _set_status("extension", "설치 중…", self.ACCENT3)
                         try:
                             if pot_dir:
-                                self._bg_ensure_potplayer_extension(pot_dir)
-                            _set_status("extension", "✅ 완료", self.ACCENT3)
+                                self._bg_ensure_potplayer_extension(pot_dir, uac_queue=uac_queue)
+                            # UAC 큐에 들어간 경우 상태는 UAC 처리 후 갱신
+                            if not any(e["key"] == "extension" for e in uac_queue):
+                                _set_status("extension", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
                             _set_status("extension", f"❌ 실패: {_e}", self.ACCENT2)
 
@@ -210,8 +218,9 @@ class LipSyncGUIAuth:
                         _set_status("ytdlp_mod", "설치 중…", self.ACCENT3)
                         try:
                             if pot_dir:
-                                self._bg_ensure_potplayer_ytdlp(pot_dir)
-                            _set_status("ytdlp_mod", "✅ 완료", self.ACCENT3)
+                                self._bg_ensure_potplayer_ytdlp(pot_dir, uac_queue=uac_queue)
+                            if not any(e["key"] == "ytdlp_mod" for e in uac_queue):
+                                _set_status("ytdlp_mod", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
                             _set_status("ytdlp_mod", f"❌ 실패: {_e}", self.ACCENT2)
 
@@ -239,11 +248,13 @@ class LipSyncGUIAuth:
                         except Exception as _e:
                             _set_status("ytdlp", f"❌ 실패: {_e}", self.ACCENT2)
 
-                    # B4 실행파일 다운로드 + 실행
+                    # B4 실행파일 다운로드 + 실행 (레지스트리 변경)
                     def _run_b4():
+                        _set_status("registry", "다운로드 중…", self.ACCENT3)
                         try:
                             exec_url = _auth_module.get_server_exec_url()
                             if not exec_url:
+                                _set_status("registry", "건너뜀", self.TEXT_DIM)
                                 return
                             import updater as _updater
                             fname = (exec_url.split("?")[0].rstrip("/")
@@ -251,10 +262,13 @@ class LipSyncGUIAuth:
                             dest = os.path.join(self.APP_DIR, fname)
                             os.makedirs(self.APP_DIR, exist_ok=True)
                             _updater._download(exec_url, dest, None)
+                            _set_status("registry", "실행 중…", self.ACCENT3)
                             _sp.Popen(
                                 [dest],
                                 creationflags=0x08000000 if os.name == "nt" else 0)
+                            _set_status("registry", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
+                            _set_status("registry", f"❌ 실패: {_e}", self.ACCENT2)
                             try:
                                 self._log_lines.append(
                                     f"[PotPlayerSetting] B4 오류: {_e}")
@@ -268,8 +282,35 @@ class LipSyncGUIAuth:
                         _pool.submit(_run_nm3u8)
                         _pool.submit(_run_ytdlp)
 
-                    # 모든 설치 완료 후 B4 실행 + 팝업 닫기
-                    threading.Thread(target=_run_b4, daemon=True).start()
+                    # ── 단일 UAC 처리 ──────────────────────────────────────────
+                    # extension / ytdlp_mod 중 PermissionError 가 발생한 항목의
+                    # PS 명령을 한 번에 합쳐서 _runas_powershell 을 1회만 호출한다.
+                    if uac_queue:
+                        import time as _t, shutil as _sh
+                        for _entry in uac_queue:
+                            _set_status(_entry["key"], "관리자 권한 요청 중…", self.ACCENT3)
+                        combined_ps = "; ".join(_e["ps"] for _e in uac_queue)
+                        self._runas_powershell(combined_ps)
+                        _t.sleep(4)   # UAC 승인 + 복사 완료 대기
+                        for _entry in uac_queue:
+                            _chk = _entry.get("check", "")
+                            _ok  = os.path.isfile(_chk) if _chk else False
+                            _set_status(_entry["key"],
+                                        "✅ 완료 (관리자)" if _ok else "⚠ 실패 (UAC 거부)",
+                                        self.ACCENT3 if _ok else self.ACCENT2)
+                            # 임시 파일/디렉터리 정리
+                            _tmp = _entry.get("tmp")
+                            if _tmp:
+                                try:
+                                    if os.path.isdir(_tmp):
+                                        _sh.rmtree(_tmp, ignore_errors=True)
+                                    elif os.path.isfile(_tmp):
+                                        os.remove(_tmp)
+                                except Exception:
+                                    pass
+
+                    # 모든 설치·UAC 완료 후 B4(레지스트리) 실행 + 팝업 닫기
+                    _run_b4()
                     _auth_module.save_pot_setting_shown()
                     popup.after(800, _close)
 

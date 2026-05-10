@@ -115,7 +115,7 @@ class LipSyncGUIAuth:
             # 처음부터 전체 크기로 팝업 표시
             self._place_popup(popup,
                               round(400 * r),
-                              round(200 * r + len(TASKS) * round(18 * r)))
+                              round(160 * r + len(TASKS) * round(18 * r)))
 
             # [Bug 1] 닫기/X 클릭 시 save_pot_setting_shown() 호출 안 함
             # save는 변경 → 작업 완료 후에만 _worker 내에서 호출

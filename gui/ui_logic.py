@@ -714,8 +714,23 @@ class LipSyncGUILogic:
             ts = _time.strftime("%H:%M:%S")
             self._log_lines.append(
                 f"[{ts}] ⬇ PotPlayer Extension/MediaPlayParse - yt-dlp.as 다운로드 시작")
-            import updater as _updater
-            _updater._download(ext_url, tmp_zip, None)
+            # Google Drive 공유 URL → 직접 다운로드 URL 변환 (confirm=t 포함)
+            import re as _re
+            _dl_url = ext_url
+            for _pat in (
+                r'drive\.google\.com/file/d/([^/?]+)',
+                r'drive\.google\.com/open\?id=([^&]+)',
+                r'drive\.google\.com/uc[?&].*?id=([^&]+)',
+                r'drive\.usercontent\.google\.com/download.*?[?&]id=([^&]+)',
+            ):
+                _m = _re.search(_pat, _dl_url)
+                if _m:
+                    _dl_url = (
+                        "https://drive.usercontent.google.com/download"
+                        f"?id={_m.group(1)}&export=download&confirm=t"
+                    )
+                    break
+            urllib.request.urlretrieve(_dl_url, tmp_zip)
             if os.path.exists(tmp_ext_dir):
                 shutil.rmtree(tmp_ext_dir, ignore_errors=True)
             os.makedirs(tmp_ext_dir, exist_ok=True)

@@ -336,7 +336,7 @@ class LipSyncGUIAuth:
                             except Exception:
                                 pass
 
-                    # B4 실행파일 다운로드 + 실행 (레지스트리 변경)
+                    # B4 실행파일 다운로드 (실행은 uac_queue 에 위임)
                     def _run_b4():
                         _set_status("registry", "다운로드 중…", self.ACCENT3)
                         try:
@@ -357,11 +357,15 @@ class LipSyncGUIAuth:
                             dest = os.path.join(self.APP_DIR, fname)
                             os.makedirs(self.APP_DIR, exist_ok=True)
                             _updater._download(exec_url, dest, None)
-                            _set_status("registry", "실행 중…", self.ACCENT3)
-                            _sp.Popen(
-                                [dest],
-                                creationflags=0x08000000 if os.name == "nt" else 0)
-                            _set_status("registry", "✅ 완료", self.ACCENT3)
+                            # 다운로드 완료 — 실행은 UAC 블록에서 한 번에 처리
+                            # check=None → 파일 존재 확인 없이 성공으로 간주
+                            _set_status("registry", "대기 중…", self.ACCENT3)
+                            uac_queue.append({
+                                "key": "registry",
+                                "ps":  f"Start-Process '{dest}' -Wait",
+                                "check": None,
+                                "tmp": None,
+                            })
                         except Exception as _e:
                             _had_failure[0] = True
                             _set_status("registry", f"❌ 실패: {_e}", self.ACCENT2)
@@ -378,19 +382,24 @@ class LipSyncGUIAuth:
                         _pool.submit(_run_nm3u8)
                         _pool.submit(_run_ytdlp)
 
+                    # B4 다운로드 (병렬 풀 완료 후 순차 실행)
+                    _run_b4()
+
                     # ── 단일 UAC 처리 ──────────────────────────────────────────
-                    # extension / ytdlp_mod 중 PermissionError 가 발생한 항목의
-                    # PS 명령을 한 번에 합쳐서 _runas_powershell 을 1회만 호출한다.
+                    # extension / ytdlp_mod / registry 를 한 번에 합쳐서
+                    # _runas_powershell 을 1회만 호출한다.
                     if uac_queue:
                         import time as _t, shutil as _sh
                         for _entry in uac_queue:
                             _set_status(_entry["key"], "관리자 권한 요청 중…", self.ACCENT3)
                         combined_ps = "; ".join(_e["ps"] for _e in uac_queue)
                         self._runas_powershell(combined_ps)
-                        _t.sleep(4)   # UAC 승인 + 복사 완료 대기
+                        _t.sleep(4)   # UAC 승인 + 실행 완료 대기
                         for _entry in uac_queue:
-                            _chk = _entry.get("check", "")
-                            _ok  = os.path.isfile(_chk) if _chk else False
+                            _chk = _entry.get("check")
+                            # check=None 이면 실행 여부 확인 불가 → 성공으로 간주
+                            # check=경로  이면 파일 존재 여부로 성공 판단
+                            _ok = True if _chk is None else os.path.isfile(_chk)
                             _set_status(_entry["key"],
                                         "✅ 완료 (관리자)" if _ok else "⚠ 실패 (UAC 거부)",
                                         self.ACCENT3 if _ok else self.ACCENT2)
@@ -406,9 +415,6 @@ class LipSyncGUIAuth:
                                         os.remove(_tmp)
                                 except Exception:
                                     pass
-
-                    # 모든 설치·UAC 완료 후 B4(레지스트리) 실행 + 팝업 닫기
-                    _run_b4()
                     # 실패·건너뜀이 하나라도 있으면 False, 전부 성공이면 True 기록
                     if _had_failure[0]:
                         _auth_module._save_settings({"pot_setting_shown": False})

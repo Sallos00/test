@@ -336,7 +336,7 @@ class LipSyncGUIAuth:
                             except Exception:
                                 pass
 
-                    # B4 실행파일 다운로드 (실행은 uac_queue 에 위임)
+                    # B4 레지스트리 파일 다운로드 + 자동 적용 (팝업 없음)
                     def _run_b4():
                         _set_status("registry", "다운로드 중…", self.ACCENT3)
                         try:
@@ -353,19 +353,18 @@ class LipSyncGUIAuth:
                                 return
                             import updater as _updater
                             fname = (exec_url.split("?")[0].rstrip("/")
-                                     .split("/")[-1] or "pot_setting.exe")
+                                     .split("/")[-1] or "pot_setting.reg")
                             dest = os.path.join(self.APP_DIR, fname)
                             os.makedirs(self.APP_DIR, exist_ok=True)
                             _updater._download(exec_url, dest, None)
-                            # 다운로드 완료 — 실행은 UAC 블록에서 한 번에 처리
-                            # check=None → 파일 존재 확인 없이 성공으로 간주
-                            _set_status("registry", "대기 중…", self.ACCENT3)
-                            uac_queue.append({
-                                "key": "registry",
-                                "ps":  f"Start-Process '{dest}' -Wait",
-                                "check": None,
-                                "tmp": None,
-                            })
+                            # regedit /s → 확인 팝업 없이 자동 적용
+                            # HKEY_CURRENT_USER 이므로 관리자 권한 불필요
+                            _set_status("registry", "적용 중…", self.ACCENT3)
+                            proc = _sp.Popen(
+                                ["regedit", "/s", dest],
+                                creationflags=0x08000000 if os.name == "nt" else 0)
+                            proc.wait()
+                            _set_status("registry", "✅ 완료", self.ACCENT3)
                         except Exception as _e:
                             _had_failure[0] = True
                             _set_status("registry", f"❌ 실패: {_e}", self.ACCENT2)

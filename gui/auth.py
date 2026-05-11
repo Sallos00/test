@@ -344,6 +344,12 @@ class LipSyncGUIAuth:
                             if not exec_url:
                                 _had_failure[0] = True
                                 _set_status("registry", "건너뜀", self.TEXT_DIM)
+                                try:
+                                    self._log_lines.append(
+                                        "[PotPlayerSetting] registry 건너뜀: "
+                                        "서버 exec_url 미설정 (B4 셀 비어있음)")
+                                except Exception:
+                                    pass
                                 return
                             import updater as _updater
                             fname = (exec_url.split("?")[0].rstrip("/")
@@ -361,7 +367,7 @@ class LipSyncGUIAuth:
                             _set_status("registry", f"❌ 실패: {_e}", self.ACCENT2)
                             try:
                                 self._log_lines.append(
-                                    f"[PotPlayerSetting] B4 오류: {_e}")
+                                    f"[PotPlayerSetting] registry 오류: {_e}")
                             except Exception:
                                 pass
 

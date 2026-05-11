@@ -25,7 +25,7 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss nuitka ordered-set zstandard cython
+          pip install opencv-python numpy sounddevice scipy pywin32 comtypes psutil pyaudiowpatch pystray Pillow winotify mss nuitka ordered-set zstandard cython playwright
 
       - name: 아이콘 생성
         run: python scripts/make_icon.py
@@ -121,6 +121,8 @@ jobs:
           --include-module=pystray._util
           --include-module=six
           --include-package=PIL
+          --include-package=playwright
+          --include-package-data=playwright
           --include-package-data=cv2
           --include-data-files=lbpcascade_animeface.xml=lbpcascade_animeface.xml
           --include-data-files=app.ico=app.ico

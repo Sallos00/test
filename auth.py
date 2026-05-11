@@ -299,8 +299,8 @@ def get_server_exec_url() -> str:
         URL 문자열  → 다운로드 후 실행 대상
         ""          → 서버 오류 / B4 비어있음 (실행하지 않음)
     """
-    resp = _api({"action": "exec_url"}, timeout=6)
-    return str(resp.get("exec_url", "")).strip()
+    resp = _api({"action": "version"}, timeout=6)
+    return str(resp.get("reg_url", "")).strip()
 
 
 def poll_until_approved(pc_id: str, on_approved, on_revoked, on_error, stop_event):

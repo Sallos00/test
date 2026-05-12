@@ -1913,7 +1913,8 @@ class LipSyncGUILogic:
                     # ffmpeg 는 진행률을 \r 로 출력하므로 readline() 이 블로킹되고
                     # 파이프 버퍼가 가득 차 데드락이 발생한다.
                     # 청크 단위로 읽어 \r·\n 모두 분리하는 방식으로 해결한다.
-                    _rbuf = ""
+                    _rbuf      = ""
+                    _cancelled = False
                     while True:
                         _chunk = _p.stdout.read(512)
                         if not _chunk:
@@ -1941,7 +1942,11 @@ class LipSyncGUILogic:
                                 continue
 
                             if getattr(self, "_link_save_cancelled", False):
+                                # [버그 수정] 내부·외부 루프 모두 즉시 탈출
+                                _cancelled = True
                                 break
+                        if _cancelled:
+                            break
 
                             # ── 재생목록 카운터 파싱 ─────────────────────────────
                             _pm = re.search(
@@ -1950,6 +1955,14 @@ class LipSyncGUILogic:
                             if _pm:
                                 _pl_cur   = int(_pm.group(1))
                                 _pl_total = int(_pm.group(2))
+                                # [버그 수정] 새 항목 시작 시 상태 텍스트·프로그레스 초기화
+                                # → 이전 항목의 "ffmpeg 병합 중…" 고착 해제
+                                self.root.after(
+                                    0, lambda c=_pl_cur, t=_pl_total:
+                                        self._link_status(
+                                            f"⏳ 재생목록 다운로드 중… ({c}/{t})"))
+                                self.root.after(
+                                    0, lambda: self._dl_progress_update(0.0))
                             # ── 진행률 파싱 + 레이블 업데이트 ──────────────────
                             _m = re.search(r'\[download\]\s+([\d.]+)%', _ln)
                             if _m:
@@ -1961,8 +1974,12 @@ class LipSyncGUILogic:
                                         self._dl_progress_update(p, i))
                             # ── ffmpeg 병합 단계 감지 → 상태 메시지 표시 ────────
                             elif re.search(r'\[(?:Merger|ffmpeg)\]', _ln):
-                                self.root.after(0, lambda: self._link_status(
-                                    "⏳ ffmpeg 병합 중… (잠시 기다려 주세요)"))
+                                # [버그 수정] 재생목록 병합 시 항목 번호 포함
+                                _merge_info = (f" ({_pl_cur}/{_pl_total})"
+                                               if _pl_total > 1 else "")
+                                self.root.after(
+                                    0, lambda mi=_merge_info: self._link_status(
+                                        f"⏳ ffmpeg 병합 중… (잠시 기다려 주세요){mi}"))
                                 self.root.after(
                                     0, lambda: self._dl_progress_update(99.0))
                             # ── 파일 경로 추적 ───────────────────────────────────

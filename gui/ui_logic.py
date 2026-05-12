@@ -147,13 +147,6 @@ def _pick_best_stream_url(info: dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 _LINK_HISTORY_FILENAME = "Livehistory.json"
 
-# Playwright Chromium 고정 설치 경로
-# Chrome/Edge 가 없는 PC 에서 최초 1회 Chromium 을 여기에 설치한다.
-# exe · VSCode 환경 모두 동일한 경로를 참조하므로 환경 차이가 없다.
-_PW_BROWSER_DIR = os.path.join(
-    os.environ.get("APPDATA", os.path.expanduser("~")),
-    "AutoSync", "playwright_browsers")
-
 # 플랫폼별 이어보기 버튼 색상
 _PLATFORM_COLORS = {
     "youtube":  "#e63333",  # 빨간색
@@ -1043,62 +1036,55 @@ class LipSyncGUILogic:
     # ── Playwright (헤드리스 브라우저 m3u8 추출) ──────────────────────────────
 
     def _ensure_playwright(self):
-        """playwright 패키지와 Chromium 브라우저를 확보한다.
-
-        [변경사항]
-          - playwright 패키지는 Nuitka 번들에 포함 (build.yml --include-package=playwright).
-            pip install 로직 제거. 번들에 없으면 ImportError 가 호출부에서 잡힌다.
-          - PC 에 Chrome / Edge 가 있으면 Chromium 설치를 완전히 건너뜀.
-            (CDP 로 실제 Chrome 을 쓰므로 Chromium 불필요)
-          - Chrome 이 없을 때만 _PW_BROWSER_DIR 에 Chromium 을 1회 설치.
-            sys.executable 이 exe 자신이어도 "-m playwright" 는 번들 패키지를
-            그대로 사용하므로 정상 동작. ("-m pip" 와 달리 자기 호출 없음)
+        """playwright Python 패키지와 Chromium 브라우저를 확보한다.
+        없으면 pip install 후 playwright install chromium 을 실행한다.
         """
-        import sys
+        import importlib, sys
 
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
 
-        ts = _time.strftime("%H:%M:%S")
-
-        # ── Chrome / Edge 가 있으면 Chromium 설치 불필요 ──────────────────
-        _chrome_exe = self._find_real_chrome()
-        if _chrome_exe:
+        # 패키지 설치 여부 확인
+        if importlib.util.find_spec("playwright") is None:
             self._log_lines.append(
-                f"[{ts}] ✅ Chrome 감지 → Chromium 설치 건너뜀: {_chrome_exe}")
-            return
-
-        # ── Chrome 없음 → _PW_BROWSER_DIR 에 Chromium 1회 설치 ───────────
-        os.makedirs(_PW_BROWSER_DIR, exist_ok=True)
-
-        import glob as _glob
-        _already = bool(_glob.glob(
-            os.path.join(_PW_BROWSER_DIR, "chromium-*", "chrome-win", "chrome.exe")))
-
-        if _already:
+                f"[{_time.strftime('%H:%M:%S')}] ⬇ playwright 패키지 설치 중…")
+            self.root.after(0, lambda: self._link_status(
+                "⬇ playwright 설치 중… (최초 1회)"))
+            _pip = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "playwright",
+                 "--quiet", "--disable-pip-version-check"],
+                capture_output=True, text=True,
+                creationflags=0x08000000 if os.name == "nt" else 0)
+            if _pip.returncode != 0:
+                raise RuntimeError(
+                    f"playwright pip 설치 실패: {_pip.stderr.strip()[:200]}")
             self._log_lines.append(
-                f"[{ts}] ✅ Chromium 이미 설치됨: {_PW_BROWSER_DIR}")
-            return
+                f"[{_time.strftime('%H:%M:%S')}] ✅ playwright 패키지 설치 완료")
 
-        self._log_lines.append(
-            f"[{ts}] ⬇ Chromium 설치 중… (최초 1회, 수분 소요) → {_PW_BROWSER_DIR}")
-        self.root.after(0, lambda: self._link_status(
-            "⬇ Chromium 설치 중… (최초 1회, 수분 소요)"))
+        # Chromium 브라우저 설치 여부 확인
+        _chromium_ok = False
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as _pw:
+                _chromium_ok = os.path.isfile(
+                    _pw.chromium.executable_path)
+        except Exception:
+            pass
 
-        _env = os.environ.copy()
-        _env["PLAYWRIGHT_BROWSERS_PATH"] = _PW_BROWSER_DIR
-
-        _inst = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True, text=True, env=_env,
-            creationflags=0x08000000 if os.name == "nt" else 0)
-
-        if _inst.returncode != 0:
-            raise RuntimeError(
-                f"Chromium 설치 실패: {_inst.stderr.strip()[:200]}")
-
-        self._log_lines.append(
-            f"[{ts}] ✅ Chromium 설치 완료: {_PW_BROWSER_DIR}")
+        if not _chromium_ok:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⬇ Playwright Chromium 설치 중…")
+            self.root.after(0, lambda: self._link_status(
+                "⬇ Playwright Chromium 설치 중… (최초 1회, 수분 소요)"))
+            _inst = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True, text=True,
+                creationflags=0x08000000 if os.name == "nt" else 0)
+            if _inst.returncode != 0:
+                raise RuntimeError(
+                    f"Chromium 설치 실패: {_inst.stderr.strip()[:200]}")
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ✅ Playwright Chromium 설치 완료")
 
     def _find_real_chrome(self) -> str | None:
         """사용자 PC에 설치된 실제 Chrome/Edge 실행파일 경로를 반환한다."""
@@ -1139,11 +1125,6 @@ class LipSyncGUILogic:
 
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
-
-        # ── Chromium 경로 고정 ────────────────────────────────────────────
-        # Chrome 이 없을 때 _ensure_playwright 가 설치한 Chromium 을 가리킨다.
-        # exe · VSCode 환경 모두 동일한 경로를 쓰도록 항상 덮어쓴다.
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _PW_BROWSER_DIR
 
         try:
             from playwright.sync_api import sync_playwright, TimeoutError as _PWTimeout
@@ -1998,170 +1979,13 @@ class LipSyncGUILogic:
                     self._link_save_proc = None
                     return _p.returncode, _lines
 
-                # ── 재생목록 항목별 병렬 다운로드 + 백그라운드 병합 헬퍼 ─────────
-                def _playlist_parallel_dl():
-                    """재생목록을 항목별로 처리한다.
-                    각 항목: 비디오·오디오 동시 다운로드 → 완료 즉시 백그라운드 ffmpeg 병합
-                    → 병합 중에 다음 항목 다운로드 시작 (파이프라인).
-                    """
-                    import threading as _threading
-                    from concurrent.futures import ThreadPoolExecutor as _TPE
-                    nonlocal dest_file
-
-                    entries = _meta.get("entries") or []
-                    total   = len(entries)
-                    if total == 0:
-                        return 1, []
-                    all_ok     = True
-                    merge_pool = _TPE(max_workers=total)  # 병합은 모두 동시 진행
-                    merge_futs = []
-
-                    # cmd 에서 -f / -o / --merge-output-format / --postprocessor-args 제거
-                    # → 스트림별로 개별 지정하기 위해
-                    _skip_next = False
-                    _pl_base   = []
-                    _strip_keys = {"-f", "-o", "--merge-output-format",
-                                   "--postprocessor-args"}
-                    for _item in cmd[:-1]:   # 마지막 url 제외
-                        if _skip_next:
-                            _skip_next = False
-                            continue
-                        if _item in _strip_keys:
-                            _skip_next = True
-                            continue
-                        _pl_base.append(_item)
-
-                    for idx in range(1, total + 1):
-                        if getattr(self, "_link_save_cancelled", False):
-                            break
-
-                        # 진행 카운터 초기화
-                        self.root.after(0, lambda i=idx, t=total:
-                            self._dl_progress_update(0.0, f"({i}/{t})"))
-
-                        # 임시 출력 템플릿 (비디오/오디오 구분 접미사)
-                        _tmpl_vid = os.path.join(
-                            dl_dir, "%(title)s.%(id)s.__vid.%(ext)s")
-                        _tmpl_aud = os.path.join(
-                            dl_dir, "%(title)s.%(id)s.__aud.%(ext)s")
-
-                        _vid_file = [None]
-                        _aud_file = [None]
-                        _vid_rc   = [1]
-                        _aud_rc   = [1]
-
-                        def _dl_stream(stream_cmd, file_ref, rc_ref,
-                                       show_prog, _i=idx, _t=total):
-                            _sp = subprocess.Popen(
-                                stream_cmd,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT,
-                                text=True, encoding="utf-8",
-                                errors="replace",
-                                creationflags=0x08000000)
-                            self._link_save_proc = _sp
-                            for _sln in _sp.stdout:
-                                if getattr(self, "_link_save_cancelled", False):
-                                    _sp.kill()
-                                    break
-                                if show_prog:
-                                    _sm = re.search(
-                                        r'\[download\]\s+([\d.]+)%', _sln)
-                                    if _sm:
-                                        _pct = float(_sm.group(1))
-                                        self.root.after(
-                                            0, lambda p=_pct, i=_i, t=_t:
-                                            self._dl_progress_update(
-                                                p, f"({i}/{t})"))
-                                _df = re.search(
-                                    r'\[download\]\s+Destination:\s+(.+)',
-                                    _sln)
-                                if _df:
-                                    _fp = _df.group(1).strip()
-                                    file_ref[0] = _fp
-                                    self._link_save_tracked_files.add(_fp)
-                            _sp.wait()
-                            rc_ref[0] = _sp.returncode
-
-                        _vcmd = [*_pl_base,
-                                 "--playlist-items", str(idx),
-                                 "-f", "bestvideo",
-                                 "--no-post-overwrites",
-                                 "-o", _tmpl_vid, url]
-                        _acmd = [*_pl_base,
-                                 "--playlist-items", str(idx),
-                                 "-f", "bestaudio",
-                                 "--no-post-overwrites",
-                                 "-o", _tmpl_aud, url]
-
-                        _vt = _threading.Thread(
-                            target=_dl_stream,
-                            args=(_vcmd, _vid_file, _vid_rc, True))
-                        _at = _threading.Thread(
-                            target=_dl_stream,
-                            args=(_acmd, _aud_file, _aud_rc, False))
-                        _vt.start(); _at.start()
-                        _vt.join();  _at.join()
-
-                        if getattr(self, "_link_save_cancelled", False):
-                            break
-
-                        if _vid_rc[0] != 0 or _aud_rc[0] != 0:
-                            all_ok = False
-                            continue
-
-                        _vf = _vid_file[0]
-                        _af = _aud_file[0]
-                        if not _vf or not _af:
-                            all_ok = False
-                            continue
-
-                        # 최종 출력명: 비디오 파일에서 __vid.ext 제거 후 .mp4
-                        _out_mp4 = re.sub(r'\.__vid\.[^.]+$', '.mp4', _vf)
-                        self._link_save_tracked_files.add(_out_mp4)
-                        dest_file = _out_mp4
-
-                        # 백그라운드 병합 제출 (즉시 다음 항목 다운로드로 진행)
-                        def _merge(_v=_vf, _a=_af, _o=_out_mp4):
-                            try:
-                                subprocess.run(
-                                    [ffmpeg, "-y",
-                                     "-i", _v, "-i", _a,
-                                     "-c:v", "copy",
-                                     "-c:a", "aac", "-b:a", "192k",
-                                     _o],
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    creationflags=0x08000000)
-                            finally:
-                                for _tf in (_v, _a):
-                                    try:
-                                        if os.path.isfile(_tf):
-                                            os.remove(_tf)
-                                    except Exception:
-                                        pass
-                        merge_futs.append(merge_pool.submit(_merge))
-
-                    # 모든 백그라운드 병합 완료 대기
-                    if merge_futs:
-                        self.root.after(0, lambda: self._link_status(
-                            "⏳ 백그라운드 병합 완료 대기 중…"))
-                        for _fut in merge_futs:
-                            try:
-                                _fut.result()
-                            except Exception:
-                                all_ok = False
-
-                    merge_pool.shutdown(wait=False)
-                    return (0 if all_ok else 1), []
-
                 # ── 1차 실행 ─────────────────────────────────────────────────
+                # 재생목록·단일 영상 모두 _exec_ytdlp 로 처리한다.
+                # yt-dlp 가 자체적으로 bestvideo+bestaudio 병합을 수행하므로
+                # 별도 ffmpeg 호출 없이 안정적으로 동작한다.
                 self._log_lines.append(
                     f"[{ts}] ▶ [1단계] yt-dlp 직접 다운로드 시도 | URL: {url}")
-                if _is_playlist:
-                    _rc, _captured_lines = _playlist_parallel_dl()
-                else:
-                    _rc, _captured_lines = _exec_ytdlp(cmd)
+                _rc, _captured_lines = _exec_ytdlp(cmd)
 
                 self._log_lines.append(
                     f"[{ts}] {'✅ [1단계] yt-dlp 성공' if _rc == 0 else f'⚠ [1단계] yt-dlp 실패 (rc={_rc}) → 2단계로'}")

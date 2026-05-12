@@ -1035,14 +1035,61 @@ class LipSyncGUILogic:
 
     # ── Playwright (헤드리스 브라우저 m3u8 추출) ──────────────────────────────
 
+    # ── Python 인터프리터 경로 확보 헬퍼 ─────────────────────────────────────
+    @staticmethod
+    def _resolve_python_exe() -> str:
+        """실행 가능한 Python 인터프리터 경로를 반환한다.
+
+        [WinError 193] 방어 로직:
+          1. PyInstaller 패키징 환경(sys.frozen=True)에서는 sys.executable 이
+             앱 자신의 .exe 이므로 Python 인터프리터로 사용할 수 없다.
+             → PATH 에서 python / python3 을 직접 탐색한다.
+          2. pythonw.exe 로 실행된 경우 python.exe 로 교체를 시도한다.
+             (pythonw.exe 는 서브프로세스 stdout/stderr 캡처에 문제가 있음)
+          3. 위 모든 방법이 실패하면 RuntimeError 를 발생시켜
+             호출부에서 Playwright 준비 실패로 처리하도록 한다.
+        """
+        import sys, shutil
+
+        # ── 1단계: PyInstaller 패키징 여부 확인 ──────────────────────────
+        if not getattr(sys, "frozen", False):
+            _exe = sys.executable or ""
+
+            # ── 2단계: pythonw.exe → python.exe 교체 시도 ────────────────
+            if os.name == "nt" and _exe.lower().endswith("pythonw.exe"):
+                _candidate = _exe[:-len("pythonw.exe")] + "python.exe"
+                if os.path.isfile(_candidate):
+                    return _candidate
+
+            # ── 3단계: sys.executable 이 직접 실행 가능한지 확인 ──────────
+            if _exe and os.path.isfile(_exe):
+                return _exe
+
+        # ── 4단계: PATH 에서 인터프리터 탐색 ─────────────────────────────
+        # Python 버전 구분 없이 찾을 수 있는 이름을 우선 순서로 시도
+        for _name in ("python3", "python", "python3.exe", "python.exe"):
+            _found = shutil.which(_name)
+            if _found:
+                return _found
+
+        raise RuntimeError(
+            "Python 인터프리터를 찾을 수 없습니다 — "
+            "PATH 에 python 또는 python3 가 없습니다.")
+
     def _ensure_playwright(self):
         """playwright Python 패키지와 Chromium 브라우저를 확보한다.
         없으면 pip install 후 playwright install chromium 을 실행한다.
         """
-        import importlib, sys
+        import importlib
 
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
+
+        # [WinError 193 수정] sys.executable 을 직접 쓰지 않고
+        # 실제로 실행 가능한 Python 인터프리터를 안전하게 확보한다.
+        _py_exe = self._resolve_python_exe()
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] 🐍 Python 인터프리터: {_py_exe}")
 
         # 패키지 설치 여부 확인
         if importlib.util.find_spec("playwright") is None:
@@ -1051,7 +1098,7 @@ class LipSyncGUILogic:
             self.root.after(0, lambda: self._link_status(
                 "⬇ playwright 설치 중… (최초 1회)"))
             _pip = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "playwright",
+                [_py_exe, "-m", "pip", "install", "playwright",
                  "--quiet", "--disable-pip-version-check"],
                 capture_output=True, text=True,
                 creationflags=0x08000000 if os.name == "nt" else 0)
@@ -1060,6 +1107,8 @@ class LipSyncGUILogic:
                     f"playwright pip 설치 실패: {_pip.stderr.strip()[:200]}")
             self._log_lines.append(
                 f"[{_time.strftime('%H:%M:%S')}] ✅ playwright 패키지 설치 완료")
+            # 설치 후 모듈 캐시 갱신 (같은 프로세스에서 바로 import 가능하도록)
+            importlib.invalidate_caches()
 
         # Chromium 브라우저 설치 여부 확인
         _chromium_ok = False
@@ -1077,7 +1126,7 @@ class LipSyncGUILogic:
             self.root.after(0, lambda: self._link_status(
                 "⬇ Playwright Chromium 설치 중… (최초 1회, 수분 소요)"))
             _inst = subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
+                [_py_exe, "-m", "playwright", "install", "chromium"],
                 capture_output=True, text=True,
                 creationflags=0x08000000 if os.name == "nt" else 0)
             if _inst.returncode != 0:
@@ -1913,8 +1962,7 @@ class LipSyncGUILogic:
                     # ffmpeg 는 진행률을 \r 로 출력하므로 readline() 이 블로킹되고
                     # 파이프 버퍼가 가득 차 데드락이 발생한다.
                     # 청크 단위로 읽어 \r·\n 모두 분리하는 방식으로 해결한다.
-                    _rbuf      = ""
-                    _cancelled = False
+                    _rbuf = ""
                     while True:
                         _chunk = _p.stdout.read(512)
                         if not _chunk:
@@ -1942,11 +1990,7 @@ class LipSyncGUILogic:
                                 continue
 
                             if getattr(self, "_link_save_cancelled", False):
-                                # [버그 수정] 내부·외부 루프 모두 즉시 탈출
-                                _cancelled = True
                                 break
-                        if _cancelled:
-                            break
 
                             # ── 재생목록 카운터 파싱 ─────────────────────────────
                             _pm = re.search(
@@ -1955,14 +1999,6 @@ class LipSyncGUILogic:
                             if _pm:
                                 _pl_cur   = int(_pm.group(1))
                                 _pl_total = int(_pm.group(2))
-                                # [버그 수정] 새 항목 시작 시 상태 텍스트·프로그레스 초기화
-                                # → 이전 항목의 "ffmpeg 병합 중…" 고착 해제
-                                self.root.after(
-                                    0, lambda c=_pl_cur, t=_pl_total:
-                                        self._link_status(
-                                            f"⏳ 재생목록 다운로드 중… ({c}/{t})"))
-                                self.root.after(
-                                    0, lambda: self._dl_progress_update(0.0))
                             # ── 진행률 파싱 + 레이블 업데이트 ──────────────────
                             _m = re.search(r'\[download\]\s+([\d.]+)%', _ln)
                             if _m:
@@ -1974,12 +2010,8 @@ class LipSyncGUILogic:
                                         self._dl_progress_update(p, i))
                             # ── ffmpeg 병합 단계 감지 → 상태 메시지 표시 ────────
                             elif re.search(r'\[(?:Merger|ffmpeg)\]', _ln):
-                                # [버그 수정] 재생목록 병합 시 항목 번호 포함
-                                _merge_info = (f" ({_pl_cur}/{_pl_total})"
-                                               if _pl_total > 1 else "")
-                                self.root.after(
-                                    0, lambda mi=_merge_info: self._link_status(
-                                        f"⏳ ffmpeg 병합 중… (잠시 기다려 주세요){mi}"))
+                                self.root.after(0, lambda: self._link_status(
+                                    "⏳ ffmpeg 병합 중… (잠시 기다려 주세요)"))
                                 self.root.after(
                                     0, lambda: self._dl_progress_update(99.0))
                             # ── 파일 경로 추적 ───────────────────────────────────

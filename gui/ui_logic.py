@@ -1036,87 +1036,24 @@ class LipSyncGUILogic:
     # ── Playwright (헤드리스 브라우저 m3u8 추출) ──────────────────────────────
 
     # ── Python 인터프리터 경로 확보 헬퍼 ─────────────────────────────────────
-    @staticmethod
-    def _resolve_python_exe() -> str:
-        """실행 가능한 Python 인터프리터 경로를 반환한다.
-
-        [WinError 193] 방어 로직:
-          1. PyInstaller 패키징 환경(sys.frozen=True)에서는 sys.executable 이
-             앱 자신의 .exe 이므로 Python 인터프리터로 사용할 수 없다.
-             → PATH 에서 python / python3 을 직접 탐색한다.
-          2. pythonw.exe 로 실행된 경우 python.exe 로 교체를 시도한다.
-             (pythonw.exe 는 서브프로세스 stdout/stderr 캡처에 문제가 있음)
-          3. 위 모든 방법이 실패하면 RuntimeError 를 발생시켜
-             호출부에서 Playwright 준비 실패로 처리하도록 한다.
-        """
-        import sys, shutil
-
-        # ── 1단계: PyInstaller 패키징 여부 확인 ──────────────────────────
-        if not getattr(sys, "frozen", False):
-            _exe = sys.executable or ""
-
-            # ── 2단계: pythonw.exe → python.exe 교체 시도 ────────────────
-            if os.name == "nt" and _exe.lower().endswith("pythonw.exe"):
-                _candidate = _exe[:-len("pythonw.exe")] + "python.exe"
-                if os.path.isfile(_candidate):
-                    return _candidate
-
-            # ── 3단계: sys.executable 이 직접 실행 가능한지 확인 ──────────
-            if _exe and os.path.isfile(_exe):
-                return _exe
-
-        # ── 4단계: PATH 에서 인터프리터 탐색 ─────────────────────────────
-        # Python 버전 구분 없이 찾을 수 있는 이름을 우선 순서로 시도
-        for _name in ("python3", "python", "python3.exe", "python.exe"):
-            _found = shutil.which(_name)
-            if _found:
-                return _found
-
-        raise RuntimeError(
-            "Python 인터프리터를 찾을 수 없습니다 — "
-            "PATH 에 python 또는 python3 가 없습니다.")
-
     def _ensure_playwright(self):
-        """playwright Python 패키지와 Chromium 브라우저를 확보한다.
-        없으면 pip install 후 playwright install chromium 을 실행한다.
-        """
-        import importlib
+        """Chromium 브라우저가 설치되어 있지 않으면 playwright 내장
+        Node.js 드라이버(playwright/driver/node.exe + cli.js)로 설치한다.
 
+        playwright 패키지는 Nuitka 빌드 시 번들에 포함되므로
+        런타임 pip install 은 필요 없다.
+        Chromium 설치 역시 드라이버를 직접 실행하므로 Python 설치
+        여부와 무관하게 동작한다.
+        """
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
-
-        # [WinError 193 수정] sys.executable 을 직접 쓰지 않고
-        # 실제로 실행 가능한 Python 인터프리터를 안전하게 확보한다.
-        _py_exe = self._resolve_python_exe()
-        self._log_lines.append(
-            f"[{_time.strftime('%H:%M:%S')}] 🐍 Python 인터프리터: {_py_exe}")
-
-        # 패키지 설치 여부 확인
-        if importlib.util.find_spec("playwright") is None:
-            self._log_lines.append(
-                f"[{_time.strftime('%H:%M:%S')}] ⬇ playwright 패키지 설치 중…")
-            self.root.after(0, lambda: self._link_status(
-                "⬇ playwright 설치 중… (최초 1회)"))
-            _pip = subprocess.run(
-                [_py_exe, "-m", "pip", "install", "playwright",
-                 "--quiet", "--disable-pip-version-check"],
-                capture_output=True, text=True,
-                creationflags=0x08000000 if os.name == "nt" else 0)
-            if _pip.returncode != 0:
-                raise RuntimeError(
-                    f"playwright pip 설치 실패: {_pip.stderr.strip()[:200]}")
-            self._log_lines.append(
-                f"[{_time.strftime('%H:%M:%S')}] ✅ playwright 패키지 설치 완료")
-            # 설치 후 모듈 캐시 갱신 (같은 프로세스에서 바로 import 가능하도록)
-            importlib.invalidate_caches()
 
         # Chromium 브라우저 설치 여부 확인
         _chromium_ok = False
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as _pw:
-                _chromium_ok = os.path.isfile(
-                    _pw.chromium.executable_path)
+                _chromium_ok = os.path.isfile(_pw.chromium.executable_path)
         except Exception:
             pass
 
@@ -1125,8 +1062,13 @@ class LipSyncGUILogic:
                 f"[{_time.strftime('%H:%M:%S')}] ⬇ Playwright Chromium 설치 중…")
             self.root.after(0, lambda: self._link_status(
                 "⬇ Playwright Chromium 설치 중… (최초 1회, 수분 소요)"))
+
+            # playwright 내장 Node.js 드라이버로 Chromium 설치
+            # Python 설치 여부와 무관하게 동작한다.
+            from playwright._impl._driver import compute_driver_executable
+            _node_exe, _cli_js = compute_driver_executable()
             _inst = subprocess.run(
-                [_py_exe, "-m", "playwright", "install", "chromium"],
+                [str(_node_exe), str(_cli_js), "install", "chromium"],
                 capture_output=True, text=True,
                 creationflags=0x08000000 if os.name == "nt" else 0)
             if _inst.returncode != 0:

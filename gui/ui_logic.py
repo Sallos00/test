@@ -157,6 +157,14 @@ _PLATFORM_COLORS = {
     "default":  "#00c8e0",  # 기존 청록 (ACCENT)
 }
 
+# 공통 User-Agent — Chrome 최신 안정 버전으로 통일
+# 너무 낮은 버전을 쓰면 일부 스트리밍 사이트에서 봇으로 탐지될 수 있다.
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/136.0.0.0 Safari/537.36"
+)
+
 # Soop(AfreecaTV) 도메인 정규식 — 모듈 전역 공유
 _SOOP_RE = re.compile(
     r'(sooplive\.co\.kr|afreecatv\.com|soop\.com)',
@@ -1036,24 +1044,87 @@ class LipSyncGUILogic:
     # ── Playwright (헤드리스 브라우저 m3u8 추출) ──────────────────────────────
 
     # ── Python 인터프리터 경로 확보 헬퍼 ─────────────────────────────────────
-    def _ensure_playwright(self):
-        """Chromium 브라우저가 설치되어 있지 않으면 playwright 내장
-        Node.js 드라이버(playwright/driver/node.exe + cli.js)로 설치한다.
+    @staticmethod
+    def _resolve_python_exe() -> str:
+        """실행 가능한 Python 인터프리터 경로를 반환한다.
 
-        playwright 패키지는 Nuitka 빌드 시 번들에 포함되므로
-        런타임 pip install 은 필요 없다.
-        Chromium 설치 역시 드라이버를 직접 실행하므로 Python 설치
-        여부와 무관하게 동작한다.
+        [WinError 193] 방어 로직:
+          1. PyInstaller 패키징 환경(sys.frozen=True)에서는 sys.executable 이
+             앱 자신의 .exe 이므로 Python 인터프리터로 사용할 수 없다.
+             → PATH 에서 python / python3 을 직접 탐색한다.
+          2. pythonw.exe 로 실행된 경우 python.exe 로 교체를 시도한다.
+             (pythonw.exe 는 서브프로세스 stdout/stderr 캡처에 문제가 있음)
+          3. 위 모든 방법이 실패하면 RuntimeError 를 발생시켜
+             호출부에서 Playwright 준비 실패로 처리하도록 한다.
         """
+        import sys, shutil
+
+        # ── 1단계: PyInstaller 패키징 여부 확인 ──────────────────────────
+        if not getattr(sys, "frozen", False):
+            _exe = sys.executable or ""
+
+            # ── 2단계: pythonw.exe → python.exe 교체 시도 ────────────────
+            if os.name == "nt" and _exe.lower().endswith("pythonw.exe"):
+                _candidate = _exe[:-len("pythonw.exe")] + "python.exe"
+                if os.path.isfile(_candidate):
+                    return _candidate
+
+            # ── 3단계: sys.executable 이 직접 실행 가능한지 확인 ──────────
+            if _exe and os.path.isfile(_exe):
+                return _exe
+
+        # ── 4단계: PATH 에서 인터프리터 탐색 ─────────────────────────────
+        # Python 버전 구분 없이 찾을 수 있는 이름을 우선 순서로 시도
+        for _name in ("python3", "python", "python3.exe", "python.exe"):
+            _found = shutil.which(_name)
+            if _found:
+                return _found
+
+        raise RuntimeError(
+            "Python 인터프리터를 찾을 수 없습니다 — "
+            "PATH 에 python 또는 python3 가 없습니다.")
+
+    def _ensure_playwright(self):
+        """playwright Python 패키지와 Chromium 브라우저를 확보한다.
+        없으면 pip install 후 playwright install chromium 을 실행한다.
+        """
+        import importlib
+
         if not hasattr(self, "_log_lines"):
             self._log_lines = collections.deque(maxlen=100)
+
+        # [WinError 193 수정] sys.executable 을 직접 쓰지 않고
+        # 실제로 실행 가능한 Python 인터프리터를 안전하게 확보한다.
+        _py_exe = self._resolve_python_exe()
+        self._log_lines.append(
+            f"[{_time.strftime('%H:%M:%S')}] 🐍 Python 인터프리터: {_py_exe}")
+
+        # 패키지 설치 여부 확인
+        if importlib.util.find_spec("playwright") is None:
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ⬇ playwright 패키지 설치 중…")
+            self.root.after(0, lambda: self._link_status(
+                "⬇ playwright 설치 중… (최초 1회)"))
+            _pip = subprocess.run(
+                [_py_exe, "-m", "pip", "install", "playwright",
+                 "--quiet", "--disable-pip-version-check"],
+                capture_output=True, text=True,
+                creationflags=0x08000000 if os.name == "nt" else 0)
+            if _pip.returncode != 0:
+                raise RuntimeError(
+                    f"playwright pip 설치 실패: {_pip.stderr.strip()[:200]}")
+            self._log_lines.append(
+                f"[{_time.strftime('%H:%M:%S')}] ✅ playwright 패키지 설치 완료")
+            # 설치 후 모듈 캐시 갱신 (같은 프로세스에서 바로 import 가능하도록)
+            importlib.invalidate_caches()
 
         # Chromium 브라우저 설치 여부 확인
         _chromium_ok = False
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as _pw:
-                _chromium_ok = os.path.isfile(_pw.chromium.executable_path)
+                _chromium_ok = os.path.isfile(
+                    _pw.chromium.executable_path)
         except Exception:
             pass
 
@@ -1062,13 +1133,8 @@ class LipSyncGUILogic:
                 f"[{_time.strftime('%H:%M:%S')}] ⬇ Playwright Chromium 설치 중…")
             self.root.after(0, lambda: self._link_status(
                 "⬇ Playwright Chromium 설치 중… (최초 1회, 수분 소요)"))
-
-            # playwright 내장 Node.js 드라이버로 Chromium 설치
-            # Python 설치 여부와 무관하게 동작한다.
-            from playwright._impl._driver import compute_driver_executable
-            _node_exe, _cli_js = compute_driver_executable()
             _inst = subprocess.run(
-                [str(_node_exe), str(_cli_js), "install", "chromium"],
+                [_py_exe, "-m", "playwright", "install", "chromium"],
                 capture_output=True, text=True,
                 creationflags=0x08000000 if os.name == "nt" else 0)
             if _inst.returncode != 0:
@@ -1195,10 +1261,7 @@ class LipSyncGUILogic:
                             "--autoplay-policy=no-user-gesture-required",
                         ])
                     _ctx = _browser.new_context(
-                        user_agent=(
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/124.0.0.0 Safari/537.36"),
+                        user_agent=_UA,
                         ignore_https_errors=True)
 
                 # ── [개선1] request + response 양쪽에서 m3u8 감지 ──────────
@@ -1374,13 +1437,20 @@ class LipSyncGUILogic:
                     _try_video_play()
 
                 # ── m3u8 감지될 때까지 최대 20초 폴링 ────────────────────
-                _deadline = _tm.time() + 20
+                _deadline      = _tm.time() + 20
+                _last_retry_at = 0   # video.play() 재시도 마지막 구간 기록
                 while not _found_info and _tm.time() < _deadline:
                     _tm.sleep(0.5)
-                    # 5초, 10초 시점에 video.play() 재시도
+                    # 5초·10초 구간에 video.play() 재시도
+                    # 부동소수점 오차로 정확히 5.0/10.0이 되지 않으므로
+                    # ±0.4초 허용 범위(0.5초 sleep 주기의 절반 미만)로 비교한다.
                     _elapsed = 20 - (_deadline - _tm.time())
-                    if _elapsed in (5.0, 10.0):
-                        _try_video_play()
+                    for _target in (5, 10):
+                        if (abs(_elapsed - _target) < 0.4
+                                and _last_retry_at != _target):
+                            _last_retry_at = _target
+                            _try_video_play()
+                            break
 
                 # ── 쿠키 수집 ─────────────────────────────────────────────
                 try:
@@ -1454,10 +1524,7 @@ class LipSyncGUILogic:
             req = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"),
+                    "User-Agent": _UA,
                     "Accept-Language": "ko-KR,ko;q=0.9",
                 })
             with urllib.request.urlopen(req, timeout=8) as resp:
@@ -1714,6 +1781,13 @@ class LipSyncGUILogic:
             os.makedirs(dl_dir, exist_ok=True)
         except Exception:
             dl_dir = self.APP_DIR
+
+        # 스레드 시작 전 즉시 버튼 비활성화 — after(0) 비동기 처리 시
+        # 더블클릭으로 중복 실행되는 경쟁 조건을 방지한다.
+        try:
+            self._link_save_btn.config(state="disabled")
+        except Exception:
+            pass
 
         def _run():
             ts = _time.strftime("%H:%M:%S")
@@ -2503,9 +2577,7 @@ class LipSyncGUILogic:
                                     _sdest = os.path.join(dl_dir, f"{_sname}.{_ext}")
                                     try:
                                         _req = _ureq.Request(_su, headers={
-                                            "User-Agent": (
-                                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                                "AppleWebKit/537.36 Chrome/124.0 Safari/537.36"),
+                                            "User-Agent": _UA,
                                             **{k: v for k, v in _shdrs.items()
                                                if k.lower() in (
                                                    "referer", "origin",

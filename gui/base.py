@@ -322,9 +322,19 @@ class LipSyncGUIBase:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                  self.STARTUP_REG, 0, winreg.KEY_SET_VALUE)
             if self._startup_var.get():
-                exe_path = (sys.executable
-                            if getattr(sys, "frozen", False)
-                            else os.path.abspath(__file__))
+                # PyInstaller: sys.frozen = True → sys.executable = EXE 경로
+                # Nuitka:      sys.frozen 없음  → sys.executable = EXE 경로
+                # 개발 환경:   sys.executable 이 python*.exe 형태
+                # → 실행파일명이 python 계열이 아니면 컴파일된 EXE로 판단한다.
+                _exe      = sys.executable
+                _basename = os.path.basename(_exe).lower()
+                _is_compiled = (
+                    getattr(sys, "frozen", False)
+                    or not (_basename.startswith("python")
+                            and (_basename.endswith(".exe")
+                                 or "." not in _basename))
+                )
+                exe_path = _exe if _is_compiled else os.path.abspath(__file__)
                 winreg.SetValueEx(key, self.STARTUP_NAME, 0,
                                   winreg.REG_SZ, f'"{exe_path}"')
             else:

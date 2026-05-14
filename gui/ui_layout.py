@@ -481,6 +481,15 @@ class LipSyncGUILayout:
         # 다운로드 권한 변경 시 pack 복원에 사용
         self._link_save_btn_pack_kw = dict(side="left", padx=(round(4*r), 0))
 
+        self._link_batch_btn = reg(
+            tk.Button(btn_row, text="목록",
+                      bg=self.BG3, fg="#c8a83c",
+                      activebackground=self.BORDER,
+                      command=self._link_batch_save_popup, **BTN_S),
+            bg="BG3", fg="TEXT_MID", abg="BORDER")
+        self._link_batch_btn.pack(side="left", padx=(round(2*r), 0))
+        self._link_batch_btn_pack_kw = dict(side="left", padx=(round(2*r), 0))
+
         self._link_stop_btn = reg(
             tk.Button(btn_row, text="■ 중지",
                       bg=self.BG3, fg=self.ACCENT2,
@@ -539,26 +548,6 @@ class LipSyncGUILayout:
                      bg=self.BG2, fg=self.TEXT_DIM),
             bg="BG2", fg="TEXT_DIM")
         self._link_status_lbl.pack(anchor="w", pady=(round(4*r), 0))
-
-        # 다운로드 진행 UI (초기 숨김)
-        dl_row = tk.Frame(_play_page, bg=self.BG2)
-        reg(dl_row, bg="BG2")
-        self._dl_row = dl_row
-
-        self._dl_bar_bg = tk.Frame(dl_row, bg=self.BG3, height=8)
-        self._dl_bar_bg.pack(fill="x")
-        self._dl_bar_bg.pack_propagate(False)
-        self._dl_bar = tk.Frame(self._dl_bar_bg, bg=self.ACCENT3, height=8)
-        self._dl_bar.place(x=0, y=0, width=0, height=8)
-
-        self._dl_pct_lbl = reg(
-            tk.Label(dl_row, text="0%",
-                     font=("Consolas", max(7, self.F_MONO_S - 1)),
-                     bg=self.BG2, fg=self.ACCENT3),
-            bg="BG2", fg="TEXT_MID")
-        self._dl_pct_lbl.pack(anchor="w", pady=(round(2*r), 0))
-
-        dl_row.pack_forget()   # 다운로드 시작 전까지 숨김
 
         # ── 서브탭 2: 저장위치 (녹화/캡처 탭 record_save_dir 연동) ───────────
         _savedir_page = tk.Frame(top, bg=self.BG2)
@@ -638,9 +627,51 @@ class LipSyncGUILayout:
         reg(tk.Frame(parent, bg=self.BORDER, height=1),
             bg="BORDER").pack(fill="x", padx=P2, pady=(round(8*r), 0))
 
-        # ── 기록 목록 헤더 ────────────────────────────────────────────────────
-        hdr_row = tk.Frame(parent, bg=self.BG, padx=P2)
-        hdr_row.pack(fill="x", pady=(round(6*r), 0))
+        # ── 기록 탭 바 ───────────────────────────────────────────────────────
+        _hist_tab_bar = tk.Frame(parent, bg=self.BG, padx=P2)
+        _hist_tab_bar.pack(fill="x", pady=(round(6*r), 0))
+        reg(_hist_tab_bar, bg="BG")
+
+        _hist_pages    = {}
+        _hist_tab_btns = {}
+        _TAB_BTN = dict(font=("Consolas", self.F_MONO_S, "bold"),
+                        relief="flat", cursor="hand2",
+                        padx=round(8*r), pady=round(2*r),
+                        activebackground=self.BORDER)
+
+        def _switch_hist_tab(name):
+            for _p in _hist_pages.values():
+                _p.pack_forget()
+            _hist_pages[name].pack(fill="both", expand=True)
+            for _n, _b in _hist_tab_btns.items():
+                if _n == name:
+                    _b.config(bg=self.BG3, fg=self.ACCENT)
+                else:
+                    _b.config(bg=self.BG, fg=self.TEXT_DIM)
+
+        self._switch_hist_tab = _switch_hist_tab
+
+        for _lbl, _key in [("링크 시청 기록", "livehist"),
+                            ("다운로드 기록",  "dlhist")]:
+            _b = reg(tk.Button(_hist_tab_bar, text=_lbl,
+                               bg=self.BG, fg=self.TEXT_DIM,
+                               command=lambda k=_key: _switch_hist_tab(k),
+                               **_TAB_BTN),
+                     bg="BG", fg="TEXT_DIM", abg="BORDER")
+            _b.pack(side="left")
+            _hist_tab_btns[_key] = _b
+
+        # 권한 제어에서 접근할 수 있도록 다운로드 기록 탭 버튼을 self 에 저장
+        self._dl_hist_tab_btn         = _hist_tab_btns["dlhist"]
+        self._dl_hist_tab_btn_pack_kw = dict(side="left")
+
+        # ── 탭 1: 링크 시청 기록 ─────────────────────────────────────────────
+        _livehist_page = tk.Frame(parent, bg=self.BG)
+        _hist_pages["livehist"] = _livehist_page
+        reg(_livehist_page, bg="BG")
+
+        hdr_row = tk.Frame(_livehist_page, bg=self.BG, padx=P2)
+        hdr_row.pack(fill="x", pady=(round(4*r), 0))
         reg(hdr_row, bg="BG")
 
         reg(tk.Label(hdr_row, text="링크 시청 기록",
@@ -657,8 +688,7 @@ class LipSyncGUILayout:
                       command=self._live_hist_clear_all),
             bg="BG3", fg="ACCENT2", abg="BORDER").pack(side="right")
 
-        # ── 스크롤 영역 ───────────────────────────────────────────────────────
-        scroll_outer = tk.Frame(parent, bg=self.BG)
+        scroll_outer = tk.Frame(_livehist_page, bg=self.BG)
         scroll_outer.pack(fill="both", expand=True, pady=(round(4*r), 0))
         reg(scroll_outer, bg="BG")
 
@@ -690,9 +720,106 @@ class LipSyncGUILayout:
         canvas.bind("<MouseWheel>", _on_mousewheel)
         self._live_hist_mousewheel_fn = _on_mousewheel
 
+        # ── 탭 2: 다운로드 기록 ──────────────────────────────────────────────
+        _dlhist_page = tk.Frame(parent, bg=self.BG)
+        _hist_pages["dlhist"] = _dlhist_page
+        reg(_dlhist_page, bg="BG")
+
+        # 현재 다운로드 상태 카드
+        _cur_card = tk.Frame(_dlhist_page, bg=self.BG2,
+                             padx=round(10*r), pady=round(6*r))
+        _cur_card.pack(fill="x", padx=P2, pady=(round(4*r), 0))
+        reg(_cur_card, bg="BG2")
+
+        reg(tk.Label(_cur_card, text="현재 다운로드",
+                     font=("Consolas", self.F_MONO_S, "bold"),
+                     bg=self.BG2, fg=self.TEXT_MID),
+            bg="BG2", fg="TEXT_MID").pack(anchor="w")
+
+        # 제목 + 퍼센트를 한 행에 — 퍼센트만 녹색
+        _cur_info_row = tk.Frame(_cur_card, bg=self.BG2)
+        _cur_info_row.pack(anchor="w", pady=(round(2*r), 0))
+        reg(_cur_info_row, bg="BG2")
+
+        self._dl_current_title_lbl = reg(
+            tk.Label(_cur_info_row, text="다운로드 없음",
+                     font=("Consolas", self.F_MONO_S),
+                     bg=self.BG2, fg=self.TEXT_DIM,
+                     anchor="w"),
+            bg="BG2", fg="TEXT_DIM")
+        self._dl_current_title_lbl.pack(side="left")
+
+        self._dl_current_pct_lbl = reg(
+            tk.Label(_cur_info_row, text="",
+                     font=("Consolas", self.F_MONO_S, "bold"),
+                     bg=self.BG2, fg=self.ACCENT3,
+                     anchor="w"),
+            bg="BG2", fg="ACCENT3")
+        self._dl_current_pct_lbl.pack(side="left", padx=(round(4*r), 0))
+
+        # 구분선
+        reg(tk.Frame(_dlhist_page, bg=self.BORDER, height=1),
+            bg="BORDER").pack(fill="x", padx=P2, pady=(round(6*r), 0))
+
+        # 다운로드 기록 헤더
+        _dl_hdr = tk.Frame(_dlhist_page, bg=self.BG, padx=P2)
+        _dl_hdr.pack(fill="x", pady=(round(4*r), 0))
+        reg(_dl_hdr, bg="BG")
+
+        reg(tk.Label(_dl_hdr, text="다운로드 기록",
+                     font=("Consolas", self.F_MONO_S, "bold"),
+                     bg=self.BG, fg=self.TEXT_DIM),
+            bg="BG", fg="TEXT_DIM").pack(side="left")
+
+        reg(tk.Button(_dl_hdr, text="🗑 전체 삭제",
+                      font=("Consolas", max(6, self.F_MONO_S - 1), "bold"),
+                      bg=self.BG3, fg=self.ACCENT2,
+                      activebackground=self.BORDER,
+                      relief="flat", cursor="hand2",
+                      padx=round(6*r), pady=round(1*r),
+                      command=self._dl_hist_clear_all),
+            bg="BG3", fg="ACCENT2", abg="BORDER").pack(side="right")
+
+        # 다운로드 기록 스크롤 영역
+        _dl_scroll = tk.Frame(_dlhist_page, bg=self.BG)
+        _dl_scroll.pack(fill="both", expand=True, pady=(round(4*r), 0))
+        reg(_dl_scroll, bg="BG")
+
+        tk.Frame(_dl_scroll, bg=self.BG, width=P2).pack(side="right", fill="y")
+        tk.Frame(_dl_scroll, bg=self.BG, width=P2).pack(side="left",  fill="y")
+
+        _dl_canvas = tk.Canvas(_dl_scroll, bg=self.BG, highlightthickness=0)
+        _dl_canvas.pack(side="left", fill="both", expand=True)
+
+        self._dl_hist_canvas        = _dl_canvas
+        self._dl_hist_frame         = tk.Frame(_dl_canvas, bg=self.BG)
+        self._dl_hist_canvas_window = _dl_canvas.create_window(
+            (0, 0), window=self._dl_hist_frame, anchor="nw")
+
+        def _on_dl_frame_cfg(e):
+            if getattr(self, "_dl_hist_refreshing", False):
+                return
+            _dl_canvas.configure(scrollregion=_dl_canvas.bbox("all"))
+
+        def _on_dl_canvas_cfg(e):
+            _dl_canvas.itemconfig(self._dl_hist_canvas_window, width=e.width)
+            self._dl_hist_frame.config(width=e.width)
+
+        def _on_dl_mousewheel(e):
+            _dl_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        self._dl_hist_frame.bind("<Configure>", _on_dl_frame_cfg)
+        _dl_canvas.bind("<Configure>", _on_dl_canvas_cfg)
+        _dl_canvas.bind("<MouseWheel>", _on_dl_mousewheel)
+        self._dl_hist_mousewheel_fn = _on_dl_mousewheel
+
+        # 초기 탭: 링크 시청 기록
+        _switch_hist_tab("livehist")
+
         # 이어보기 버튼 초기 상태 및 기록 목록 갱신
         self._update_link_resume_btn()
         self._refresh_live_history_list()
+        self._refresh_dl_history_list()
 
     # ── 시청 기록 탭 구성 ─────────────────────────────────────────────────────
     def _build_history_tab(self, parent, r, P, P2, MONO, MONO_S):

@@ -109,7 +109,6 @@ class LipSyncGUIAuth:
                 ("ffmpeg",     "ffmpeg.exe"),
                 ("nm3u8",      "N_m3u8DL-RE.exe"),
                 ("ytdlp",      "yt-dlp.exe"),
-                ("chromium",   "Playwright Chromium"),
                 ("registry",   "레지스트리 변경"),
             ]
 
@@ -181,13 +180,6 @@ class LipSyncGUIAuth:
                                  if hasattr(self, "_ytdlp_path") else "")
                         return bool(os.path.isfile(local) or
                                     _shutil.which("yt-dlp"))
-                    elif key == "chromium":
-                        try:
-                            from playwright.sync_api import sync_playwright
-                            with sync_playwright() as _pw:
-                                return os.path.isfile(_pw.chromium.executable_path)
-                        except Exception:
-                            return False
                 except Exception:
                     pass
                 return None  # registry 포함 판별 불가 → 대기 중
@@ -344,19 +336,6 @@ class LipSyncGUIAuth:
                             except Exception:
                                 pass
 
-                    def _run_chromium():
-                        _set_status("chromium", "다운로드 중…", self.ACCENT3)
-                        try:
-                            self._ensure_playwright()
-                            _set_status("chromium", "✅ 완료", self.ACCENT3)
-                        except Exception as _e:
-                            _had_failure[0] = True
-                            _set_status("chromium", f"❌ 실패: {_e}", self.ACCENT2)
-                            try:
-                                self._log_lines.append(f"[PotPlayerSetting] chromium 오류: {_e}")
-                            except Exception:
-                                pass
-
                     # B4 레지스트리 파일 다운로드 (실행은 uac_queue 에 위임)
                     def _run_b4():
                         _set_status("registry", "다운로드 중…", self.ACCENT3)
@@ -396,13 +375,12 @@ class LipSyncGUIAuth:
                             except Exception:
                                 pass
 
-                    with _cf.ThreadPoolExecutor(max_workers=6) as _pool:
+                    with _cf.ThreadPoolExecutor(max_workers=5) as _pool:
                         _pool.submit(_run_extension)
                         _pool.submit(_run_ytdlp_mod)
                         _pool.submit(_run_ffmpeg)
                         _pool.submit(_run_nm3u8)
                         _pool.submit(_run_ytdlp)
-                        _pool.submit(_run_chromium)
 
                     # B4 다운로드 (병렬 풀 완료 후 순차 실행)
                     _run_b4()
@@ -515,6 +493,11 @@ class LipSyncGUIAuth:
 
         perm == "차단" : pack_forget() 으로 버튼 숨김
         perm == "허가" : 원래 pack 옵션으로 버튼 복원
+
+        저장 버튼과 함께 아래 항목도 동일하게 제어한다:
+          - 목록 저장 버튼 (_link_batch_btn)
+          - 다운로드 기록 탭 버튼 (_dl_hist_tab_btn)
+            차단 시 탭이 열려 있으면 링크 시청 기록 탭으로 전환한다.
         """
         btn = getattr(self, "_link_save_btn", None)
         if btn is None:
@@ -522,21 +505,40 @@ class LipSyncGUIAuth:
         try:
             if perm == "차단":
                 btn.pack_forget()
-                for _attr in ("_link_sub_video_btn", "_link_sub_both_btn"):
+                for _attr in ("_link_sub_video_btn", "_link_sub_both_btn",
+                              "_link_batch_btn"):
                     _b = getattr(self, _attr, None)
                     if _b:
                         _b.pack_forget()
+                # 다운로드 기록 탭 버튼 숨김
+                _tab_btn = getattr(self, "_dl_hist_tab_btn", None)
+                if _tab_btn:
+                    _tab_btn.pack_forget()
+                # 현재 다운로드 기록 탭이 열려 있으면 링크 시청 기록으로 전환
+                _switch = getattr(self, "_switch_hist_tab", None)
+                if _switch:
+                    try:
+                        _switch("livehist")
+                    except Exception:
+                        pass
             else:
                 kw = getattr(self, "_link_save_btn_pack_kw", dict(side="left"))
                 btn.pack(**kw)
                 for _attr, _kw_attr in (
                     ("_link_sub_video_btn", "_link_sub_video_btn_pack_kw"),
                     ("_link_sub_both_btn",  "_link_sub_both_btn_pack_kw"),
+                    ("_link_batch_btn",     "_link_batch_btn_pack_kw"),
                 ):
                     _b  = getattr(self, _attr, None)
                     _kw = getattr(self, _kw_attr, dict(side="left"))
                     if _b:
                         _b.pack(**_kw)
+                # 다운로드 기록 탭 버튼 복원
+                _tab_btn = getattr(self, "_dl_hist_tab_btn", None)
+                _tab_kw  = getattr(self, "_dl_hist_tab_btn_pack_kw",
+                                   dict(side="left"))
+                if _tab_btn:
+                    _tab_btn.pack(**_tab_kw)
         except Exception:
             pass
 

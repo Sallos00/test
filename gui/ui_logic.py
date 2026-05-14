@@ -145,7 +145,8 @@ def _pick_best_stream_url(info: dict) -> str:
 # 링크 재생 모드: 이 플래그가 True일 때 싱크 보정 · OP/ED 비활성화 처리는
 # _toggle() 및 _start_oped_monitor() 진입부에서 체크한다.
 # ─────────────────────────────────────────────────────────────────────────────
-_LINK_HISTORY_FILENAME = "Livehistory.json"
+_LINK_HISTORY_FILENAME     = "Livehistory.json"
+_DOWNLOAD_HISTORY_FILENAME = "DownloadHistory.json"
 
 # 플랫폼별 이어보기 버튼 색상
 _PLATFORM_COLORS = {
@@ -156,14 +157,6 @@ _PLATFORM_COLORS = {
     "soop":     "#ff6b35",  # Soop 오렌지
     "default":  "#00c8e0",  # 기존 청록 (ACCENT)
 }
-
-# 공통 User-Agent — Chrome 최신 안정 버전으로 통일
-# 너무 낮은 버전을 쓰면 일부 스트리밍 사이트에서 봇으로 탐지될 수 있다.
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/136.0.0.0 Safari/537.36"
-)
 
 # Soop(AfreecaTV) 도메인 정규식 — 모듈 전역 공유
 _SOOP_RE = re.compile(
@@ -593,6 +586,209 @@ class LipSyncGUILogic:
         self._save_live_history(records)
         self._update_link_resume_btn()
         self._refresh_live_history_list()
+
+    # ── DownloadHistory.json 파일 관리 ──────────────────────────────────────
+
+    def _dl_history_path(self) -> str:
+        return os.path.join(self.APP_DIR, _DOWNLOAD_HISTORY_FILENAME)
+
+    def _load_dl_history(self) -> list:
+        """DownloadHistory.json 로드. 실패 시 빈 리스트 반환."""
+        try:
+            p = self._dl_history_path()
+            if not os.path.isfile(p):
+                return []
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def _save_dl_history(self, records: list):
+        try:
+            with open(self._dl_history_path(), "w", encoding="utf-8") as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _save_dl_history_entry(self, url: str, title: str,
+                               dl_dir: str, status: str):
+        """다운로드 완료/실패 기록을 저장하고 목록을 갱신한다."""
+        records = self._load_dl_history()
+        records.append({
+            "url":       url,
+            "title":     title,
+            "dl_dir":    dl_dir,
+            "timestamp": _time.strftime("%Y-%m-%d %H:%M:%S"),
+            "status":    status,   # "success" | "failed"
+        })
+        # 최대 200개 유지
+        if len(records) > 200:
+            records = records[-200:]
+        self._save_dl_history(records)
+        self.root.after(0, self._refresh_dl_history_list)
+
+    def _dl_hist_clear_all(self):
+        """다운로드 기록 전체 삭제."""
+        import tkinter.messagebox as _mb
+        if not _mb.askyesno("다운로드 기록 삭제",
+                            "다운로드 기록을 전부 삭제하시겠습니까?"):
+            return
+        self._save_dl_history([])
+        self._refresh_dl_history_list()
+
+    def _dl_hist_delete_one(self, timestamp: str):
+        """다운로드 기록 개별 삭제 (timestamp 기준)."""
+        records = self._load_dl_history()
+        records = [r for r in records if r.get("timestamp", "") != timestamp]
+        self._save_dl_history(records)
+        self._refresh_dl_history_list()
+
+    def _refresh_dl_history_list(self):
+        """다운로드 기록 탭의 목록을 갱신한다."""
+        if not hasattr(self, "_dl_hist_canvas"):
+            return
+        canvas = self._dl_hist_canvas
+        try:
+            if not canvas.winfo_exists():
+                return
+        except Exception:
+            return
+        self._dl_hist_refreshing = True
+        try:
+            self._refresh_dl_history_list_inner(canvas)
+        finally:
+            self._dl_hist_refreshing = False
+
+    def _refresh_dl_history_list_inner(self, canvas):
+        records  = self._load_dl_history()
+        r        = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        mw_fn    = getattr(self, "_dl_hist_mousewheel_fn", None)
+        entries  = list(reversed(records))  # 최신순
+
+        if not hasattr(self, "_dl_hist_row_cache"):
+            self._dl_hist_row_cache = []
+
+        cache = self._dl_hist_row_cache
+        frame = self._dl_hist_frame
+
+        # 빈 상태 레이블
+        empty_lbl = getattr(self, "_dl_hist_empty_lbl", None)
+        if not entries:
+            for cached in cache:
+                cached["row"].pack_forget()
+            if empty_lbl is None or not empty_lbl.winfo_exists():
+                self._dl_hist_empty_lbl = tk.Label(
+                    frame, text="— 다운로드 기록 없음 —",
+                    font=("Consolas", self.F_MONO_S),
+                    bg=self.BG, fg=self.TEXT_DIM,
+                    pady=round(12 * r))
+                if mw_fn:
+                    self._dl_hist_empty_lbl.bind("<MouseWheel>", mw_fn)
+                self._dl_hist_empty_lbl.pack()
+            else:
+                self._dl_hist_empty_lbl.pack()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            return
+        else:
+            if empty_lbl is not None:
+                try:
+                    empty_lbl.pack_forget()
+                except Exception:
+                    pass
+
+        # 캐시 부족 시 새 행 생성
+        while len(cache) < len(entries):
+            idx    = len(cache)
+            row_bg = self.BG2 if idx % 2 == 0 else self.BG3
+            btn_bg = self.BG3 if idx % 2 == 0 else self.BG2
+
+            row  = tk.Frame(frame, bg=row_bg, pady=round(4 * r))
+            info = tk.Frame(row, bg=row_bg)
+            info.pack(side="left", fill="x", expand=True,
+                      padx=(round(8 * r), 0))
+
+            status_lbl = tk.Label(info, text="",
+                                  font=("Consolas", self.F_MONO_S, "bold"),
+                                  bg=row_bg, fg=self.TEXT, anchor="w")
+            status_lbl.pack(anchor="w")
+
+            ts_lbl = tk.Label(info, text="",
+                              font=("Consolas", max(6, self.F_MONO_S - 1)),
+                              bg=row_bg, fg=self.TEXT_DIM, anchor="w")
+            ts_lbl.pack(anchor="w")
+
+            del_btn = tk.Button(
+                row, text="🗑",
+                font=("Consolas", max(7, round(8 * r))),
+                bg=btn_bg, fg=self.TEXT,
+                activebackground=self.BORDER,
+                relief="flat", cursor="hand2",
+                padx=round(4 * r), pady=round(2 * r))
+            del_btn.pack(side="right", anchor="center",
+                         padx=(0, round(4 * r)))
+
+            open_btn = tk.Button(
+                row, text="📂 열기",
+                font=("Consolas", max(7, round(8 * r))),
+                bg=btn_bg, fg=self.TEXT_MID,
+                activebackground=self.BORDER,
+                relief="flat", cursor="hand2",
+                padx=round(4 * r), pady=round(2 * r))
+            open_btn.pack(side="right", anchor="center",
+                          padx=(0, round(2 * r)))
+
+            if mw_fn:
+                for w in (row, info, status_lbl, ts_lbl, del_btn, open_btn):
+                    w.bind("<MouseWheel>", mw_fn)
+
+            cache.append({"row": row, "info": info,
+                          "status_lbl": status_lbl, "ts_lbl": ts_lbl,
+                          "open_btn": open_btn, "del_btn": del_btn})
+
+        # 행 내용 업데이트
+        for i, rec in enumerate(entries):
+            url     = rec.get("url",       "")
+            title   = rec.get("title",     "")
+            dl_dir  = rec.get("dl_dir",    "")
+            ts      = rec.get("timestamp", "")
+            status  = rec.get("status",    "")
+            cached  = cache[i]
+
+            # 상태 색상 + 제목/URL 표시 (아이콘 없이 색상으로 구분)
+            label = title if title else url
+            if not title and len(label) > 50:
+                label = label[:47] + "…"
+            _fg = self.ACCENT3 if status == "success" else self.ACCENT2
+            cached["status_lbl"].config(text=label, fg=_fg)
+            cached["ts_lbl"].config(text=ts)
+
+            # 폴더 열기 버튼
+            _dir = dl_dir if dl_dir and os.path.isdir(dl_dir) else ""
+            if _dir:
+                cached["open_btn"].config(
+                    state="normal",
+                    command=lambda d=_dir: os.startfile(d)
+                    if os.name == "nt" else
+                    __import__("subprocess").Popen(["xdg-open", d]))
+            else:
+                cached["open_btn"].config(state="disabled")
+
+            cached["del_btn"].config(
+                command=lambda t=ts: self._dl_hist_delete_one(t))
+            cached["row"].pack(fill="x", pady=(0, 1))
+
+        # 남는 캐시 행 제거
+        for i in range(len(entries), len(cache)):
+            try:
+                cache[i]["row"].destroy()
+            except Exception:
+                pass
+        del cache[len(entries):]
+
+        cw = canvas.winfo_width()
+        if cw > 1:
+            canvas.itemconfig(self._dl_hist_canvas_window, width=cw)
+        canvas.configure(scrollregion=canvas.bbox("all"))
 
     # ── PotPlayer 부가 파일 자동 설치 ────────────────────────────────────────
 
@@ -1261,7 +1457,10 @@ class LipSyncGUILogic:
                             "--autoplay-policy=no-user-gesture-required",
                         ])
                     _ctx = _browser.new_context(
-                        user_agent=_UA,
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0.0.0 Safari/537.36"),
                         ignore_https_errors=True)
 
                 # ── [개선1] request + response 양쪽에서 m3u8 감지 ──────────
@@ -1437,20 +1636,13 @@ class LipSyncGUILogic:
                     _try_video_play()
 
                 # ── m3u8 감지될 때까지 최대 20초 폴링 ────────────────────
-                _deadline      = _tm.time() + 20
-                _last_retry_at = 0   # video.play() 재시도 마지막 구간 기록
+                _deadline = _tm.time() + 20
                 while not _found_info and _tm.time() < _deadline:
                     _tm.sleep(0.5)
-                    # 5초·10초 구간에 video.play() 재시도
-                    # 부동소수점 오차로 정확히 5.0/10.0이 되지 않으므로
-                    # ±0.4초 허용 범위(0.5초 sleep 주기의 절반 미만)로 비교한다.
+                    # 5초, 10초 시점에 video.play() 재시도
                     _elapsed = 20 - (_deadline - _tm.time())
-                    for _target in (5, 10):
-                        if (abs(_elapsed - _target) < 0.4
-                                and _last_retry_at != _target):
-                            _last_retry_at = _target
-                            _try_video_play()
-                            break
+                    if _elapsed in (5.0, 10.0):
+                        _try_video_play()
 
                 # ── 쿠키 수집 ─────────────────────────────────────────────
                 try:
@@ -1524,7 +1716,10 @@ class LipSyncGUILogic:
             req = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": _UA,
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"),
                     "Accept-Language": "ko-KR,ko;q=0.9",
                 })
             with urllib.request.urlopen(req, timeout=8) as resp:
@@ -1605,6 +1800,9 @@ class LipSyncGUILogic:
 
         # ① 취소 플래그 설정 (worker thread 의 post-wait 처리에서 감지)
         self._link_save_cancelled = True
+
+        # 배치 다운로드 중이면 큐를 비워 다음 URL로 넘어가지 않도록 한다.
+        self._link_batch_queue = collections.deque()
 
         # ② yt-dlp + 자식 프로세스(ffmpeg) 전체 강제 종료
         proc = getattr(self, "_link_save_proc", None)
@@ -1750,6 +1948,107 @@ class LipSyncGUILogic:
         threading.Thread(
             target=_cleanup, daemon=True, name="dl-cancel-cleanup").start()
 
+    def _link_batch_save_popup(self):
+        """URL 목록을 받아 순차적으로 저장하는 팝업을 표시한다."""
+        popup = tk.Toplevel(self.root)
+        popup.title("연속 다운로드")
+        popup.resizable(False, True)
+        popup.configure(bg=self.BG)
+        popup.withdraw()
+
+        r   = self.SCALES.get(self._scale_var.get(), self.SCALES["소"])["scale"]
+        pw  = round(340 * r)
+        ph  = round(300 * r)
+        FT  = max(9, round(11 * r))
+        FM  = max(8, round(9  * r))
+        P   = round(10 * r)
+
+        tk.Label(popup, text="연속 다운로드",
+                 font=("Segoe UI", FT, "bold"),
+                 bg=self.BG, fg=self.TEXT).pack(pady=(P, 0))
+        tk.Frame(popup, bg=self.BORDER, height=1).pack(
+            fill="x", pady=(round(6 * r), 0))
+        tk.Label(popup, text="URL을 한 줄에 하나씩 입력하세요.",
+                 font=("Consolas", FM),
+                 bg=self.BG, fg=self.TEXT_MID).pack(
+            anchor="w", padx=P, pady=(round(8 * r), round(2 * r)))
+
+        txt_frame = tk.Frame(popup, bg=self.BG2, padx=2, pady=2)
+        txt_frame.pack(fill="both", expand=True, padx=P)
+        _sb = tk.Scrollbar(txt_frame)
+        _sb.pack(side="right", fill="y")
+        _txt = tk.Text(txt_frame,
+                       font=("Consolas", FM),
+                       bg=self.BG2, fg=self.TEXT,
+                       insertbackground=self.ACCENT,
+                       selectbackground=self.BG3,
+                       relief="flat", bd=0, wrap="none",
+                       yscrollcommand=_sb.set)
+        _txt.pack(side="left", fill="both", expand=True)
+        _sb.config(command=_txt.yview)
+
+        _cur = self._link_url_var.get().strip()
+        if _cur:
+            _txt.insert("end", _cur + "\n")
+
+        _status_lbl = tk.Label(popup, text="",
+                               font=("Consolas", max(7, FM - 1)),
+                               bg=self.BG, fg=self.TEXT_DIM)
+        _status_lbl.pack(anchor="w", padx=P, pady=(round(4 * r), 0))
+
+        BTN = dict(font=("Consolas", FM, "bold"), relief="flat", cursor="hand2",
+                   padx=round(14 * r), pady=round(5 * r))
+        btn_f = tk.Frame(popup, bg=self.BG)
+        btn_f.pack(pady=P)
+
+        def _update_status(done: int, total: int, finished: bool = False):
+            try:
+                if finished:
+                    _status_lbl.config(text=f"✓ 전체 {total}개 완료",
+                                       fg=self.ACCENT3)
+                else:
+                    _status_lbl.config(text=f"⬇ {done}/{total} 다운로드 중…",
+                                       fg=self.ACCENT3)
+            except Exception:
+                pass
+
+        def _on_start():
+            urls = [u.strip() for u in _txt.get("1.0", "end").splitlines()
+                    if u.strip().startswith("http")]
+            if not urls:
+                _status_lbl.config(text="⚠ 유효한 URL이 없습니다.", fg=self.ACCENT2)
+                return
+            _total = len(urls)
+            self._link_batch_queue     = collections.deque(urls[1:])
+            self._link_batch_total     = _total
+            self._link_batch_status_cb = _update_status
+            _update_status(1, _total)
+            _start_btn.config(state="disabled")
+            _txt.config(state="disabled")
+            self._link_url_var.set(urls[0])
+            self._link_save()
+
+        def _on_close():
+            self._link_batch_queue     = collections.deque()
+            self._link_batch_status_cb = None
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+
+        _start_btn = tk.Button(btn_f, text="▶ 시작",
+                               bg=self.BG3, fg=self.ACCENT,
+                               activebackground=self.BORDER,
+                               command=_on_start, **BTN)
+        _start_btn.pack(side="left", padx=round(6 * r))
+        tk.Button(btn_f, text="닫기",
+                  bg=self.BG3, fg=self.TEXT,
+                  activebackground=self.BORDER,
+                  command=_on_close, **BTN).pack(side="left", padx=round(6 * r))
+
+        popup.protocol("WM_DELETE_WINDOW", _on_close)
+        self._place_popup(popup, pw, ph)
+
     def _link_save(self):
         """저장 버튼 콜백 — yt-dlp + ffmpeg를 사용해 최고 화질로 저장한다.
         두 실행파일이 없으면 최초 1회 자동 다운로드 후 APP_DIR에 캐시한다.
@@ -1782,19 +2081,13 @@ class LipSyncGUILogic:
         except Exception:
             dl_dir = self.APP_DIR
 
-        # 스레드 시작 전 즉시 버튼 비활성화 — after(0) 비동기 처리 시
-        # 더블클릭으로 중복 실행되는 경쟁 조건을 방지한다.
-        try:
-            self._link_save_btn.config(state="disabled")
-        except Exception:
-            pass
-
         def _run():
             ts = _time.strftime("%H:%M:%S")
             # 취소 플래그 초기화 + 파일 추적 셋 초기화
             self._link_save_cancelled     = False
             self._link_save_tracked_files = set()
             self._link_save_dl_dir        = dl_dir
+            self._dl_current_title        = ""   # 현재 다운로드 제목 초기화
             try:
                 # ── 1) yt-dlp / ffmpeg / N_m3u8DL-RE 병렬 확보 ───────────────
                 import concurrent.futures as _cf
@@ -1965,12 +2258,23 @@ class LipSyncGUILogic:
                         ytdlp_cmd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
+                        # 바이너리 모드: UTF-8 출력이 보장되지 않는 Windows 환경에서
+                        # CP949(한국어) 등 다른 인코딩을 폴백으로 처리하기 위해
+                        # text=True 를 사용하지 않고 직접 디코딩한다.
                         creationflags=0x08000000,  # CREATE_NO_WINDOW
                     )
                     self._link_save_proc = _p
+
+                    def _decode_line(b: bytes) -> str:
+                        """UTF-8 우선, 실패 시 CP949(한국어 Windows 기본값) 폴백."""
+                        try:
+                            return b.decode("utf-8")
+                        except UnicodeDecodeError:
+                            try:
+                                return b.decode("cp949")
+                            except UnicodeDecodeError:
+                                return b.decode("utf-8", errors="replace")
+
                     _lines  = []
                     _pl_cur   = 0
                     _pl_total = 0
@@ -1978,15 +2282,15 @@ class LipSyncGUILogic:
                     # ffmpeg 는 진행률을 \r 로 출력하므로 readline() 이 블로킹되고
                     # 파이프 버퍼가 가득 차 데드락이 발생한다.
                     # 청크 단위로 읽어 \r·\n 모두 분리하는 방식으로 해결한다.
-                    _rbuf = ""
+                    _rbuf = b""
                     while True:
                         _chunk = _p.stdout.read(512)
                         if not _chunk:
                             break
                         _rbuf += _chunk
                         while True:
-                            _ni = _rbuf.find('\n')
-                            _ri = _rbuf.find('\r')
+                            _ni = _rbuf.find(b'\n')
+                            _ri = _rbuf.find(b'\r')
                             if _ni == -1 and _ri == -1:
                                 break
                             if _ni == -1:
@@ -1996,10 +2300,8 @@ class LipSyncGUILogic:
                             else:
                                 _idx  = min(_ni, _ri)
                                 # \r\n 을 한 줄로 처리
-                                _skip = 2 if (_rbuf[_idx] == '\r'
-                                              and _idx + 1 < len(_rbuf)
-                                              and _rbuf[_idx + 1] == '\n') else 1
-                            _ln   = _rbuf[:_idx]
+                                _skip = 2 if (_rbuf[_idx:_idx + 2] == b'\r\n') else 1
+                            _ln   = _decode_line(_rbuf[:_idx])
                             _rbuf = _rbuf[_idx + _skip:]
 
                             if not _ln.strip():
@@ -2024,6 +2326,11 @@ class LipSyncGUILogic:
                                 self.root.after(
                                     0, lambda p=_pct, i=_info:
                                         self._dl_progress_update(p, i))
+                                # ffmpeg 병합 후 다음 파일 다운로드 시작 시
+                                # 상태 레이블이 "ffmpeg 병합 중…"에 고착되는
+                                # 증상을 방지한다.
+                                self.root.after(0, lambda: self._link_status(
+                                    "⬇ 동영상을 저장하고 있습니다."))
                             # ── ffmpeg 병합 단계 감지 → 상태 메시지 표시 ────────
                             elif re.search(r'\[(?:Merger|ffmpeg)\]', _ln):
                                 self.root.after(0, lambda: self._link_status(
@@ -2039,6 +2346,9 @@ class LipSyncGUILogic:
                                 _tp = _mf.group(1).strip().strip('"')
                                 self._link_save_tracked_files.add(_tp)
                                 dest_file = _tp
+                                # 다운로드 기록 탭 현재 제목 업데이트
+                                self._dl_current_title = os.path.splitext(
+                                    os.path.basename(_tp))[0]
                             _lines.append(_ln)
                     _p.wait()
                     self._link_save_proc = None
@@ -2345,6 +2655,9 @@ class LipSyncGUILogic:
                         self._log_lines.append(
                             f"[{ts}] 🔗 [2단계] m3u8 감지: {_pw_m3u8[:80]} "
                             f"| 제목: {_safe_title[:40]!r}")
+                        # 다운로드 기록 탭 현재 제목 업데이트
+                        if _safe_title:
+                            self._dl_current_title = _safe_title
 
                         # ── 2-a: N_m3u8DL-RE 다운로드 ────────────────────
                         self.root.after(0, lambda: self._link_status(
@@ -2543,6 +2856,15 @@ class LipSyncGUILogic:
                     self.root.after(2500, self._dl_progress_hide)
                     self._log_lines.append(
                         f"[{ts}] ✅ 저장 완료 ({_final_step}) | 원본 URL: {url}")
+                    # 다운로드 기록 저장
+                    _rec_title = ""
+                    if isinstance(locals().get("_pw_result"), dict):
+                        _rec_title = locals()["_pw_result"].get("title", "")
+                    if not _rec_title and isinstance(
+                            locals().get("dest_file"), str):
+                        _rec_title = os.path.splitext(
+                            os.path.basename(locals()["dest_file"]))[0]
+                    self._save_dl_history_entry(url, _rec_title, dl_dir, "success")
 
                     # ── 자막 다운로드 (영상+자막 선택 시) ───────────────────
                     if _save_with_sub:
@@ -2577,7 +2899,9 @@ class LipSyncGUILogic:
                                     _sdest = os.path.join(dl_dir, f"{_sname}.{_ext}")
                                     try:
                                         _req = _ureq.Request(_su, headers={
-                                            "User-Agent": _UA,
+                                            "User-Agent": (
+                                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                                "AppleWebKit/537.36 Chrome/124.0 Safari/537.36"),
                                             **{k: v for k, v in _shdrs.items()
                                                if k.lower() in (
                                                    "referer", "origin",
@@ -2653,6 +2977,8 @@ class LipSyncGUILogic:
                     self._log_lines.append(
                         f"[{ts}] ❌ 저장 실패 — 모든 방법 소진 "
                         f"(마지막 시도: {_final_step}) | 원본 URL: {url}")
+                    # 다운로드 기록 저장 (실패)
+                    self._save_dl_history_entry(url, "", dl_dir, "failed")
 
             except Exception as e:
                 _err = str(e)
@@ -2667,67 +2993,75 @@ class LipSyncGUILogic:
                 # (여기서 중복 처리하면 "⏹ 저장 중단" 메시지가 덮어쓰여짐)
                 if not getattr(self, "_link_save_cancelled", False):
                     self.root.after(0, self._dl_stop_btn_hide)
-                    self.root.after(0, lambda: self._link_save_btn.config(state="normal"))
+                    # 배치 큐에 다음 URL이 있으면 자동으로 이어서 시작
+                    _batch_q = getattr(self, "_link_batch_queue", None)
+                    if _batch_q:
+                        _next_url  = _batch_q.popleft()
+                        _total     = getattr(self, "_link_batch_total", 0)
+                        _done      = _total - len(_batch_q)
+                        _cb        = getattr(self, "_link_batch_status_cb", None)
+                        if _cb:
+                            self.root.after(0, lambda d=_done, t=_total: _cb(d, t))
+                        self.root.after(0, lambda u=_next_url:
+                                        self._link_url_var.set(u))
+                        self.root.after(300, self._link_save)
+                    else:
+                        # 배치 전체 완료 또는 단일 저장 완료
+                        _total = getattr(self, "_link_batch_total", 0)
+                        if _total > 1:
+                            _cb = getattr(self, "_link_batch_status_cb", None)
+                            if _cb:
+                                self.root.after(
+                                    0, lambda t=_total: _cb(t, t, finished=True))
+                            self._link_batch_total     = 0
+                            self._link_batch_status_cb = None
+                        self.root.after(
+                            0, lambda: self._link_save_btn.config(state="normal"))
 
         threading.Thread(target=_run, daemon=True, name="yt-dlp-save").start()
 
     def _dl_progress_show(self):
-        """다운로드 진행 UI 표시."""
-        dl_row = getattr(self, "_dl_row", None)
-        if dl_row:
-            try:
-                dl_row.pack(fill="x", pady=(round(2), 0))
-            except Exception:
-                pass
-        lbl = getattr(self, "_dl_pct_lbl", None)
-        if lbl:
-            try:
-                lbl.config(text="0%")
-            except Exception:
-                pass
-        bar = getattr(self, "_dl_bar", None)
-        if bar:
-            try:
-                bar.place(x=0, y=0, width=0, height=8)
-            except Exception:
-                pass
+        """다운로드 시작 시 호출 (상단 게이지 제거 후 no-op)."""
+        pass
 
     def _dl_progress_hide(self):
-        """다운로드 진행 UI 숨기기."""
-        dl_row = getattr(self, "_dl_row", None)
-        if dl_row:
+        """다운로드 완료/실패 시 현재 다운로드 표시 초기화."""
+        self._dl_current_title = ""
+        title_lbl = getattr(self, "_dl_current_title_lbl", None)
+        pct_lbl   = getattr(self, "_dl_current_pct_lbl",   None)
+        if title_lbl:
             try:
-                dl_row.pack_forget()
+                if title_lbl.winfo_exists():
+                    title_lbl.config(text="다운로드 없음", fg=self.TEXT_DIM)
             except Exception:
                 pass
-        bar = getattr(self, "_dl_bar", None)
-        if bar:
+        if pct_lbl:
             try:
-                bar.place(x=0, y=0, width=0, height=8)
+                if pct_lbl.winfo_exists():
+                    pct_lbl.config(text="")
             except Exception:
                 pass
 
     def _dl_progress_update(self, pct: float, playlist_info: str = ""):
         """다운로드 진행률(0–100) 업데이트.
         playlist_info: 재생목록일 때 '(현재/전체)' 문자열, 단일 영상이면 빈 문자열.
+        상단 게이지/% 는 제거되었으므로 다운로드 기록 탭 레이블만 갱신한다.
         """
-        bar_bg = getattr(self, "_dl_bar_bg", None)
-        bar    = getattr(self, "_dl_bar",    None)
-        lbl    = getattr(self, "_dl_pct_lbl", None)
-        if bar_bg and bar:
+        title_lbl = getattr(self, "_dl_current_title_lbl", None)
+        pct_lbl   = getattr(self, "_dl_current_pct_lbl",   None)
+        if title_lbl and pct_lbl:
             try:
-                bar_bg.update_idletasks()
-                w       = bar_bg.winfo_width()
-                fill_w  = max(0, int(w * pct / 100))
-                bar.place(x=0, y=0, width=fill_w, height=8)
-            except Exception:
-                pass
-        if lbl:
-            try:
-                txt = f"{pct:.1f}%"
-                if playlist_info:
-                    txt += f"  {playlist_info}"
-                lbl.config(text=txt)
+                if title_lbl.winfo_exists() and pct_lbl.winfo_exists():
+                    _title = getattr(self, "_dl_current_title", "")
+                    # 제목 레이블
+                    title_lbl.config(
+                        text=_title if _title else "다운로드 중…",
+                        fg=self.TEXT)
+                    # 퍼센트 + 재생목록 카운터 (녹색)
+                    _pct_text = f"{pct:.0f}%"
+                    if playlist_info:
+                        _pct_text += f" {playlist_info}"
+                    pct_lbl.config(text=_pct_text)
             except Exception:
                 pass
 
